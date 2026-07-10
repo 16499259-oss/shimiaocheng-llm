@@ -96,16 +96,16 @@ async function shareUser(username, id) {
             document.getElementById('subkey-value').textContent = subKey;
 
             const shareText = [
-                '🎉 你的 LLM API 账户已开通！',
+                '你的 LLM API 账户已开通！',
                 '',
-                '🔑 Key：' + subKey,
+                'Key：' + subKey,
                 '',
-                '📡 Base URL：https://ai.shimiaocheng.top/v1',
+                'Base URL：https://ai.shimiaocheng.top/v1',
                 '   （Cursor / ChatBox / 所有 OpenAI 客户端均填此项）',
                 '',
                 '模型名称：GLM-5.2',
                 '',
-                '📖 自助面板（查余量、看用法）：',
+                '自助面板（查余量、看用法）：',
                 '   https://ai.shimiaocheng.top/user/'
             ].join('\n');
             document.getElementById('share-all-text').value = shareText;
@@ -190,16 +190,16 @@ async function createUser(e) {
             document.getElementById('subkey-value').textContent = subKey;
 
             const shareText = [
-                '🎉 你的 LLM API 账户已开通！',
+                '你的 LLM API 账户已开通！',
                 '',
-                '🔑 Key：' + subKey,
+                'Key：' + subKey,
                 '',
-                '📡 Base URL：https://ai.shimiaocheng.top/v1',
+                'Base URL：https://ai.shimiaocheng.top/v1',
                 '   （Cursor / ChatBox / 所有 OpenAI 客户端均填此项）',
                 '',
                 '模型名称：GLM-5.2',
                 '',
-                '📖 自助面板（查余量、看用法）：',
+                '自助面板（查余量、看用法）：',
                 '   https://ai.shimiaocheng.top/user/'
             ].join('\n');
             document.getElementById('share-all-text').value = shareText;
@@ -261,16 +261,16 @@ async function updateUser(e) {
             document.getElementById('subkey-value').textContent = subKey;
 
             const shareText = [
-                '🎉 你的 LLM API Key 已更新！',
+                '你的 LLM API Key 已更新！',
                 '',
-                '🔑 新 Key：' + subKey,
+                '新 Key：' + subKey,
                 '',
-                '📡 Base URL：https://ai.shimiaocheng.top/v1',
+                'Base URL：https://ai.shimiaocheng.top/v1',
                 '   （Cursor / ChatBox / 所有 OpenAI 客户端均填此项）',
                 '',
                 '模型名称：GLM-5.2',
                 '',
-                '📖 自助面板：https://ai.shimiaocheng.top/user/'
+                '自助面板：https://ai.shimiaocheng.top/user/'
             ].join('\n');
             document.getElementById('share-all-text').value = shareText;
 
