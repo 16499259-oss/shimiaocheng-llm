@@ -73,23 +73,51 @@ async function loadOverview() {
 }
 
 // ===== Share existing user =====
-function shareUser(username, id) {
-    document.getElementById('subkey-value').textContent = '创建时已展示，如需新 Key 请点编辑 → 重新生成';
+async function shareUser(username, id) {
+    // Key is hashed, must regenerate to show plaintext
+    if (!confirm(`查看 ${username} 的 Key 需要重新生成密钥（旧 Key 将立即失效），确定继续？`)) {
+        return;
+    }
 
-    const shareText = [
-        '🎉 你的 LLM API 账户已开通！',
-        '',
-        '📡 API 端点：https://ai.shimiaocheng.top/v1/chat/completions',
-        '',
-        '🤖 可用模型：glm-5.2, glm-4, glm-4-flash, glm-4v, glm-4-plus',
-        '',
-        '📖 自助面板（查余量、看用法）：',
-        '   https://ai.shimiaocheng.top/user/',
-        '',
-        '🔑 Key 在创建账户时已展示，如遗失请联系管理员重新生成。'
-    ].join('\n');
-    document.getElementById('share-all-text').value = shareText;
+    // Show modal with loading state
+    document.getElementById('subkey-value').textContent = '正在生成新 Key...';
+    document.getElementById('share-all-text').value = '加载中...';
     showModal('subkey-modal');
+
+    try {
+        const data = await apiFetch(`api/users/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ regenerate_key: true }),
+        });
+
+        if (data && data.new_sub_key) {
+            const subKey = data.new_sub_key;
+            document.getElementById('subkey-value').textContent = subKey;
+
+            const shareText = [
+                '🎉 你的 LLM API 账户已开通！',
+                '',
+                '🔑 Key：' + subKey,
+                '',
+                '📡 API 端点：https://ai.shimiaocheng.top/v1/chat/completions',
+                '',
+                '模型名称：GLM-5.2',
+                '',
+                '📖 自助面板（查余量、看用法）：',
+                '   https://ai.shimiaocheng.top/user/'
+            ].join('\n');
+            document.getElementById('share-all-text').value = shareText;
+        } else {
+            document.getElementById('subkey-value').textContent = '生成失败，请重试';
+            document.getElementById('share-all-text').value = '生成失败，请重试';
+        }
+
+        loadUsers();
+    } catch (err) {
+        document.getElementById('subkey-value').textContent = '生成失败: ' + err.message;
+        document.getElementById('share-all-text').value = '错误: ' + err.message;
+    }
 }
 
 // ===== Users =====
@@ -166,7 +194,7 @@ async function createUser(e) {
                 '',
                 '📡 API 端点：https://ai.shimiaocheng.top/v1/chat/completions',
                 '',
-                '🤖 可用模型：glm-5.2, glm-4, glm-4-flash, glm-4v, glm-4-plus',
+                '模型名称：GLM-5.2',
                 '',
                 '📖 自助面板（查余量、看用法）：',
                 '   https://ai.shimiaocheng.top/user/'
@@ -236,7 +264,7 @@ async function updateUser(e) {
                 '',
                 '📡 API 端点：https://ai.shimiaocheng.top/v1/chat/completions',
                 '',
-                '🤖 可用模型：glm-5.2, glm-4, glm-4-flash, glm-4v, glm-4-plus',
+                '模型名称：GLM-5.2',
                 '',
                 '📖 自助面板：https://ai.shimiaocheng.top/user/'
             ].join('\n');
