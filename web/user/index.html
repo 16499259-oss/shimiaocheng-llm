@@ -223,9 +223,17 @@ function renderDashboard(data) {
         <div class="progress-bar"><div class="progress-fill ${cls5h}" style="width:${pct5h}%"></div></div>
         <div class="stat-row">
             <span class="stat-label">总配额</span>
-            <span class="stat-value ${clsTotal}">${data.quota_total_used} / ${data.quota_total_limit} 次</span>
+            <span class="stat-value ${clsTotal}">${data.quota_total_used.toLocaleString()} / ${data.quota_total_limit.toLocaleString()} 次</span>
         </div>
         <div class="progress-bar"><div class="progress-fill ${clsTotal}" style="width:${pctTotal}%"></div></div>
+        <div class="stat-row">
+            <span class="stat-label">累计 Token</span>
+            <span class="stat-value">${(data.total_tokens || 0).toLocaleString()}</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">今日 Token</span>
+            <span class="stat-value">${(data.total_tokens_today || 0).toLocaleString()}</span>
+        </div>
         <div class="stat-row">
             <span class="stat-label">下次重置</span>
             <span class="stat-value">${new Date(data.window_reset_at).toLocaleString('zh-CN')}</span>

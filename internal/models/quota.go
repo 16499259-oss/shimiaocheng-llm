@@ -26,6 +26,8 @@ type QuotaStatus struct {
 	QuotaTotalLimit   int    `json:"quota_total_limit"`
 	QuotaTotalUsed    int    `json:"quota_total_used"`
 	QuotaTotalRemaining int  `json:"quota_total_remaining"`
+	TotalTokens         int64 `json:"total_tokens"`
+	TotalTokensToday    int64 `json:"total_tokens_today"`
 	WindowResetAt     string `json:"window_reset_at"`
 	Status            string `json:"status"`
 }

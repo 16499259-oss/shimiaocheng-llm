@@ -73,6 +73,14 @@ func (h *QuotaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Status:              user.Status,
 	}
 
+	// Query token stats for this user
+	var totalTokens, totalTokensToday int64
+	today := time.Now().Format("2006-01-02")
+	h.DB.QueryRow(`SELECT COALESCE(SUM(total_tokens), 0) FROM call_logs WHERE user_id = ?`, userID).Scan(&totalTokens)
+	h.DB.QueryRow(`SELECT COALESCE(SUM(total_tokens), 0) FROM call_logs WHERE user_id = ? AND created_at >= ?`, userID, today).Scan(&totalTokensToday)
+	status.TotalTokens = totalTokens
+	status.TotalTokensToday = totalTokensToday
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
