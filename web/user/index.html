@@ -127,12 +127,6 @@ print(response.json())</pre>
             </div>
         </div>
 
-        <!-- Call Logs Card -->
-        <div class="card">
-            <div class="card-header">📜 调用记录 <button id="load-calls-btn" onclick="loadCallLogs()" style="padding:4px 12px;font-size:0.8rem;background:var(--primary);color:#fff;border:none;border-radius:4px;cursor:pointer;margin-left:auto;">加载记录</button></div>
-            <div id="calls-table" style="margin-top:8px;"></div>
-        </div>
-
         <button onclick="logout()" style="background: var(--text-secondary); margin-top: 12px;">退出</button>
     </div>
 </div>
@@ -276,52 +270,6 @@ function logout() {
     $('sub-key-input').value = '';
     $('dashboard-card').classList.add('hidden');
     $('login-card').classList.remove('hidden');
-}
-
-async function loadCallLogs() {
-    const btn = $('load-calls-btn');
-    btn.disabled = true;
-    btn.textContent = '加载中...';
-
-    try {
-        const resp = await fetch(`${API_BASE}/v1/calls?limit=20`, {
-            headers: { 'Authorization': `Bearer ${currentKey}` }
-        });
-        if (!resp.ok) throw new Error('加载失败');
-        const result = await resp.json();
-
-        if (!result.data || result.data.length === 0) {
-            $('calls-table').innerHTML = '<p style="color:var(--text-secondary);font-size:0.85rem;">暂无调用记录</p>';
-            return;
-        }
-
-        let html = '<table style="width:100%;font-size:0.8rem;border-collapse:collapse;">';
-        html += '<thead><tr style="border-bottom:1px solid var(--border);text-align:left;">';
-        html += '<th style="padding:6px 4px;">时间</th><th style="padding:6px 4px;">模型</th><th style="padding:6px 4px;text-align:right;">Token</th><th style="padding:6px 4px;text-align:right;">消耗次数</th><th style="padding:6px 4px;text-align:right;">延迟</th><th style="padding:6px 4px;">状态</th>';
-        html += '</tr></thead><tbody>';
-
-        result.data.forEach(c => {
-            const time = new Date(c.created_at).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
-            const statusIcon = c.status_code === 200 ? '✅' : (c.status_code >= 400 ? '❌' : '⚠️');
-            const latency = c.latency_ms > 1000 ? (c.latency_ms/1000).toFixed(1)+'s' : c.latency_ms+'ms';
-            html += `<tr style="border-bottom:1px solid var(--border);">
-                <td style="padding:6px 4px;">${time}</td>
-                <td style="padding:6px 4px;">${c.model}</td>
-                <td style="padding:6px 4px;text-align:right;">${c.total_tokens.toLocaleString()}</td>
-                <td style="padding:6px 4px;text-align:right;">${c.effective_calls}</td>
-                <td style="padding:6px 4px;text-align:right;">${latency}</td>
-                <td style="padding:6px 4px;">${statusIcon} ${c.status_code}</td>
-            </tr>`;
-        });
-
-        html += '</tbody></table>';
-        $('calls-table').innerHTML = html;
-    } catch (err) {
-        $('calls-table').innerHTML = `<p style="color:var(--error);font-size:0.85rem;">加载失败: ${err.message}</p>`;
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '刷新记录';
-    }
 }
 
 // Allow Enter key to submit
