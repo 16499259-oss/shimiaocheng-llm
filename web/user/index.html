@@ -69,7 +69,7 @@
     <div id="dashboard-card" class="hidden">
         <!-- Quota Overview -->
         <div class="card">
-            <div class="card-header">📊 配额概览</div>
+            <div class="card-header">📊 配额概览 <button id="refresh-btn" onclick="refreshQuota()" style="padding:4px 12px;font-size:0.8rem;background:var(--primary);color:#fff;border:none;border-radius:4px;cursor:pointer;margin-left:auto;">🔄 刷新配额</button></div>
             <div id="quota-stats"></div>
         </div>
 
@@ -133,9 +133,20 @@ print(response.json())</pre>
 
 <script>
 const API_BASE = 'https://ai.shimiaocheng.top';
+const STORAGE_KEY = 'llm_gw_key';
 let currentKey = '';
 
 function $(id) { return document.getElementById(id); }
+
+// Auto-login if key is saved
+document.addEventListener('DOMContentLoaded', () => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved && saved.startsWith('sk-')) {
+        currentKey = saved;
+        $('sub-key-input').value = saved;
+        fetchQuota();
+    }
+});
 
 async function doLogin() {
     const key = $('sub-key-input').value.trim();
@@ -143,7 +154,11 @@ async function doLogin() {
         showError('请输入有效的 Key（以 sk- 开头）');
         return;
     }
+    currentKey = key;
+    fetchQuota();
+}
 
+async function fetchQuota() {
     const btn = $('login-btn');
     btn.disabled = true;
     btn.textContent = '查询中...';
@@ -151,7 +166,7 @@ async function doLogin() {
 
     try {
         const resp = await fetch(`${API_BASE}/v1/quota`, {
-            headers: { 'Authorization': `Bearer ${key}` }
+            headers: { 'Authorization': `Bearer ${currentKey}` }
         });
 
         if (!resp.ok) {
@@ -160,15 +175,35 @@ async function doLogin() {
         }
 
         const data = await resp.json();
-        currentKey = key;
+        localStorage.setItem(STORAGE_KEY, currentKey);
         renderDashboard(data);
         $('login-card').classList.add('hidden');
         $('dashboard-card').classList.remove('hidden');
     } catch (err) {
         showError('验证失败: ' + err.message);
+        localStorage.removeItem(STORAGE_KEY);
     } finally {
         btn.disabled = false;
         btn.textContent = '查询配额';
+    }
+}
+
+async function refreshQuota() {
+    const btn = $('refresh-btn');
+    btn.disabled = true;
+    btn.textContent = '⏳ 刷新中...';
+    try {
+        const resp = await fetch(`${API_BASE}/v1/quota`, {
+            headers: { 'Authorization': `Bearer ${currentKey}` }
+        });
+        if (!resp.ok) throw new Error('刷新失败');
+        const data = await resp.json();
+        renderDashboard(data);
+    } catch (err) {
+        console.error('Refresh failed:', err);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '🔄 刷新配额';
     }
 }
 
@@ -223,6 +258,7 @@ function showError(msg) {
 
 function logout() {
     currentKey = '';
+    localStorage.removeItem(STORAGE_KEY);
     $('sub-key-input').value = '';
     $('dashboard-card').classList.add('hidden');
     $('login-card').classList.remove('hidden');
