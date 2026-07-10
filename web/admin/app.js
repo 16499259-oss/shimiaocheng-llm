@@ -72,6 +72,30 @@ async function loadOverview() {
     }
 }
 
+// ===== Share existing user =====
+function shareUser(username, id) {
+    document.getElementById('subkey-value').textContent = '创建时已展示，如需新 Key 请点编辑 → 重新生成';
+
+    const shareText = [
+        '🎉 你的 LLM API 已开通！',
+        '',
+        '📡 API 端点：https://ai.shimiaocheng.top/v1/chat/completions',
+        '',
+        '📖 自助面板（查余量、看用法）：',
+        '   https://ai.shimiaocheng.top/user/',
+        '',
+        '💡 使用方式：',
+        'curl https://ai.shimiaocheng.top/v1/chat/completions \\\\',
+        '  -H "Authorization: Bearer YOUR_KEY" \\\\',
+        '  -H "Content-Type: application/json" \\\\',
+        '  -d \'{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}]}\'',
+        '',
+        '🔑 你的 Key 在创建账户时已展示，如遗失请联系管理员重新生成。'
+    ].join('\n');
+    document.getElementById('share-all-text').value = shareText;
+    showModal('subkey-modal');
+}
+
 // ===== Users =====
 async function loadUsers() {
     try {
@@ -101,6 +125,7 @@ async function loadUsers() {
                     <td>${formatDate(u.created_at)}</td>
                     <td>
                         <div class="btn-group">
+                            <button class="btn btn-outline btn-sm" onclick="shareUser('${escapeAttr(u.username)}', ${u.id})">📋 分享</button>
                             <button class="btn btn-outline btn-sm" onclick="editUser(${u.id}, '${escapeAttr(u.status)}', ${u.quota_5h_limit}, ${u.quota_total_limit})">编辑</button>
                             <button class="btn btn-outline btn-sm" onclick="viewCalls(${u.id}, '${escapeAttr(u.username)}')">记录</button>
                         </div>
