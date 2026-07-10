@@ -2,11 +2,13 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"log"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"llm_api_gateway/internal/auth"
@@ -30,9 +32,91 @@ type ChatCompletionRequest struct {
 }
 
 // ChatMessage represents a single chat message.
+// Content uses json.RawMessage to accept both string and array-of-content-parts formats.
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}
+
+// ContentText extracts the text content from either string or array-of-parts format.
+func (m ChatMessage) ContentText() string {
+	// Try as plain string first
+	var s string
+	if err := json.Unmarshal(m.Content, &s); err == nil {
+		return s
+	}
+	// Try as array of content parts (OpenAI multimodal format)
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(m.Content, &parts); err == nil {
+		var texts []string
+		for _, p := range parts {
+			if p.Type == "text" && p.Text != "" {
+				texts = append(texts, p.Text)
+			}
+		}
+		return strings.Join(texts, "\n")
+	}
+	return string(m.Content)
+}
+
+// normalizeContentArrays converts any array-format content fields in the JSON body
+// to plain strings, so the upstream (Zhipu) receives simple string content.
+func normalizeContentArrays(body []byte) []byte {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return body
+	}
+
+	msgsRaw, ok := raw["messages"]
+	if !ok {
+		return body
+	}
+
+	var msgs []map[string]json.RawMessage
+	if err := json.Unmarshal(msgsRaw, &msgs); err != nil {
+		return body
+	}
+
+	changed := false
+	for i, msg := range msgs {
+		contentRaw, ok := msg["content"]
+		if !ok {
+			continue
+		}
+		trimmed := bytes.TrimSpace(contentRaw)
+		if len(trimmed) > 0 && trimmed[0] == '[' {
+			var parts []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(contentRaw, &parts); err == nil {
+				var texts []string
+				for _, p := range parts {
+					if p.Type == "text" && p.Text != "" {
+						texts = append(texts, p.Text)
+					}
+				}
+				newContent, _ := json.Marshal(strings.Join(texts, "\n"))
+				msgs[i]["content"] = newContent
+				changed = true
+			}
+		}
+	}
+
+	if !changed {
+		return body
+	}
+
+	newMsgs, _ := json.Marshal(msgs)
+	raw["messages"] = newMsgs
+	result, err := json.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return result
 }
 
 // ServeHTTP handles the /v1/chat/completions request.
@@ -54,6 +138,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var chatReq ChatCompletionRequest
 	if err := json.Unmarshal(bodyBytes, &chatReq); err != nil {
+		log.Printf("ERROR: Failed to parse JSON request body (len=%d): %v", len(bodyBytes), err)
+		if len(bodyBytes) > 500 {
+			log.Printf("DEBUG: Raw body (first 500 bytes): %s", string(bodyBytes[:500]))
+		} else {
+			log.Printf("DEBUG: Raw body: %s", string(bodyBytes))
+		}
 		writeProxyError(w, http.StatusBadRequest, "Invalid JSON request body", "bad_request")
 		return
 	}
@@ -61,6 +151,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if chatReq.Model == "" {
 		chatReq.Model = "glm-5.2"
 	}
+
+	// Normalize content arrays → strings (Cursor sends content as array-of-parts)
+	bodyBytes = normalizeContentArrays(bodyBytes)
 
 	// Get effective multiplier for the current time
 	multiplier := h.MultiplierEng.GetEffectiveMultiplier(time.Now())
