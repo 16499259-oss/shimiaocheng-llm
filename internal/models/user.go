@@ -27,7 +27,8 @@ type UserWithQuota struct {
 	Quota5hUsed    int    `json:"quota_5h_used"`
 	QuotaTotalLimit int   `json:"quota_total_limit"`
 	QuotaTotalUsed int    `json:"quota_total_used"`
-	SubKey         string `json:"sub_key,omitempty"` // only returned once on creation
+	TotalTokens    int64  `json:"total_tokens"`
+	SubKey         string `json:"sub_key,omitempty"`
 }
 
 // CreateUser inserts a new user and associated quota record.
@@ -146,8 +147,11 @@ func GetUserByUsername(db *sql.DB, username string) (*User, error) {
 func ListUsers(db *sql.DB) ([]UserWithQuota, error) {
 	rows, err := db.Query(
 		`SELECT u.id, u.username, u.sub_key_preview, u.role, u.status, u.created_at, u.updated_at,
-		        q.quota_5h_limit, q.quota_5h_used, q.quota_total_limit, q.quota_total_used
-		 FROM users u LEFT JOIN quotas q ON u.id = q.user_id
+		        q.quota_5h_limit, q.quota_5h_used, q.quota_total_limit, q.quota_total_used,
+		        COALESCE(t.total_tokens, 0) AS total_tokens
+		 FROM users u
+		 LEFT JOIN quotas q ON u.id = q.user_id
+		 LEFT JOIN (SELECT user_id, SUM(total_tokens) AS total_tokens FROM call_logs GROUP BY user_id) t ON u.id = t.user_id
 		 ORDER BY u.id DESC`,
 	)
 	if err != nil {
@@ -162,6 +166,7 @@ func ListUsers(db *sql.DB) ([]UserWithQuota, error) {
 			&uwq.ID, &uwq.Username, &uwq.SubKeyPreview, &uwq.Role, &uwq.Status,
 			&uwq.CreatedAt, &uwq.UpdatedAt,
 			&uwq.Quota5hLimit, &uwq.Quota5hUsed, &uwq.QuotaTotalLimit, &uwq.QuotaTotalUsed,
+			&uwq.TotalTokens,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)

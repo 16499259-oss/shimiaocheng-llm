@@ -110,6 +110,7 @@ async function loadUsers() {
         tbody.innerHTML = data.data.map(u => {
             const quota5h = `${u.quota_5h_used} / ${u.quota_5h_limit}`;
             const quotaTotal = `${u.quota_total_used.toLocaleString()} / ${u.quota_total_limit.toLocaleString()}`;
+            const tokens = (u.total_tokens || 0).toLocaleString();
             const statusBadge = u.status === 'active'
                 ? '<span class="badge badge-active">启用</span>'
                 : '<span class="badge badge-disabled">禁用</span>';
@@ -121,6 +122,7 @@ async function loadUsers() {
                     <td><code>${escapeHtml(u.sub_key_preview)}</code></td>
                     <td>${quota5h}</td>
                     <td>${quotaTotal}</td>
+                    <td>${tokens}</td>
                     <td>${statusBadge}</td>
                     <td>${formatDate(u.created_at)}</td>
                     <td>
