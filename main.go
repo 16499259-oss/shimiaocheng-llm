@@ -144,7 +144,11 @@ func main() {
 	// Build routes
 	mux := http.NewServeMux()
 
-	// Public API endpoints (with sub-key auth)
+	// Public API endpoints
+	modelsHandler := &proxy.ModelsHandler{}
+	mux.Handle("GET /v1/models", modelsHandler) // OpenAI-compatible model discovery (no auth)
+
+	// API endpoints requiring sub-key auth
 	mux.Handle("POST /v1/chat/completions", authMW.SubKeyAuth(proxyHandler))
 	mux.Handle("GET /v1/quota", authMW.SubKeyAuth(quotaQueryHandler))
 
