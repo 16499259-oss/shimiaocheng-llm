@@ -81,6 +81,8 @@ function shareUser(username, id) {
         '',
         '📡 API 端点：https://ai.shimiaocheng.top/v1/chat/completions',
         '',
+        '🤖 可用模型：glm-5.2, glm-4, glm-4-flash, glm-4v, glm-4-plus',
+        '',
         '📖 自助面板（查余量、看用法）：',
         '   https://ai.shimiaocheng.top/user/',
         '',
@@ -164,6 +166,8 @@ async function createUser(e) {
                 '',
                 '📡 API 端点：https://ai.shimiaocheng.top/v1/chat/completions',
                 '',
+                '🤖 可用模型：glm-5.2, glm-4, glm-4-flash, glm-4v, glm-4-plus',
+                '',
                 '📖 自助面板（查余量、看用法）：',
                 '   https://ai.shimiaocheng.top/user/'
             ].join('\n');
@@ -231,6 +235,8 @@ async function updateUser(e) {
                 '🔑 新 Key：' + subKey,
                 '',
                 '📡 API 端点：https://ai.shimiaocheng.top/v1/chat/completions',
+                '',
+                '🤖 可用模型：glm-5.2, glm-4, glm-4-flash, glm-4v, glm-4-plus',
                 '',
                 '📖 自助面板：https://ai.shimiaocheng.top/user/'
             ].join('\n');
