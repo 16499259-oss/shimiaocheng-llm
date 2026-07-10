@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM API Gateway — 管理面板</title>
+    <link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">LLM API Gateway</div>
+        <div class="nav-actions">
+            <button id="settings-btn" class="btn btn-outline btn-sm" onclick="openSettings()">⚙️ 设置</button>
+            <span class="nav-user">Admin</span>
+            <button id="logout-btn" class="btn btn-outline btn-sm">登出</button>
+        </div>
+    </nav>
+
+    <div class="container">
+        <!-- Dashboard Overview -->
+        <section class="section">
+            <h2>Dashboard</h2>
+            <div class="stats-grid" id="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">总用户数</div>
+                    <div class="stat-value" id="stat-total-users">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">活跃用户</div>
+                    <div class="stat-value" id="stat-active-users">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">总调用次数</div>
+                    <div class="stat-value" id="stat-total-calls">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">今日调用</div>
+                    <div class="stat-value" id="stat-calls-today">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">今日 Token</div>
+                    <div class="stat-value" id="stat-tokens-today">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">平均延迟</div>
+                    <div class="stat-value" id="stat-avg-latency">-</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Users Section -->
+        <section class="section">
+            <div class="section-header">
+                <h2>用户管理</h2>
+                <button id="create-user-btn" class="btn btn-primary">+ 创建用户</button>
+            </div>
+            <table class="table" id="users-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>用户名</th>
+                        <th>Key</th>
+                        <th>5h 配额</th>
+                        <th>总配额</th>
+                        <th>状态</th>
+                        <th>创建时间</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="users-tbody">
+                    <tr><td colspan="8" class="text-center">加载中...</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Multipliers Section -->
+        <section class="section">
+            <div class="section-header">
+                <h2>时段倍率规则</h2>
+                <button id="create-multiplier-btn" class="btn btn-primary">+ 新建规则</button>
+            </div>
+            <table class="table" id="multipliers-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>开始时间</th>
+                        <th>结束时间</th>
+                        <th>倍率</th>
+                        <th>生效星期</th>
+                        <th>状态</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="multipliers-tbody">
+                    <tr><td colspan="7" class="text-center">加载中...</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Call Logs Section -->
+        <section class="section" id="calls-section" style="display:none;">
+            <div class="section-header">
+                <h2>调用记录 — <span id="calls-username"></span></h2>
+                <button id="close-calls-btn" class="btn btn-outline">返回</button>
+            </div>
+            <table class="table" id="calls-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>模型</th>
+                        <th>Token</th>
+                        <th>消耗次数</th>
+                        <th>倍率</th>
+                        <th>状态码</th>
+                        <th>延迟(ms)</th>
+                        <th>时间</th>
+                    </tr>
+                </thead>
+                <tbody id="calls-tbody"></tbody>
+            </table>
+            <div class="pagination" id="calls-pagination"></div>
+        </section>
+
+        <!-- Main Users Section (re-reference for toggle) -->
+        <section class="section" id="users-section">
+            <div class="section-header">
+                <h2>用户管理</h2>
+                <button class="btn btn-primary" onclick="document.getElementById('create-user-modal').classList.remove('hidden')">+ 创建用户</button>
+            </div>
+        </section>
+    </div>
+
+    <!-- Create User Modal -->
+    <div id="create-user-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>创建用户</h3>
+                <button class="modal-close" onclick="closeModal('create-user-modal')">&times;</button>
+            </div>
+            <form id="create-user-form">
+                <div class="form-group">
+                    <label for="new-username">用户名 *</label>
+                    <input type="text" id="new-username" required placeholder="用户名">
+                </div>
+                <div class="form-group">
+                    <label for="new-quota-5h">5h 配额上限 (默认 100)</label>
+                    <input type="number" id="new-quota-5h" value="100" min="1">
+                </div>
+                <div class="form-group">
+                    <label for="new-quota-total">总配额上限 (默认 10000)</label>
+                    <input type="number" id="new-quota-total" value="10000" min="1">
+                </div>
+                <div id="create-user-result" class="result-box hidden"></div>
+                <button type="submit" class="btn btn-primary btn-block">创建</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Sub Key Display Modal — 一键分享给用户 -->
+    <div id="subkey-modal" class="modal hidden">
+        <div class="modal-content" style="max-width: 560px;">
+            <div class="modal-header">
+                <h3>✅ 账户已创建 — 分享给用户</h3>
+                <button class="modal-close" onclick="closeModal('subkey-modal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Key（API Key）</label>
+                    <div class="copy-row">
+                        <code id="subkey-value" style="word-break:break-all"></code>
+                        <button class="btn btn-sm btn-outline" onclick="copyToClipboard('subkey-value')">📋 复制 Key</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>API 端点</label>
+                    <div class="copy-row">
+                        <code>https://ai.shimiaocheng.top/v1/chat/completions</code>
+                        <button class="btn btn-sm btn-outline" onclick="navigator.clipboard.writeText('https://ai.shimiaocheng.top/v1/chat/completions');this.textContent='✅';setTimeout(()=>this.textContent='📋 复制',1500)">📋 复制</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>自助面板（查配额 + API 示例）</label>
+                    <div class="copy-row">
+                        <code>https://ai.shimiaocheng.top/user/</code>
+                        <button class="btn btn-sm btn-outline" onclick="navigator.clipboard.writeText('https://ai.shimiaocheng.top/user/');this.textContent='✅';setTimeout(()=>this.textContent='📋 复制',1500)">📋 复制</button>
+                    </div>
+                </div>
+                <hr style="margin:12px 0;border-color:var(--border)">
+                <div class="form-group">
+                    <label>一键复制全部信息（微信发送给朋友）</label>
+                    <textarea id="share-all-text" rows="6" readonly style="width:100%;font-size:0.82rem;background:#f9fafb;border:1px solid var(--border);border-radius:var(--radius);padding:8px;"></textarea>
+                    <button class="btn btn-primary btn-block" style="margin-top:8px" onclick="copyShareAll()">📋 一键复制全部</button>
+                </div>
+            </div>
+            <p class="warning-text" style="margin:16px 0 0">⚠️ Key 仅展示一次，关闭后无法再次查看。请务必复制保存！</p>
+        </div>
+    </div>
+
+    <!-- Update User Modal -->
+    <div id="update-user-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>编辑用户</h3>
+                <button class="modal-close" onclick="closeModal('update-user-modal')">&times;</button>
+            </div>
+            <form id="update-user-form">
+                <input type="hidden" id="update-user-id">
+                <div class="form-group">
+                    <label for="update-quota-5h">5h 配额上限</label>
+                    <input type="number" id="update-quota-5h" min="1">
+                </div>
+                <div class="form-group">
+                    <label for="update-quota-total">总配额上限</label>
+                    <input type="number" id="update-quota-total" min="1">
+                </div>
+                <div class="form-group">
+                    <label for="update-status">状态</label>
+                    <select id="update-status">
+                        <option value="">不修改</option>
+                        <option value="active">启用</option>
+                        <option value="disabled">禁用</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="update-regenerate-key"> 重新生成 Key
+                    </label>
+                </div>
+                <div id="update-user-result" class="result-box hidden"></div>
+                <button type="submit" class="btn btn-primary btn-block">保存</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Create Multiplier Modal -->
+    <div id="create-multiplier-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>新建时段倍率规则</h3>
+                <button class="modal-close" onclick="closeModal('create-multiplier-modal')">&times;</button>
+            </div>
+            <form id="create-multiplier-form">
+                <div class="form-group">
+                    <label for="mult-start-time">开始时间 (HH:MM) *</label>
+                    <input type="text" id="mult-start-time" required placeholder="14:00" pattern="[0-9]{2}:[0-9]{2}">
+                </div>
+                <div class="form-group">
+                    <label for="mult-end-time">结束时间 (HH:MM) *</label>
+                    <input type="text" id="mult-end-time" required placeholder="18:00" pattern="[0-9]{2}:[0-9]{2}">
+                </div>
+                <div class="form-group">
+                    <label for="mult-multiplier">倍率 (≥1.0) *</label>
+                    <input type="number" id="mult-multiplier" value="2.0" min="1.0" step="0.1">
+                </div>
+                <div class="form-group">
+                    <label for="mult-days">生效星期</label>
+                    <select id="mult-days">
+                        <option value="*">每天</option>
+                        <option value="1,2,3,4,5">工作日 (周一至周五)</option>
+                        <option value="0,6">周末</option>
+                        <option value="1">周一</option>
+                        <option value="2">周二</option>
+                        <option value="3">周三</option>
+                        <option value="4">周四</option>
+                        <option value="5">周五</option>
+                        <option value="6">周六</option>
+                        <option value="0">周日</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn btn-primary btn-block">创建</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>⚙️ 系统设置</h3>
+                <button class="modal-close" onclick="closeModal('settings-modal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>上游配置状态</label>
+                    <span id="api-key-status" class="badge badge-warning">检查中...</span>
+                </div>
+                <div class="form-group">
+                    <label for="endpoint-input">智谱 API 端点</label>
+                    <input type="text" id="endpoint-input" placeholder="https://open.bigmodel.cn/api/paas/v4/chat/completions" style="width:100%">
+                    <small>Coding Plan 等特殊计划可能需要不同端点地址。</small>
+                </div>
+                <div class="form-group">
+                    <label for="api-key-input">智谱 API Key</label>
+                    <input type="password" id="api-key-input" placeholder="输入你的智谱 API Key" style="width:100%">
+                    <small>Key 仅存储在服务器 config.yaml 中，需重启生效。</small>
+                </div>
+                <div id="settings-result" class="result-box hidden"></div>
+                <button id="save-settings-btn" class="btn btn-primary btn-block" onclick="saveSettings()">保存配置</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="static/app.js"></script>
+</body>
+</html>

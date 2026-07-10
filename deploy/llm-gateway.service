@@ -1,0 +1,25 @@
+[Unit]
+Description=LLM API Gateway
+After=network.target
+
+[Service]
+Type=simple
+User=llm
+Group=llm
+WorkingDirectory=/opt/llm-gateway
+ExecStart=/opt/llm-gateway/llm_api_gateway -config /opt/llm-gateway/config.yaml
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/llm-gateway
+
+# Environment variables
+Environment="ZHIPU_API_KEY="
+
+[Install]
+WantedBy=multi-user.target

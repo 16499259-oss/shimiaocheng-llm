@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API 控制台 — LLM Gateway</title>
+    <style>
+        :root {
+            --bg: #f5f5f5;
+            --surface: #fff;
+            --primary: #4f46e5;
+            --primary-light: #eef2ff;
+            --text: #1f2937;
+            --text-secondary: #6b7280;
+            --border: #e5e7eb;
+            --success: #16a34a;
+            --warning: #d97706;
+            --error: #dc2626;
+            --radius: 8px;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+        .container { max-width: 720px; margin: 0 auto; padding: 40px 20px; }
+        .card { background: var(--surface); border-radius: var(--radius); box-shadow: 0 1px 3px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 16px; }
+        .card-header { font-size: 1.1rem; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+        .form-group { margin-bottom: 16px; }
+        label { display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 4px; }
+        input { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 0.95rem; font-family: monospace; }
+        input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-light); }
+        button { padding: 10px 20px; background: var(--primary); color: #fff; border: none; border-radius: var(--radius); cursor: pointer; font-size: 0.95rem; }
+        button:hover { opacity: 0.9; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .stat-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); }
+        .stat-row:last-child { border: none; }
+        .stat-label { color: var(--text-secondary); font-size: 0.9rem; }
+        .stat-value { font-weight: 600; }
+        .stat-value.good { color: var(--success); }
+        .stat-value.warn { color: var(--warning); }
+        .stat-value.bad { color: var(--error); }
+        .progress-bar { width: 100%; height: 8px; background: var(--border); border-radius: 4px; margin-top: 6px; overflow: hidden; }
+        .progress-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+        .progress-fill.good { background: var(--success); }
+        .progress-fill.warn { background: var(--warning); }
+        .progress-fill.bad { background: var(--error); }
+        pre { background: #1e1e2e; color: #cdd6f4; padding: 16px; border-radius: var(--radius); overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+        .key-box { background: #fef3c7; border: 1px solid #f59e0b; border-radius: var(--radius); padding: 12px; font-family: monospace; word-break: break-all; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
+        .copy-btn { padding: 4px 12px; font-size: 0.8rem; background: #f59e0b; color: #fff; border: none; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+        .error-box { background: #fef2f2; border: 1px solid var(--error); color: var(--error); padding: 12px; border-radius: var(--radius); margin-bottom: 16px; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1 style="font-size: 1.5rem; margin-bottom: 8px;">🚀 LLM API Gateway</h1>
+    <p style="color: var(--text-secondary); margin-bottom: 24px;">用户自助控制台 — 查看配额与 API 信息</p>
+
+    <!-- Login Card -->
+    <div id="login-card" class="card">
+        <div class="card-header">🔑 输入你的 Key</div>
+        <div id="error-msg" class="error-box hidden"></div>
+        <div class="form-group">
+            <label>Key（API Key）</label>
+            <input type="password" id="sub-key-input" placeholder="sk-..." autocomplete="off">
+        </div>
+        <button id="login-btn" onclick="doLogin()">查询配额</button>
+    </div>
+
+    <!-- Dashboard Card -->
+    <div id="dashboard-card" class="hidden">
+        <!-- Quota Overview -->
+        <div class="card">
+            <div class="card-header">📊 配额概览</div>
+            <div id="quota-stats"></div>
+        </div>
+
+        <!-- API Key Card -->
+        <div class="card">
+            <div class="card-header">🔐 你的 Key</div>
+            <div class="key-box">
+                <span id="display-key"></span>
+                <button class="copy-btn" onclick="copyKey()">📋 复制</button>
+            </div>
+            <p style="font-size: 0.8rem; color: var(--text-secondary);">⚠️ 请妥善保管，Key 仅在此页展示</p>
+        </div>
+
+        <!-- API Usage Card -->
+        <div class="card">
+            <div class="card-header">📖 API 使用方式</div>
+            <div class="form-group">
+                <label>API 端点（同步调用）</label>
+                <pre>curl https://ai.shimiaocheng.top/v1/chat/completions \
+  -H "Authorization: Bearer <span id="key-in-curl">YOUR_KEY</span>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}]}'</pre>
+            </div>
+            <div class="form-group">
+                <label>API 端点（SSE 流式调用）</label>
+                <pre>curl https://ai.shimiaocheng.top/v1/chat/completions \
+  -H "Authorization: Bearer <span id="key-in-curl2">YOUR_KEY</span>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}],"stream":true}'</pre>
+            </div>
+            <div class="form-group">
+                <label>Python 示例</label>
+                <pre>import requests
+
+response = requests.post(
+    "https://ai.shimiaocheng.top/v1/chat/completions",
+    headers={"Authorization": "Bearer <span id="key-in-python">YOUR_KEY</span>"},
+    json={"model":"glm-5.2", "messages":[{"role":"user","content":"你好"}]}
+)
+print(response.json())</pre>
+            </div>
+        </div>
+
+        <button onclick="logout()" style="background: var(--text-secondary); margin-top: 12px;">退出</button>
+    </div>
+</div>
+
+<script>
+const API_BASE = 'https://ai.shimiaocheng.top';
+let currentKey = '';
+
+function $(id) { return document.getElementById(id); }
+
+async function doLogin() {
+    const key = $('sub-key-input').value.trim();
+    if (!key || !key.startsWith('sk-')) {
+        showError('请输入有效的 Key（以 sk- 开头）');
+        return;
+    }
+
+    const btn = $('login-btn');
+    btn.disabled = true;
+    btn.textContent = '查询中...';
+    $('error-msg').classList.add('hidden');
+
+    try {
+        const resp = await fetch(`${API_BASE}/v1/quota`, {
+            headers: { 'Authorization': `Bearer ${key}` }
+        });
+
+        if (!resp.ok) {
+            const err = await resp.json();
+            throw new Error(err.error?.message || `HTTP ${resp.status}`);
+        }
+
+        const data = await resp.json();
+        currentKey = key;
+        renderDashboard(data);
+        $('login-card').classList.add('hidden');
+        $('dashboard-card').classList.remove('hidden');
+    } catch (err) {
+        showError('验证失败: ' + err.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '查询配额';
+    }
+}
+
+function renderDashboard(data) {
+    // Quota stats
+    const pct5h = Math.round((data.quota_5h_used / data.quota_5h_limit) * 100);
+    const pctTotal = Math.round((data.quota_total_used / data.quota_total_limit) * 100);
+
+    let cls5h = pct5h > 80 ? 'bad' : (pct5h > 50 ? 'warn' : 'good');
+    let clsTotal = pctTotal > 80 ? 'bad' : (pctTotal > 50 ? 'warn' : 'good');
+
+    $('quota-stats').innerHTML = `
+        <div class="stat-row">
+            <span class="stat-label">5小时配额</span>
+            <span class="stat-value ${cls5h}">${data.quota_5h_used} / ${data.quota_5h_limit} 次</span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill ${cls5h}" style="width:${pct5h}%"></div></div>
+        <div class="stat-row">
+            <span class="stat-label">总配额</span>
+            <span class="stat-value ${clsTotal}">${data.quota_total_used} / ${data.quota_total_limit} 次</span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill ${clsTotal}" style="width:${pctTotal}%"></div></div>
+        <div class="stat-row">
+            <span class="stat-label">下次重置</span>
+            <span class="stat-value">${new Date(data.window_reset_at).toLocaleString('zh-CN')}</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">账户状态</span>
+            <span class="stat-value good">${data.status === 'active' ? '✅ 正常' : '🚫 ' + data.status}</span>
+        </div>
+    `;
+
+    // Display key
+    $('display-key').textContent = currentKey;
+    $('key-in-curl').textContent = currentKey;
+    $('key-in-curl2').textContent = currentKey;
+    $('key-in-python').textContent = currentKey;
+}
+
+function copyKey() {
+    navigator.clipboard.writeText(currentKey).then(() => {
+        const btn = document.querySelector('.copy-btn');
+        btn.textContent = '✅ 已复制';
+        setTimeout(() => btn.textContent = '📋 复制', 2000);
+    });
+}
+
+function showError(msg) {
+    $('error-msg').textContent = msg;
+    $('error-msg').classList.remove('hidden');
+}
+
+function logout() {
+    currentKey = '';
+    $('sub-key-input').value = '';
+    $('dashboard-card').classList.add('hidden');
+    $('login-card').classList.remove('hidden');
+}
+
+// Allow Enter key to submit
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && $('dashboard-card').classList.contains('hidden')) {
+        doLogin();
+    }
+});
+</script>
+</body>
+</html>

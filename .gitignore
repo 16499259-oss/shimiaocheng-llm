@@ -1,0 +1,26 @@
+# Binaries
+llm_api_gateway
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# DB
+*.db
+*.db-shm
+*.db-wal
+
+# Config (contains secrets)
+config.yaml
+
+# WorkBuddy
+.workbuddy/
+
+# Temp
+tmp/

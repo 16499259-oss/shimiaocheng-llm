@@ -1,0 +1,21 @@
+# LLM API Gateway — 配置文件
+server:
+  listen_addr: "127.0.0.1:8080"   # 仅监听本地（Nginx 反代）
+  read_timeout: 120s
+  write_timeout: 300s
+
+database:
+  path: "./llm_gateway.db"        # SQLite 数据库文件路径
+
+api:
+  zhipu_endpoint: "https://api.zhipuai.cn/api/paas/v4/chat/completions"
+  zhipu_api_key: ""               # 智谱 API Key（也可通过环境变量 ZHIPU_API_KEY 设置）
+
+auth:
+  sub_key_salt: "llm-gateway-salt-2025"   # 子 Key 生成盐值（请修改为随机字符串）
+  session_expire_hours: 24                 # Admin 会话过期时间（小时）
+
+quota:
+  default_5h_limit: 100           # 默认 5h 窗口调用次数上限
+  default_total_limit: 10000      # 默认账户总调用次数上限
+  reset_interval_hours: 5         # 5h 窗口重置间隔
