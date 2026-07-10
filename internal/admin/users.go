@@ -206,3 +206,37 @@ func (h *Handler) GetUserCalls(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, result)
 }
+
+// DeleteUser handles DELETE /admin/api/users/{id}.
+// Soft-deletes the user by setting status to "deleted". The user's sub_key
+// is immediately revoked — all subsequent API calls with this key get 403.
+func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	userID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid user ID"})
+		return
+	}
+
+	// Check user exists
+	user, err := models.GetUserByID(h.DB, userID)
+	if err != nil || user == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "User not found"})
+		return
+	}
+
+	// Prevent self-deletion of admin
+	if user.Role == "admin" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Cannot delete admin user"})
+		return
+	}
+
+	if err := models.UpdateUserStatus(h.DB, userID, "deleted"); err != nil {
+		log.Printf("ERROR: delete user %d: %v", userID, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to delete user"})
+		return
+	}
+
+	log.Printf("User %d (%s) deleted", userID, user.Username)
+	writeJSON(w, http.StatusOK, map[string]string{"message": "User deleted"})
+}

@@ -97,7 +97,7 @@ func GetUserBySubKeyHash(db *sql.DB, subKeyHash string) (*User, error) {
 	u := &User{}
 	err := db.QueryRow(
 		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at
-		 FROM users WHERE sub_key_hash = ?`, subKeyHash,
+		 FROM users WHERE sub_key_hash = ? AND status != 'deleted'`, subKeyHash,
 	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt)
 
 	if err == sql.ErrNoRows {
@@ -152,6 +152,7 @@ func ListUsers(db *sql.DB) ([]UserWithQuota, error) {
 		 FROM users u
 		 LEFT JOIN quotas q ON u.id = q.user_id
 		 LEFT JOIN (SELECT user_id, SUM(total_tokens) AS total_tokens FROM call_logs GROUP BY user_id) t ON u.id = t.user_id
+		 WHERE u.status != 'deleted'
 		 ORDER BY u.id DESC`,
 	)
 	if err != nil {

@@ -155,6 +155,7 @@ async function loadUsers() {
                             <button class="btn btn-outline btn-sm" onclick="shareUser('${escapeAttr(u.username)}', ${u.id})">📋 分享</button>
                             <button class="btn btn-outline btn-sm" onclick="editUser(${u.id}, '${escapeAttr(u.status)}', ${u.quota_5h_limit}, ${u.quota_total_limit})">编辑</button>
                             <button class="btn btn-outline btn-sm" onclick="viewCalls(${u.id}, '${escapeAttr(u.username)}')">记录</button>
+                            <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id}, '${escapeAttr(u.username)}')">删除</button>
                         </div>
                     </td>
                 </tr>
@@ -285,6 +286,20 @@ async function updateUser(e) {
         const resultEl = document.getElementById('update-user-result');
         resultEl.textContent = '更新失败: ' + err.message;
         resultEl.classList.remove('hidden');
+    }
+}
+
+async function deleteUser(id, username) {
+    if (!confirm(`确定要删除用户「${username}」吗？删除后该用户的 Key 将立即失效，此操作不可撤销。`)) {
+        return;
+    }
+
+    try {
+        await apiFetch(`api/users/${id}`, { method: 'DELETE' });
+        loadUsers();
+        loadOverview();
+    } catch (err) {
+        alert('删除失败: ' + err.message);
     }
 }
 

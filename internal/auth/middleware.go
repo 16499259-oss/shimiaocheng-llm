@@ -60,9 +60,13 @@ func (m *Middleware) SubKeyAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		// Check if user is disabled
-		if user.Status == "disabled" {
-			writeAuthError(w, http.StatusForbidden, "API key has been disabled", "key_disabled")
+		// Check if user is disabled or deleted
+		if user.Status == "disabled" || user.Status == "deleted" {
+			msg := "API key has been disabled"
+			if user.Status == "deleted" {
+				msg = "API key has been revoked"
+			}
+			writeAuthError(w, http.StatusForbidden, msg, "key_revoked")
 			return
 		}
 
