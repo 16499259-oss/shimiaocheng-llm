@@ -126,6 +126,11 @@ func main() {
 		ResetInterval: cfg.Quota.ResetIntervalHours,
 	}
 
+	// Call logs handler (user self-service)
+	callsHandler := &handler.CallsHandler{
+		DB: database.Conn,
+	}
+
 	// Admin handler
 	adminHandler := &admin.Handler{
 		DB:                database.Conn,
@@ -151,6 +156,7 @@ func main() {
 	// API endpoints requiring sub-key auth
 	mux.Handle("POST /v1/chat/completions", authMW.SubKeyAuth(proxyHandler))
 	mux.Handle("GET /v1/quota", authMW.SubKeyAuth(quotaQueryHandler))
+	mux.Handle("GET /v1/calls", authMW.SubKeyAuth(callsHandler))
 
 	// Admin routes
 	adminHandler.RegisterRoutes(mux)
