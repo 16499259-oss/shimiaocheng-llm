@@ -1,4 +1,4 @@
-.PHONY: build clean run test install
+.PHONY: build clean run test install init-admin deps fmt vet build-linux lint ci
 
 # Binary name
 BINARY := llm_api_gateway
@@ -45,6 +45,13 @@ fmt:
 # Vet code
 vet:
 	$(GO) vet ./...
+
+# Lint: code must be gofmt-clean and pass go vet
+lint:
+	@test -z "$$(gofmt -l .)" && $(GO) vet ./...
+
+# Continuous integration gate: format, vet, test, then produce a Linux build
+ci: fmt vet test build-linux
 
 # Install to /opt/llm-gateway (production)
 install: build-linux

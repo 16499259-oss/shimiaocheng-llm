@@ -9,13 +9,13 @@ import (
 
 // TimeMultiplier represents a time-based multiplier rule.
 type TimeMultiplier struct {
-	ID          int64   `json:"id"`
-	StartTime   string  `json:"start_time"`
-	EndTime     string  `json:"end_time"`
-	Multiplier  float64 `json:"multiplier"`
-	DaysOfWeek  string  `json:"days_of_week"`
-	Enabled     bool    `json:"enabled"`
-	CreatedAt   string  `json:"created_at"`
+	ID         int64   `json:"id"`
+	StartTime  string  `json:"start_time"`
+	EndTime    string  `json:"end_time"`
+	Multiplier float64 `json:"multiplier"`
+	DaysOfWeek string  `json:"days_of_week"`
+	Enabled    bool    `json:"enabled"`
+	CreatedAt  string  `json:"created_at"`
 }
 
 // MultiplierEngine evaluates time-based multiplier rules.

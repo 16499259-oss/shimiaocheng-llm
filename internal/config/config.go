@@ -43,8 +43,8 @@ type AuthConfig struct {
 
 // QuotaConfig holds quota default settings.
 type QuotaConfig struct {
-	Default5hLimit    int `yaml:"default_5h_limit"`
-	DefaultTotalLimit int `yaml:"default_total_limit"`
+	Default5hLimit     int `yaml:"default_5h_limit"`
+	DefaultTotalLimit  int `yaml:"default_total_limit"`
 	ResetIntervalHours int `yaml:"reset_interval_hours"`
 }
 

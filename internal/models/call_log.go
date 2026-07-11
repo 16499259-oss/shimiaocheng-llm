@@ -33,8 +33,8 @@ type CallLogFilter struct {
 
 // CallLogPage holds paginated call log results.
 type CallLogPage struct {
-	Data       []CallLog   `json:"data"`
-	Pagination Pagination  `json:"pagination"`
+	Data       []CallLog  `json:"data"`
+	Pagination Pagination `json:"pagination"`
 }
 
 // Pagination holds page metadata.
