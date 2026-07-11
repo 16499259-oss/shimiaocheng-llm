@@ -144,6 +144,7 @@ func main() {
 		ConfigPath:        *configPath,
 		APIKeyConfigured:  func() bool { return keyHolder.Get() != "" },
 		EndpointGetter:    endpointHolder.Get,
+		APIKeySetter:      keyHolder.Set,
 	}
 
 	// Build routes

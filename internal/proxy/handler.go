@@ -129,6 +129,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body to 1MB to prevent OOM attacks
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	// Parse request body
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {

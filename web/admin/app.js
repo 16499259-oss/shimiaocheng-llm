@@ -541,7 +541,7 @@ function escapeHtml(str) {
 }
 
 function escapeAttr(str) {
-    return str.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    return str.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
 
 function formatDate(dateStr) {
