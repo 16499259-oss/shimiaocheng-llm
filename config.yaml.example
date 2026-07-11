@@ -11,6 +11,31 @@ api:
   zhipu_endpoint: "https://api.zhipuai.cn/api/paas/v4/chat/completions"
   zhipu_api_key: ""               # 智谱 API Key（也可通过环境变量 ZHIPU_API_KEY 设置）
 
+# 多上游配置：网关按「时间段」自动路由到不同 provider。
+# 每个 provider 的 Key 仅由对应 api_key_env 环境变量在启动时注入内存（绝不落盘，见 ADR-0002）。
+providers:
+  - id: "zhipu"
+    endpoint: "https://api.zhipuai.cn/api/paas/v4/chat/completions"
+    api_key_env: "ZHIPU_API_KEY"
+    is_default: true
+  - id: "openai"
+    endpoint: "https://api.openai.com/v1/chat/completions"   # 部署时可改；绝不硬编码到代码逻辑外
+    api_key_env: "OPENAI_API_KEY"
+    is_default: false
+
+# 外部（用户侧）模型名 -> 各 provider 真实模型名 的映射。
+# 缺失映射时按 passthrough 透传原 external 名，不报错。
+# 主理人决策：默认模型 glm-5.2 也进映射表（zhipu 用 glm-5.2，openai 用 gpt-4o）。
+model_mappings:
+  - external: "glm-5.2"
+    per_provider:
+      zhipu: "glm-5.2"
+      openai: "gpt-4o"
+  - external: "glm-4-plus"
+    per_provider:
+      zhipu: "glm-4-plus"
+      openai: "gpt-4o"
+
 auth:
   sub_key_salt: "llm-gateway-salt-2025"   # 子 Key 生成盐值（请修改为随机字符串）
   session_expire_hours: 24                 # Admin 会话过期时间（小时）

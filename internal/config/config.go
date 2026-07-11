@@ -15,6 +15,27 @@ type Config struct {
 	API      APIConfig      `yaml:"api"`
 	Auth     AuthConfig     `yaml:"auth"`
 	Quota    QuotaConfig    `yaml:"quota"`
+	// Providers lists the upstream LLM providers the gateway can route to.
+	// When empty, a single default Zhipu provider is injected in Load.
+	Providers []ProviderConfig `yaml:"providers"`
+	// ModelMappings maps an external (user-facing) model name to the
+	// per-provider real model name. A missing mapping means the external name
+	// is passed through unchanged (passthrough).
+	ModelMappings []ModelMapping `yaml:"model_mappings"`
+}
+
+// ProviderConfig describes a single upstream LLM provider.
+type ProviderConfig struct {
+	ID        string `yaml:"id"`          // unique provider id, e.g. "zhipu", "openai"
+	Endpoint  string `yaml:"endpoint"`    // upstream chat-completions endpoint URL
+	APIKeyEnv string `yaml:"api_key_env"` // env var that injects this provider's key at startup
+	IsDefault bool   `yaml:"is_default"`  // true for the global default provider
+}
+
+// ModelMapping maps an external model name to per-provider real model names.
+type ModelMapping struct {
+	External    string            `yaml:"external"`     // external (user-facing) model name
+	PerProvider map[string]string `yaml:"per_provider"` // providerID -> real model name
 }
 
 // ServerConfig holds HTTP server settings.
@@ -71,7 +92,32 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	// Override API key from environment if set
+	// Default provider injection: when no providers are configured, fall back to
+	// a single Zhipu provider driven by the legacy api.zhipu_endpoint / ZHIPU_API_KEY.
+	if len(cfg.Providers) == 0 {
+		cfg.Providers = []ProviderConfig{
+			{
+				ID:        "zhipu",
+				Endpoint:  cfg.API.ZhipuEndpoint,
+				APIKeyEnv: "ZHIPU_API_KEY",
+				IsDefault: true,
+			},
+		}
+	}
+
+	// Guarantee exactly one default provider: if none is flagged but providers
+	// exist, promote the first one.
+	defaultCount := 0
+	for i := range cfg.Providers {
+		if cfg.Providers[i].IsDefault {
+			defaultCount++
+		}
+	}
+	if defaultCount == 0 && len(cfg.Providers) > 0 {
+		cfg.Providers[0].IsDefault = true
+	}
+
+	// Override API key from environment if set (legacy fallback; admin still uses it).
 	if envKey := os.Getenv("ZHIPU_API_KEY"); envKey != "" {
 		cfg.API.ZhipuAPIKey = envKey
 	}

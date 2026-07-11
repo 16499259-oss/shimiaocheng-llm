@@ -14,14 +14,19 @@ import (
 	"llm_api_gateway/internal/auth"
 	"llm_api_gateway/internal/models"
 	"llm_api_gateway/internal/quota"
+	"llm_api_gateway/internal/router"
 )
 
 // Handler handles the /v1/chat/completions endpoint.
 type Handler struct {
-	APIKeyGetter   func() string // dynamic API key getter (supports runtime updates)
-	EndpointGetter func() string // dynamic upstream endpoint getter
+	APIKeyGetter   func() string // dynamic API key getter (legacy fallback; used when Router == nil)
+	EndpointGetter func() string // dynamic upstream endpoint getter (legacy fallback)
 	QuotaChecker   *quota.Checker
 	MultiplierEng  *quota.MultiplierEngine
+	// Router resolves which upstream provider serves the request and rewrites
+	// the model name. When nil, the handler falls back to APIKeyGetter /
+	// EndpointGetter (gradual rollout safety).
+	Router *router.Router
 }
 
 // ChatCompletionRequest mirrors the upstream request structure.
@@ -119,6 +124,26 @@ func normalizeContentArrays(body []byte) []byte {
 	return result
 }
 
+// rewriteBodyModel replaces the "model" field inside a JSON request body with
+// the given model name, preserving all other fields (including already
+// normalized messages). If the body cannot be parsed, it is returned unchanged.
+func rewriteBodyModel(body []byte, model string) []byte {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return body
+	}
+	newModel, err := json.Marshal(model)
+	if err != nil {
+		return body
+	}
+	raw["model"] = newModel
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // ServeHTTP handles the /v1/chat/completions request.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
@@ -158,7 +183,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Normalize content arrays → strings (Cursor sends content as array-of-parts)
 	bodyBytes = normalizeContentArrays(bodyBytes)
 
-	// Get effective multiplier for the current time
+	// Resolve the upstream provider ONCE for this request (time-window routing).
+	// When no Router is wired, fall back to the legacy getters (gradual rollout).
+	providerID := "zhipu"
+	endpoint := h.EndpointGetter()
+	apiKey := h.APIKeyGetter()
+	if h.Router != nil {
+		prov, err := h.Router.ResolveProvider(time.Now())
+		if err != nil {
+			writeProxyError(w, http.StatusServiceUnavailable, "No upstream provider available", "no_provider")
+			return
+		}
+		providerID = prov.ID
+		endpoint = prov.Endpoint
+		apiKey = prov.APIKey
+	}
+
+	// Rewrite the model name for the selected provider. Missing mapping ->
+	// passthrough (original external name); never errors.
+	rewrittenModel := chatReq.Model
+	if h.Router != nil {
+		rewrittenModel = h.Router.RewriteModel(chatReq.Model, providerID)
+	}
+	bodyBytes = rewriteBodyModel(bodyBytes, rewrittenModel)
+
+	// Get effective multiplier for the current time (Asia/Shanghai)
 	multiplier := h.MultiplierEng.GetEffectiveMultiplier(time.Now())
 	effectiveCalls := int(math.Ceil(1.0 * multiplier))
 
@@ -174,6 +223,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		callLog := &models.CallLog{
 			UserID:         userID,
 			Model:          chatReq.Model,
+			ProviderID:     providerID,
 			EffectiveCalls: effectiveCalls,
 			MultiplierUsed: multiplier,
 			StatusCode:     429,
@@ -188,18 +238,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Handle SSE streaming
 	if chatReq.Stream {
-		h.handleStream(w, r, bodyBytes, userID, chatReq.Model, effectiveCalls, multiplier, startTime)
+		h.handleStream(w, r, bodyBytes, userID, chatReq.Model, providerID, endpoint, apiKey, effectiveCalls, multiplier, startTime)
 		return
 	}
 
 	// Handle synchronous request
-	h.handleSync(w, bodyBytes, userID, chatReq.Model, effectiveCalls, multiplier, startTime)
+	h.handleSync(w, bodyBytes, userID, chatReq.Model, providerID, endpoint, apiKey, effectiveCalls, multiplier, startTime)
 }
 
 // handleSync processes a non-streaming chat completion request.
-func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int64, model string, effectiveCalls int, multiplier float64, startTime time.Time) {
+// endpoint/apiKey/providerID are the resolved upstream target for this request.
+func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int64, model, providerID, endpoint, apiKey string, effectiveCalls int, multiplier float64, startTime time.Time) {
 	// Build upstream request
-	upstreamReq, err := BuildUpstreamRequest(h.EndpointGetter(), h.APIKeyGetter(), bodyBytes)
+	upstreamReq, err := BuildUpstreamRequest(endpoint, apiKey, bodyBytes)
 	if err != nil {
 		writeProxyError(w, http.StatusInternalServerError, "Failed to build upstream request", "internal_error")
 		return
@@ -213,6 +264,7 @@ func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int
 		callLog := &models.CallLog{
 			UserID:         userID,
 			Model:          model,
+			ProviderID:     providerID,
 			EffectiveCalls: effectiveCalls,
 			MultiplierUsed: multiplier,
 			StatusCode:     502,
@@ -233,6 +285,7 @@ func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int
 		callLog := &models.CallLog{
 			UserID:         userID,
 			Model:          model,
+			ProviderID:     providerID,
 			EffectiveCalls: effectiveCalls,
 			MultiplierUsed: multiplier,
 			StatusCode:     502,
@@ -254,6 +307,7 @@ func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int
 	callLog := &models.CallLog{
 		UserID:           userID,
 		Model:            model,
+		ProviderID:       providerID,
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
 		TotalTokens:      totalTokens,
