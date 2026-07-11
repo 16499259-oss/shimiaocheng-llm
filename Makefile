@@ -1,4 +1,4 @@
-.PHONY: build clean run test install init-admin deps fmt vet build-linux lint ci
+.PHONY: build clean run test install init-admin deps fmt vet build-linux lint ci shellcheck
 
 # Binary name
 BINARY := llm_api_gateway
@@ -52,7 +52,16 @@ lint:
 	@test -z "$$(gofmt -l .)" && $(GO) vet ./...
 
 # Continuous integration gate: format, vet, test, then produce a Linux build
-ci: fmt vet test build-linux
+ci: fmt vet test build-linux shellcheck
+
+# Lint shell deploy scripts with shellcheck. CI (ubuntu-latest) ships shellcheck;
+# locally it is optional and skips gracefully when not installed.
+shellcheck:
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck -S error deploy.sh deploy-nginx.sh; \
+	else \
+		echo "shellcheck not found; skipping (install: brew install shellcheck / apt-get install shellcheck)"; \
+	fi
 
 # Install to /opt/llm-gateway (production)
 install: build-linux
