@@ -36,11 +36,11 @@
 
 **负面 / 取舍：**
 
-- 与 nginx 侧的 `proxy_read_timeout 300s` 不一致（Go 上游超时 10 分钟 > nginx 读超时 5 分钟）。这意味着：nginx 可能在 5 分钟时先断开与下游的连接，而 Go 仍在等待上游直到 10 分钟；属于「外层先断、内层后收」，不会造成资源泄漏，但两侧数值应作为一组需协同维护的常量（建议在文档/注释中保持认知一致）。
+- 与 nginx 侧的 `proxy_read_timeout`（现已对齐为 600s = 10 分钟，见 `deploy/nginx.conf`）必须保持同步。早期版本 nginx 为 300s，与 Go 10min 不一致，会先断外层、Go 仍连内层，产生悬挂窗口；现已对齐，但**改任一侧都必须同步另一侧**，否则会重现该窗口（不造成资源泄漏，但劣化长流式体验）。
 - 极端超长生成（>10 分钟）会被强制中断；若未来出现合理的超长任务，需重新评估该上限。
 - `Timeout` 是整体超时，若未来需要「仅限制空闲、不限总时长」的语义，需改用 `context` + `IdleConnTimeout` 等更精细的控制。
 
 **后续注意事项：**
 
-- 若调整该值，需同步评估 nginx `proxy_read_timeout` 与 Go `Server.WriteTimeout`（当前 300s）的匹配关系，避免产生「下游已断、上游仍连」的悬挂窗口过大。
+- 若调整该值，需同步评估 nginx `proxy_read_timeout`（当前已为 600s，与 Go 流式 `client.Timeout` 对齐）与 Go `Server.WriteTimeout`（当前 300s）的匹配关系。**关键对齐对象是 nginx `proxy_read_timeout` ↔ Go 流式 `client.Timeout`（均 10 分钟）**，而非 `Server.WriteTimeout`（300s）；避免产生「下游已断、上游仍连」的悬挂窗口过大。
 - 该 10 分钟上限已写入 `AGENTS.md` 第 6 节关键不变量，改动须走评估。
