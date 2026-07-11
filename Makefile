@@ -38,9 +38,10 @@ deps:
 test:
 	$(GO) test ./...
 
-# Format code
+# Format code. Scoped to source roots to avoid reformatting unrelated/third-party Go files.
+# For a strict fail-on-unformatted gate, use `make lint` (gofmt -l).
 fmt:
-	$(GO) fmt ./...
+	$(GO) fmt ./internal/... .
 
 # Vet code
 vet:
