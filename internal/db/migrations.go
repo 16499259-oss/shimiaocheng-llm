@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 )
@@ -81,6 +82,28 @@ func RunMigrations(conn *DB) error {
 		)`,
 
 		`CREATE INDEX IF NOT EXISTS idx_time_multipliers_enabled ON time_multipliers(enabled)`,
+
+		// provider_routing_rules table — drives multi-upstream time-based routing.
+		// Schema mirrors time_multipliers for operational familiarity.
+		// default_provider_id is reserved for future per-rule fallback (P2); the
+		// global default is always taken from config.Providers[IsDefault].
+		`CREATE TABLE IF NOT EXISTS provider_routing_rules (
+			id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+			provider_id         TEXT    NOT NULL,
+			start_time          TEXT    NOT NULL,
+			end_time            TEXT    NOT NULL,
+			days_of_week        TEXT    NOT NULL DEFAULT '*',
+			timezone            TEXT    NOT NULL DEFAULT 'Asia/Shanghai',
+			enabled             INTEGER NOT NULL DEFAULT 1,
+			default_provider_id TEXT
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_provider_routing_rules_enabled ON provider_routing_rules(enabled)`,
+
+		// Seed a default rule (14:00-18:01 -> openai) only when the table is empty.
+		`INSERT INTO provider_routing_rules (provider_id, start_time, end_time, days_of_week, timezone, enabled)
+		 SELECT 'openai', '14:00', '18:01', '*', 'Asia/Shanghai', 1
+		 WHERE NOT EXISTS (SELECT 1 FROM provider_routing_rules)`,
 	}
 
 	for i, m := range migrations {
@@ -89,6 +112,39 @@ func RunMigrations(conn *DB) error {
 		}
 	}
 
+	// Add provider_id column to call_logs (idempotent: only when missing).
+	if !columnExists(conn, "call_logs", "provider_id") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE call_logs ADD COLUMN provider_id TEXT NOT NULL DEFAULT 'zhipu'`,
+		); err != nil {
+			return fmt.Errorf("migration alter call_logs.provider_id failed: %w", err)
+		}
+	}
+
 	log.Println("Database migrations completed successfully")
 	return nil
+}
+
+// columnExists reports whether a column exists in the given table.
+// Used to make schema alterations idempotent across restarts.
+func columnExists(conn *DB, table, column string) bool {
+	rows, err := conn.Conn.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
 }

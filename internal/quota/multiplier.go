@@ -2,9 +2,10 @@ package quota
 
 import (
 	"database/sql"
-	"strconv"
 	"strings"
 	"time"
+
+	"llm_api_gateway/internal/timeutil"
 )
 
 // TimeMultiplier represents a time-based multiplier rule.
@@ -30,24 +31,27 @@ func NewMultiplierEngine(db *sql.DB) *MultiplierEngine {
 
 // GetEffectiveMultiplier returns the maximum matching multiplier for the given time.
 // Returns 1.0 if no rules match (baseline: 1 call per request).
+//
+// The incoming time is normalized to Asia/Shanghai before any comparison, so
+// multiplier windows are always evaluated in UTC+8 regardless of the host's
+// local time zone (fixes a latent local-time-zone bug).
 func (m *MultiplierEngine) GetEffectiveMultiplier(now time.Time) float64 {
+	now = now.In(timeutil.ShanghaiTZ)
+
 	rules, err := m.FindAllEnabled()
 	if err != nil {
 		return 1.0
 	}
 
-	currentTime := now.Format("15:04")
-	weekday := strconv.Itoa(int(now.Weekday())) // 0=Sun, 1=Mon, ..., 6=Sat
-
 	maxMultiplier := 1.0
 	for _, rule := range rules {
-		// 1. Check day-of-week match
-		if !matchDay(rule.DaysOfWeek, weekday) {
+		// 1. Check day-of-week match (time-zone-safe via timeutil)
+		if !timeutil.MatchDay(rule.DaysOfWeek, now) {
 			continue
 		}
 
-		// 2. Check time range match
-		inRange := isInTimeRange(rule.StartTime, rule.EndTime, currentTime)
+		// 2. Check time range match (time-zone-safe via timeutil)
+		inRange := timeutil.IsInRange(rule.StartTime, rule.EndTime, now)
 
 		// 3. If matched, take the maximum multiplier
 		if inRange && rule.Multiplier > maxMultiplier {
@@ -201,29 +205,6 @@ func (m *MultiplierEngine) GetByID(id int64) (*TimeMultiplier, error) {
 	return r, nil
 }
 
-// matchDay checks if the given weekday matches the days_of_week pattern.
-// daysOfWeek: "*" = all days, "1,2,3,4,5" = weekdays, "0,6" = weekends.
-func matchDay(daysOfWeek, weekday string) bool {
-	if daysOfWeek == "*" || daysOfWeek == "" {
-		return true
-	}
-
-	days := strings.Split(daysOfWeek, ",")
-	for _, d := range days {
-		if strings.TrimSpace(d) == weekday {
-			return true
-		}
-	}
-	return false
-}
-
-// isInTimeRange checks if currentTime falls within [startTime, endTime).
-// Handles both normal ranges (14:00-18:00) and overnight ranges (22:00-06:00).
-func isInTimeRange(startTime, endTime, currentTime string) bool {
-	if startTime <= endTime {
-		// Normal range: e.g., 14:00-18:00
-		return currentTime >= startTime && currentTime < endTime
-	}
-	// Overnight range: e.g., 22:00-06:00
-	return currentTime >= startTime || currentTime < endTime
-}
+// matchDay / isInTimeRange were moved to the timeutil package so that all
+// window/routing/time-multiplier decisions share one Asia/Shanghai-aware
+// implementation. See internal/timeutil.

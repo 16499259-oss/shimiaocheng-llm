@@ -11,6 +11,7 @@ type CallLog struct {
 	ID               int64   `json:"id"`
 	UserID           int64   `json:"user_id"`
 	Model            string  `json:"model"`
+	ProviderID       string  `json:"provider_id"` // upstream provider that served the call ("zhipu"/"openai"/...)
 	PromptTokens     int     `json:"prompt_tokens"`
 	CompletionTokens int     `json:"completion_tokens"`
 	TotalTokens      int     `json:"total_tokens"`
@@ -47,11 +48,17 @@ type Pagination struct {
 // InsertCallLog inserts a new call log record.
 func InsertCallLog(db *sql.DB, log *CallLog) (int64, error) {
 	now := time.Now().Format(time.RFC3339)
+	// Safety default: an empty provider_id would break analytics; fall back to
+	// "zhipu" (also the DB column default) so the row is always well-formed.
+	providerID := log.ProviderID
+	if providerID == "" {
+		providerID = "zhipu"
+	}
 	result, err := db.Exec(
-		`INSERT INTO call_logs (user_id, model, prompt_tokens, completion_tokens, total_tokens,
+		`INSERT INTO call_logs (user_id, model, provider_id, prompt_tokens, completion_tokens, total_tokens,
 		 effective_calls, multiplier_used, status_code, latency_ms, error_msg, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		log.UserID, log.Model, log.PromptTokens, log.CompletionTokens,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		log.UserID, log.Model, providerID, log.PromptTokens, log.CompletionTokens,
 		log.TotalTokens, log.EffectiveCalls, log.MultiplierUsed,
 		log.StatusCode, log.LatencyMs, log.ErrorMsg, now,
 	)
@@ -93,7 +100,7 @@ func QueryCallLogs(db *sql.DB, filter CallLogFilter) (*CallLogPage, error) {
 
 	// Query data
 	dataQuery := fmt.Sprintf(
-		`SELECT id, user_id, model, prompt_tokens, completion_tokens, total_tokens,
+		`SELECT id, user_id, model, provider_id, prompt_tokens, completion_tokens, total_tokens,
 		 effective_calls, multiplier_used, status_code, latency_ms,
 		 COALESCE(error_msg, ''), created_at
 		 FROM call_logs WHERE %s ORDER BY id DESC LIMIT ? OFFSET ?`, where,
@@ -110,7 +117,7 @@ func QueryCallLogs(db *sql.DB, filter CallLogFilter) (*CallLogPage, error) {
 	for rows.Next() {
 		var l CallLog
 		err := rows.Scan(
-			&l.ID, &l.UserID, &l.Model, &l.PromptTokens, &l.CompletionTokens,
+			&l.ID, &l.UserID, &l.Model, &l.ProviderID, &l.PromptTokens, &l.CompletionTokens,
 			&l.TotalTokens, &l.EffectiveCalls, &l.MultiplierUsed,
 			&l.StatusCode, &l.LatencyMs, &l.ErrorMsg, &l.CreatedAt,
 		)

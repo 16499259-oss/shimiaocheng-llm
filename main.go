@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 
 	"golang.org/x/crypto/bcrypt"
@@ -27,25 +26,8 @@ import (
 	"llm_api_gateway/internal/models"
 	"llm_api_gateway/internal/proxy"
 	"llm_api_gateway/internal/quota"
+	"llm_api_gateway/internal/router"
 )
-
-// apiKeyHolder provides thread-safe runtime access to the upstream API key.
-type apiKeyHolder struct {
-	mu  sync.RWMutex
-	key string
-}
-
-func (h *apiKeyHolder) Get() string {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.key
-}
-
-func (h *apiKeyHolder) Set(key string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.key = key
-}
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "Path to configuration file")
@@ -59,13 +41,30 @@ func main() {
 	}
 	log.Printf("Configuration loaded from %s", *configPath)
 
-	// Key + endpoint holders — support runtime update via admin panel
-	keyHolder := &apiKeyHolder{key: cfg.API.ZhipuAPIKey}
-	endpointHolder := &apiKeyHolder{key: cfg.API.ZhipuEndpoint}
+	// Credential store (in-memory only). Provider keys are injected from their
+	// configured environment variables at startup and NEVER written to disk
+	// (see ADR-0002 / AGENTS.md §5). The same holder instance is shared between
+	// the router and the admin panel so admin key updates propagate immediately.
+	creds := router.NewCredentialStore()
+	for _, p := range cfg.Providers {
+		initial := ""
+		if p.APIKeyEnv != "" {
+			initial = os.Getenv(p.APIKeyEnv)
+		}
+		creds.Set(p.ID, initial)
+	}
+
+	// Determine the default (zhipu) endpoint for the legacy fallback path.
+	defaultEndpoint := cfg.API.ZhipuEndpoint
+	for _, p := range cfg.Providers {
+		if p.IsDefault {
+			defaultEndpoint = p.Endpoint
+		}
+	}
 
 	// Validate required config
-	if keyHolder.Get() == "" {
-		log.Println("WARNING: zhipu_api_key is not set. Set it via admin panel.")
+	if creds.Get("zhipu") == "" {
+		log.Println("WARNING: zhipu upstream key (ZHIPU_API_KEY) is not set. Set it via systemd env or admin panel.")
 	}
 
 	// Initialize database
@@ -74,6 +73,10 @@ func main() {
 		log.Fatalf("Failed to open database: %v", err)
 	}
 	defer database.Close()
+
+	// Router resolves the upstream provider per request (time-window routing).
+	// Built after the DB is open so it can load rules from provider_routing_rules.
+	routerInst := router.NewRouter(database.Conn, cfg, creds)
 
 	// Run migrations
 	if err := db.RunMigrations(database); err != nil {
@@ -111,12 +114,14 @@ func main() {
 	quotaScheduler.Start()
 	defer quotaScheduler.Stop()
 
-	// Proxy handler — reads API key + endpoint dynamically via holders
+	// Proxy handler — resolves the upstream provider via the Router.
+	// Legacy getters remain as a fallback when Router is nil (gradual rollout).
 	proxyHandler := &proxy.Handler{
-		APIKeyGetter:   keyHolder.Get,
-		EndpointGetter: endpointHolder.Get,
+		APIKeyGetter:   func() string { return creds.Get("zhipu") },
+		EndpointGetter: func() string { return defaultEndpoint },
 		QuotaChecker:   quotaChecker,
 		MultiplierEng:  multiplierEng,
+		Router:         routerInst,
 	}
 
 	// Quota query handler
@@ -142,9 +147,9 @@ func main() {
 		Default5hLimit:    cfg.Quota.Default5hLimit,
 		DefaultTotalLimit: cfg.Quota.DefaultTotalLimit,
 		ConfigPath:        *configPath,
-		APIKeyConfigured:  func() bool { return keyHolder.Get() != "" },
-		EndpointGetter:    endpointHolder.Get,
-		APIKeySetter:      keyHolder.Set,
+		APIKeyConfigured:  func() bool { return creds.Get("zhipu") != "" },
+		EndpointGetter:    func() string { return defaultEndpoint },
+		APIKeySetter:      func(k string) { creds.Holder("zhipu").Set(k) },
 	}
 
 	// Build routes

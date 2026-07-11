@@ -14,9 +14,10 @@ import (
 
 // handleStream handles SSE streaming response from the upstream.
 // The quota has already been deducted in the handler before calling this method.
-func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, bodyBytes []byte, userID int64, model string, effectiveCalls int, multiplier float64, startTime time.Time) {
+// endpoint/apiKey/providerID are the resolved upstream target for this request.
+func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, bodyBytes []byte, userID int64, model, providerID, endpoint, apiKey string, effectiveCalls int, multiplier float64, startTime time.Time) {
 	// Build upstream request
-	upstreamReq, err := BuildUpstreamRequest(h.EndpointGetter(), h.APIKeyGetter(), bodyBytes)
+	upstreamReq, err := BuildUpstreamRequest(endpoint, apiKey, bodyBytes)
 	if err != nil {
 		writeProxyError(w, http.StatusInternalServerError, "Failed to build upstream request", "internal_error")
 		return
@@ -35,6 +36,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, bodyBytes
 		callLog := &models.CallLog{
 			UserID:         userID,
 			Model:          model,
+			ProviderID:     providerID,
 			EffectiveCalls: effectiveCalls,
 			MultiplierUsed: multiplier,
 			StatusCode:     502,
@@ -54,6 +56,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, bodyBytes
 		callLog := &models.CallLog{
 			UserID:         userID,
 			Model:          model,
+			ProviderID:     providerID,
 			EffectiveCalls: effectiveCalls,
 			MultiplierUsed: multiplier,
 			StatusCode:     resp.StatusCode,
@@ -150,6 +153,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, bodyBytes
 	callLog := &models.CallLog{
 		UserID:           userID,
 		Model:            model,
+		ProviderID:       providerID,
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
 		TotalTokens:      totalTokens,
