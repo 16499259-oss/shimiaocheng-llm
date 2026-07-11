@@ -25,6 +25,7 @@ type Handler struct {
 	ConfigPath       string
 	APIKeyConfigured func() bool
 	EndpointGetter   func() string
+	APIKeySetter     func(string) // updates the in-memory API key (no disk persistence)
 }
 
 // RegisterRoutes registers all admin routes on the given ServeMux.

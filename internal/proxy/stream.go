@@ -23,7 +23,12 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, bodyBytes
 	}
 
 	// Execute upstream request
-	client := &http.Client{Timeout: 0} // No timeout for streaming
+	// Streaming responses can run long, so we avoid a tight overall Timeout, but
+	// we cap the total stream duration at 10 minutes to prevent a hung/malicious
+	// upstream from occupying a worker connection indefinitely.
+	client := &http.Client{
+		Timeout: 10 * time.Minute,
+	}
 	resp, err := client.Do(upstreamReq)
 	if err != nil {
 		latencyMs := int(time.Since(startTime).Milliseconds())

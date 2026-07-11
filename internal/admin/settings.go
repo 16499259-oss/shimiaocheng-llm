@@ -27,14 +27,19 @@ func (h *Handler) HandleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Persist to YAML config on disk
+	// Update the API key in memory immediately (no plaintext key persisted to disk).
+	if req.ZhipuAPIKey != "" {
+		h.APIKeySetter(req.ZhipuAPIKey)
+	}
+
+	// Persist endpoint only; never write the plaintext API key to disk.
 	if err := h.persistToYAML(req.ZhipuAPIKey, req.ZhipuEndpoint); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save config: " + err.Error()})
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"message": "Settings saved to config. Restart service to apply.",
+		"message": "API Key 已即时生效（内存态，重启将失效；建议用环境变量 ZHIPU_API_KEY 持久化）。Endpoint 已保存。",
 	})
 }
 
@@ -56,7 +61,9 @@ func (h *Handler) persistToYAML(apiKey, endpoint string) error {
 	apiSection := cfg["api"].(map[string]interface{})
 
 	if apiKey != "" {
-		apiSection["zhipu_api_key"] = apiKey
+		// Never persist the plaintext API key to disk; strip it from the
+		// on-disk config if it was previously stored in plaintext.
+		delete(apiSection, "zhipu_api_key")
 	}
 	if endpoint != "" {
 		apiSection["zhipu_endpoint"] = endpoint
