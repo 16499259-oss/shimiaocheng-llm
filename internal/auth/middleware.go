@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
@@ -148,9 +149,16 @@ func GetUserID(r *http.Request) int64 {
 }
 
 // writeAuthError writes a JSON error response for authentication failures.
+// It uses json.Encoder so that message / errType are correctly escaped (a
+// quote or backslash in either field can no longer produce invalid JSON).
 func writeAuthError(w http.ResponseWriter, statusCode int, message, errType string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	body := `{"error":{"message":"` + message + `","type":"` + errType + `","code":"` + errType + `"}}`
-	w.Write([]byte(body))
+	json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]string{
+			"message": message,
+			"type":    errType,
+			"code":    errType,
+		},
+	})
 }

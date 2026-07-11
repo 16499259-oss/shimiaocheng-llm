@@ -185,10 +185,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve the upstream provider ONCE for this request (time-window routing).
 	// When no Router is wired, fall back to the legacy getters (gradual rollout).
-	providerID := "zhipu"
-	endpoint := h.EndpointGetter()
-	apiKey := h.APIKeyGetter()
+	providerID := "zhipu" // default fallback id when no Router is wired (legacy path)
+	var endpoint, apiKey string
 	if h.Router != nil {
+		// New routing path: resolve the upstream provider via time-window rules.
 		prov, err := h.Router.ResolveProvider(time.Now())
 		if err != nil {
 			writeProxyError(w, http.StatusServiceUnavailable, "No upstream provider available", "no_provider")
@@ -197,6 +197,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		providerID = prov.ID
 		endpoint = prov.Endpoint
 		apiKey = prov.APIKey
+	} else {
+		// Legacy fallback path (gradual rollout safety): only here do we invoke
+		// the dynamic getters. This guarantees a nil getter can never panic when
+		// a Router is wired (P2-1).
+		if h.EndpointGetter == nil || h.APIKeyGetter == nil {
+			writeProxyError(w, http.StatusInternalServerError, "Gateway misconfigured", "internal_error")
+			return
+		}
+		endpoint = h.EndpointGetter()
+		apiKey = h.APIKeyGetter()
 	}
 
 	// Rewrite the model name for the selected provider. Missing mapping ->
@@ -206,6 +216,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rewrittenModel = h.Router.RewriteModel(chatReq.Model, providerID)
 	}
 	bodyBytes = rewriteBodyModel(bodyBytes, rewrittenModel)
+
+	// Defensive (P2-2): the quota / multiplier engines must be configured. If
+	// either is nil the gateway is misconfigured — fail fast with 500 instead of
+	// panicking downstream.
+	if h.MultiplierEng == nil || h.QuotaChecker == nil {
+		writeProxyError(w, http.StatusInternalServerError, "Gateway misconfigured", "internal_error")
+		return
+	}
 
 	// Get effective multiplier for the current time (Asia/Shanghai)
 	multiplier := h.MultiplierEng.GetEffectiveMultiplier(time.Now())

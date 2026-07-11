@@ -179,9 +179,12 @@ func (r *Router) ResolveProvider(now time.Time) (Provider, error) {
 		// Window hit -> return this provider. NEVER fall back to the default.
 		prov, ok := r.providers[rule.ProviderID]
 		if !ok {
-			// Configured provider is missing from config; skip to next rule
-			// rather than crashing or silently using another provider.
-			continue
+			// Strict no-fallback invariant (AGENTS.md §6): a time window that
+			// matched provider B must resolve to B. If B is not configured, this
+			// is an administrator misconfiguration — surface it explicitly (the
+			// handler converts this error to HTTP 503) instead of silently
+			// downgrading to the default provider A.
+			return Provider{}, fmt.Errorf("routing rule %d targets provider %q which is not configured", rule.ID, rule.ProviderID)
 		}
 		return Provider{
 			ID:       prov.ID,
