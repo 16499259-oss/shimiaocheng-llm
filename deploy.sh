@@ -63,7 +63,7 @@ usage() {
 # env-var-based remote execution model.
 validate_value() {
   local name="$1" value="$2"
-  if printf '%s' "$value" | grep -Eq "[;&|<>$'\''\`\\$]"; then
+  if printf '%s' "$value" | grep -Eq "$(printf '[\;&|<>%s"\`\\$]' "'")"; then
     echo "ERROR: '$name' contains unsafe shell metacharacters: $value" >&2
     exit 1
   fi
