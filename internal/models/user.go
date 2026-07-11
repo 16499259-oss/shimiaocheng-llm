@@ -9,26 +9,26 @@ import (
 
 // User represents a user in the system.
 type User struct {
-	ID             int64  `json:"id"`
-	Username       string `json:"username"`
-	PasswordHash   string `json:"-"` // never exposed in JSON
-	SubKeyHash     string `json:"-"` // never exposed in JSON
-	SubKeyPreview  string `json:"sub_key_preview"`
-	Role           string `json:"role"`
-	Status         string `json:"status"`
-	CreatedAt      string `json:"created_at"`
-	UpdatedAt      string `json:"updated_at"`
+	ID            int64  `json:"id"`
+	Username      string `json:"username"`
+	PasswordHash  string `json:"-"` // never exposed in JSON
+	SubKeyHash    string `json:"-"` // never exposed in JSON
+	SubKeyPreview string `json:"sub_key_preview"`
+	Role          string `json:"role"`
+	Status        string `json:"status"`
+	CreatedAt     string `json:"created_at"`
+	UpdatedAt     string `json:"updated_at"`
 }
 
 // UserWithQuota combines user info with quota info for API responses.
 type UserWithQuota struct {
 	User
-	Quota5hLimit   int    `json:"quota_5h_limit"`
-	Quota5hUsed    int    `json:"quota_5h_used"`
-	QuotaTotalLimit int   `json:"quota_total_limit"`
-	QuotaTotalUsed int    `json:"quota_total_used"`
-	TotalTokens    int64  `json:"total_tokens"`
-	SubKey         string `json:"sub_key,omitempty"`
+	Quota5hLimit    int    `json:"quota_5h_limit"`
+	Quota5hUsed     int    `json:"quota_5h_used"`
+	QuotaTotalLimit int    `json:"quota_total_limit"`
+	QuotaTotalUsed  int    `json:"quota_total_used"`
+	TotalTokens     int64  `json:"total_tokens"`
+	SubKey          string `json:"sub_key,omitempty"`
 }
 
 // CreateUser inserts a new user and associated quota record.
@@ -85,8 +85,8 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 			CreatedAt:     now,
 			UpdatedAt:     now,
 		},
-		Quota5hLimit:   quota5hLimit,
-		Quota5hUsed:    0,
+		Quota5hLimit:    quota5hLimit,
+		Quota5hUsed:     0,
 		QuotaTotalLimit: quotaTotalLimit,
 		QuotaTotalUsed:  0,
 	}, nil

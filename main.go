@@ -113,10 +113,10 @@ func main() {
 
 	// Proxy handler — reads API key + endpoint dynamically via holders
 	proxyHandler := &proxy.Handler{
-		APIKeyGetter:    keyHolder.Get,
-		EndpointGetter:  endpointHolder.Get,
-		QuotaChecker:    quotaChecker,
-		MultiplierEng:   multiplierEng,
+		APIKeyGetter:   keyHolder.Get,
+		EndpointGetter: endpointHolder.Get,
+		QuotaChecker:   quotaChecker,
+		MultiplierEng:  multiplierEng,
 	}
 
 	// Quota query handler

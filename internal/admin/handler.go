@@ -13,12 +13,12 @@ import (
 
 // Handler manages all admin panel routes and sub-handlers.
 type Handler struct {
-	DB              *sql.DB
-	AuthMW          *auth.Middleware
-	MultiplierEng   *quota.MultiplierEngine
-	StaticFS        fs.FS
-	SessionExpHours int
-	SubKeySalt      string
+	DB                *sql.DB
+	AuthMW            *auth.Middleware
+	MultiplierEng     *quota.MultiplierEngine
+	StaticFS          fs.FS
+	SessionExpHours   int
+	SubKeySalt        string
 	Default5hLimit    int
 	DefaultTotalLimit int
 	// Settings

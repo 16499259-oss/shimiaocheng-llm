@@ -19,10 +19,10 @@ type createUserRequest struct {
 
 // updateUserRequest is the JSON body for PUT /admin/api/users/{id}.
 type updateUserRequest struct {
-	Quota5hLimit    *int   `json:"quota_5h_limit"`
-	QuotaTotalLimit *int   `json:"quota_total_limit"`
+	Quota5hLimit    *int    `json:"quota_5h_limit"`
+	QuotaTotalLimit *int    `json:"quota_total_limit"`
 	Status          *string `json:"status"`
-	RegenerateKey   *bool  `json:"regenerate_key"`
+	RegenerateKey   *bool   `json:"regenerate_key"`
 }
 
 // CreateUser handles POST /admin/api/users.
@@ -79,16 +79,16 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	// Return the sub-key in plaintext (only time)
 	user.SubKeyPreview = actualSubKeyPreview
 	response := map[string]any{
-		"id":               user.ID,
-		"username":         user.Username,
-		"sub_key":          actualSubKey,
-		"sub_key_preview":  actualSubKeyPreview,
-		"quota_5h_limit":   user.Quota5hLimit,
-		"quota_5h_used":    user.Quota5hUsed,
+		"id":                user.ID,
+		"username":          user.Username,
+		"sub_key":           actualSubKey,
+		"sub_key_preview":   actualSubKeyPreview,
+		"quota_5h_limit":    user.Quota5hLimit,
+		"quota_5h_used":     user.Quota5hUsed,
 		"quota_total_limit": user.QuotaTotalLimit,
-		"quota_total_used": user.QuotaTotalUsed,
-		"status":           user.Status,
-		"created_at":       user.CreatedAt,
+		"quota_total_used":  user.QuotaTotalUsed,
+		"status":            user.Status,
+		"created_at":        user.CreatedAt,
 	}
 
 	writeJSON(w, http.StatusCreated, response)

@@ -20,16 +20,16 @@ type Quota struct {
 
 // QuotaStatus is returned by the /v1/quota endpoint.
 type QuotaStatus struct {
-	Quota5hLimit      int    `json:"quota_5h_limit"`
-	Quota5hUsed       int    `json:"quota_5h_used"`
-	Quota5hRemaining  int    `json:"quota_5h_remaining"`
-	QuotaTotalLimit   int    `json:"quota_total_limit"`
-	QuotaTotalUsed    int    `json:"quota_total_used"`
-	QuotaTotalRemaining int  `json:"quota_total_remaining"`
-	TotalTokens         int64 `json:"total_tokens"`
-	TotalTokensToday    int64 `json:"total_tokens_today"`
-	WindowResetAt     string `json:"window_reset_at"`
-	Status            string `json:"status"`
+	Quota5hLimit        int    `json:"quota_5h_limit"`
+	Quota5hUsed         int    `json:"quota_5h_used"`
+	Quota5hRemaining    int    `json:"quota_5h_remaining"`
+	QuotaTotalLimit     int    `json:"quota_total_limit"`
+	QuotaTotalUsed      int    `json:"quota_total_used"`
+	QuotaTotalRemaining int    `json:"quota_total_remaining"`
+	TotalTokens         int64  `json:"total_tokens"`
+	TotalTokensToday    int64  `json:"total_tokens_today"`
+	WindowResetAt       string `json:"window_reset_at"`
+	Status              string `json:"status"`
 }
 
 // GetQuota retrieves the quota record for a user.

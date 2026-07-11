@@ -26,7 +26,7 @@ func Open(dbPath string) (*DB, error) {
 	}
 
 	// Configure connection pool
-	conn.SetMaxOpenConns(1)    // SQLite only supports one writer at a time
+	conn.SetMaxOpenConns(1) // SQLite only supports one writer at a time
 	conn.SetMaxIdleConns(1)
 	conn.SetConnMaxLifetime(0) // Connections are persistent
 

@@ -19,7 +19,7 @@ func (h *Handler) HandleGetSettings(w http.ResponseWriter, r *http.Request) {
 // HandleUpdateSettings updates the API key and/or endpoint, persists to config file.
 func (h *Handler) HandleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ZhipuAPIKey  string `json:"zhipu_api_key"`
+		ZhipuAPIKey   string `json:"zhipu_api_key"`
 		ZhipuEndpoint string `json:"zhipu_endpoint"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
