@@ -1,1366 +1,706 @@
-# LLM API Gateway — 系统架构设计
+# LLM API Gateway — Admin 后台多上游动态管理 系统架构设计
 
-> 版本：v1.2 | 日期：2025-07-09 | 作者：高见远（架构师）
-> 
-> **v1.2 变更**: 配额主单位从 token 改为**调用次数**；token 保留为辅助统计字段
-> **v1.1 变更**: ①配额由软限制改为硬限制；②新增时段倍率系统
-
----
-
-## 目录
-
-1. [整体架构](#1-整体架构)
-2. [技术栈选型](#2-技术栈选型)
-3. [数据库表结构](#3-数据库表结构)
-4. [API 接口设计](#4-api-接口设计)
-5. [安全策略](#5-安全策略)
-6. [SSE 流式响应透传方案](#6-sse-流式响应透传方案)
-7. [5h 配额自动重置方案](#7-5h-配额自动重置方案)
-8. [配额模型详解](#8-配额模型详解)
-9. [时段倍率系统](#9-时段倍率系统)
-10. [子 Key 生成与管理](#10-子-key-生成与管理)
-11. [项目文件结构](#11-项目文件结构)
-12. [依赖包列表](#12-依赖包列表)
-13. [部署方案](#13-部署方案)
-14. [任务列表](#14-任务列表)
-15. [待明确事项](#15-待明确事项)
+> **架构师**：高见远（Bob）
+> **日期**：2026-07-11
+> **基于**：PRD v1 + 7 条已确认产品决策
 
 ---
 
-## 1. 整体架构
+## Part A: 系统设计
+
+### 1. 实施方案
+
+#### 1.1 核心技术挑战
+
+| 挑战 | 分析 | 方案 |
+|------|------|------|
+| **Key 安全存储** | 当前 Key 仅存内存+环境变量，无法在 Admin 后台持久化管理多个 provider 的 Key | AES-256-GCM 加密落库，KEK 从 `GATEWAY_KEK_ENV` 环境变量注入 |
+| **热加载** | 当前 Router 在 `NewRouter` 时一次性构建，后续无法感知 provider/mapping 变更 | `sync/atomic.Value` 持有 ProviderTable 快照，Admin CRUD 后调用 `Router.Reload()` 原子替换 |
+| **数据迁移** | 现有 providers/model_mappings 在 config.yaml 中定义，需迁移到 DB | 首次启动时检测 DB 空表 → 从 config.yaml 种子化（幂等） |
+| **DB 优先** | 迁移后运行期不再读 config.yaml 的 providers/mappings | Router 只从 DB 读，config.go 的 Load 函数不再注入默认 provider |
+| **最小破坏** | 不能破坏现有路由、代理、倍率等功能 | Router 接口保持不变（`ResolveProvider` / `RewriteModel`），仅内部数据源切换 |
+
+#### 1.2 框架与库选型
+
+| 层级 | 技术选择 | 理由 |
+|------|----------|------|
+| **加密** | Go 标准库 `crypto/aes` + `crypto/cipher` (GCM 模式) | 零 CGO，Go 1.22 原生支持，无需第三方依赖；AES-256-GCM 是 NIST 推荐认证加密 |
+| **KEK 派生** | `crypto/sha256` 对 `GATEWAY_KEK_ENV` 哈希 → 32 字节 AES-256 密钥 | 允许任意长度 KEK 字符串，标准密钥派生 |
+| **热加载** | `sync/atomic.Value` | Go 零锁读，Router 热路径无竞争；写路径仅在 Admin CRUD 时触发（低频） |
+| **API 风格** | RESTful，延续现有 Go 1.22 `ServeMux` 模式 (`METHOD /path` + `PathValue`) | 与现有 `/admin/api/users`、`/admin/api/multipliers` 风格一致 |
+| **前端** | 原生 HTML/CSS/JS，无框架 | 产品决策 Q5：改动范围可控，延续现有风格 |
+| **DB** | modernc.org/sqlite（已在使用） | 零 CGO，纯 Go 实现 |
+
+#### 1.3 架构模式
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  main.go                                                  │
+│  ┌─────────┐  ┌──────────┐  ┌──────────────────────────┐ │
+│  │ KEK     │  │ Router   │  │ Admin Handler            │ │
+│  │ (env)   │  │ (atomic) │  │ ┌──────────────────────┐ │ │
+│  └────┬────┘  └────┬─────┘  │ │ ProvidersHandler     │ │ │
+│       │            │        │ │ MappingsHandler      │ │ │
+│  ┌────▼────────────▼─────┐  │ │ RoutingRulesHandler  │ │ │
+│  │   ProviderStore       │◄─┤ │ AuditLogHandler      │ │ │
+│  │  (DB CRUD + 加解密)    │  │ └──────────────────────┘ │ │
+│  └───────────────────────┘  └──────────────────────────┘ │
+└──────────────────────────────────────────────────────────┘
+```
+
+- **ProviderStore**：唯一的数据访问层，封装 DB CRUD + 加密/解密，Router 和 Admin Handler 都通过它操作数据
+- **Router**：持有 `atomic.Value`，提供 `ResolveProvider` / `RewriteModel` 接口不变；新增 `Reload()` 方法供 Admin 调用
+- **Admin Handler**：新增 4 个 handler 文件，在 `handler.go` 中注册路由
+
+---
+
+### 2. 文件列表
+
+#### 2.1 新增文件
+
+| # | 相对路径 | 用途 |
+|---|----------|------|
+| 1 | `internal/security/encrypt.go` | AES-256-GCM 加密/解密函数 + KEK 派生 |
+| 2 | `internal/security/encrypt_test.go` | 加密模块单元测试 |
+| 3 | `internal/provider/store.go` | Provider + ModelMapping + RoutingRule + AuditLog 的 DB CRUD |
+| 4 | `internal/provider/store_test.go` | Store 单元测试 |
+| 5 | `internal/admin/providers.go` | Provider CRUD API handler（列表/创建/更新/删除） |
+| 6 | `internal/admin/mappings.go` | ModelMapping CRUD API handler |
+| 7 | `internal/admin/routing.go` | RoutingRules CRUD API handler |
+| 8 | `internal/admin/audit.go` | AuditLog 查询 API handler |
+| 9 | `docs/adr/0007-key-encryption-db-hot-reload.md` | ADR：Key 加密落库 + 热加载架构决策 |
+
+#### 2.2 修改文件
+
+| # | 相对路径 | 操作 | 用途 |
+|---|----------|------|------|
+| 10 | `internal/db/migrations.go` | 修改 | 新增 providers、model_mappings、audit_logs 三张表 DDL + 种子迁移函数 |
+| 11 | `internal/router/selector.go` | 修改 | Router 改为从 ProviderStore 加载数据，使用 atomic.Value 热加载 |
+| 12 | `internal/config/config.go` | 修改 | Load 函数移除 providers/model_mappings 默认注入逻辑（仅首次种子用） |
+| 13 | `main.go` | 修改 | 加载 KEK、创建 ProviderStore、注入 Router/AdminHandler |
+| 14 | `internal/admin/handler.go` | 修改 | Handler 结构体新增字段 + RegisterRoutes 注册新路由 |
+| 15 | `web/admin/index.html` | 修改 | 左侧导航重构 + 新增「上游管理」「模型映射」「路由规则」「审计日志」页面区域 |
+| 16 | `web/admin/app.js` | 修改 | 新增 Provider/Mapping/Routing/Audit 的前端逻辑 |
+| 17 | `web/admin/style.css` | 修改 | 新增 Tab 导航、密钥掩码展示等样式 |
+| 18 | `go.mod` | 修改 | 依赖声明（无需新增第三方包） |
+
+---
+
+### 3. 数据结构与接口
+
+#### 3.1 Go 结构体（核心）
+
+```go
+// —— internal/provider/store.go ——
+
+// ProviderRecord 是 providers 表的 DB 行模型
+type ProviderRecord struct {
+    ID        int64  `json:"id"`
+    Name      string `json:"name"`       // 显示名，如 "智谱 GLM"
+    Slug      string `json:"slug"`       // 唯一标识，如 "zhipu"（对应路由中 provider_id）
+    Endpoint  string `json:"endpoint"`   // 上游 chat-completions 端点
+    EncryptedKey []byte `json:"-"`       // AES-256-GCM 密文（JSON 不输出）
+    IsDefault bool   `json:"is_default"`
+    Enabled   bool   `json:"enabled"`
+    CreatedAt string `json:"created_at"`
+    UpdatedAt string `json:"updated_at"`
+}
+
+// ModelMappingRecord 是 model_mappings 表的 DB 行模型
+type ModelMappingRecord struct {
+    ID         int64  `json:"id"`
+    External   string `json:"external"`   // 对外模型名，如 "glm-5.2"
+    ProviderID string `json:"provider_id"` // provider slug
+    RealModel  string `json:"real_model"`  // 该 provider 的真实模型名
+    CreatedAt  string `json:"created_at"`
+}
+
+// AuditLogRecord 是 audit_logs 表的 DB 行模型
+type AuditLogRecord struct {
+    ID         int64  `json:"id"`
+    Action     string `json:"action"`     // "provider.create", "provider.update", "mapping.delete"...
+    TargetType string `json:"target_type"` // "provider", "model_mapping", "routing_rule"
+    TargetID   string `json:"target_id"`
+    Detail     string `json:"detail"`      // JSON 摘要
+    CreatedAt  string `json:"created_at"`
+}
+
+// RoutingRuleRecord 是 provider_routing_rules 表的 DB 行模型（扩展现有）
+// 字段与现有 router.RoutingRule 兼容，新增 provider_id FK 关联
+```
+
+```go
+// —— internal/security/encrypt.go ——
+
+// DeriveKEK 从 GATEWAY_KEK_ENV 环境变量派生 32 字节 AES-256 密钥
+func DeriveKEK() ([]byte, error)
+
+// Encrypt 使用 AES-256-GCM 加密明文，返回 ciphertext（含 nonce 前缀）
+func Encrypt(plaintext string, key []byte) ([]byte, error)
+
+// Decrypt 使用 AES-256-GCM 解密密文（nonce 前缀），返回明文
+func Decrypt(ciphertext []byte, key []byte) (string, error)
+
+// MaskKey 对明文 Key 做前端脱敏显示：保留前4后4字符，中间用 * 替换
+func MaskKey(key string) string
+```
+
+```go
+// —— internal/provider/store.go ——
+
+// ProviderStore 是 providers / model_mappings / routing_rules / audit_logs 的数据访问层
+type ProviderStore struct {
+    db  *sql.DB
+    kek []byte // 加密主密钥（内存态，从环境变量注入）
+}
+
+// NewProviderStore 创建 store（kek 不能为空，否则 panic）
+func NewProviderStore(db *sql.DB, kek []byte) *ProviderStore
+
+// —— Provider CRUD ——
+func (s *ProviderStore) ListProviders() ([]ProviderRecord, error)
+func (s *ProviderStore) GetProvider(slug string) (*ProviderRecord, error)
+func (s *ProviderStore) CreateProvider(name, slug, endpoint, apiKey string, isDefault bool) (*ProviderRecord, error)
+func (s *ProviderStore) UpdateProvider(slug string, updates map[string]any) (*ProviderRecord, error)
+func (s *ProviderStore) DeleteProvider(slug string) error
+func (s *ProviderStore) SetDefaultProvider(slug string) error
+
+// —— ModelMapping CRUD ——
+func (s *ProviderStore) ListMappings() ([]ModelMappingRecord, error)
+func (s *ProviderStore) CreateMapping(external, providerID, realModel string) (*ModelMappingRecord, error)
+func (s *ProviderStore) UpdateMapping(id int64, updates map[string]any) error
+func (s *ProviderStore) DeleteMapping(id int64) error
+
+// —— RoutingRules CRUD ——
+func (s *ProviderStore) ListRoutingRules() ([]router.RoutingRule, error)
+func (s *ProviderStore) CreateRoutingRule(rule *router.RoutingRule) error
+func (s *ProviderStore) UpdateRoutingRule(id int64, updates map[string]any) error
+func (s *ProviderStore) DeleteRoutingRule(id int64) error
+
+// —— Audit ——
+func (s *ProviderStore) ListAuditLogs(page, limit int) ([]AuditLogRecord, int, error)
+func (s *ProviderStore) WriteAudit(action, targetType, targetID, detail string)
+
+// —— Seed ——
+// SeedFromConfig 从 config.yaml 种子化 providers/model_mappings（幂等：仅空表时执行）
+func (s *ProviderStore) SeedFromConfig(cfg *config.Config) error
+
+// —— Snapshot（供 Router 热加载） ——
+// BuildProviderTable 查询所有 enabled provider + mapping，解密 Key，构建原子快照
+func (s *ProviderStore) BuildProviderTable() (*ProviderTable, error)
+```
+
+```go
+// —— internal/router/selector.go（改造后） ——
+
+// ProviderTable 是 Router 的原子快照，通过 atomic.Value 热加载
+type ProviderTable struct {
+    Providers map[string]ProviderEntry  // slug -> entry
+    Mappings  map[string]map[string]string // external -> providerSlug -> realModel
+    Default   string                     // 默认 provider slug
+}
+
+// ProviderEntry 是快照中的单个 provider
+type ProviderEntry struct {
+    Slug     string
+    Endpoint string
+    APIKey   string // 已解密的明文 Key（仅内存，绝不落盘/日志）
+}
+
+// Router 结构体改造
+type Router struct {
+    db    *sql.DB
+    store *provider.ProviderStore // 新增：数据访问
+    table atomic.Value            // *ProviderTable（原子读写）
+}
+
+// NewRouter 创建 Router（初始加载一次）
+func NewRouter(db *sql.DB, store *provider.ProviderStore) *Router
+
+// Reload 从 DB 重新加载 provider 表并原子替换（Admin CRUD 后调用）
+func (r *Router) Reload() error
+
+// ResolveProvider 接口不变（从 atomic.Value 读）
+func (r *Router) ResolveProvider(now time.Time) (Provider, error)
+
+// RewriteModel 接口不变（从 atomic.Value 读）
+func (r *Router) RewriteModel(external, providerID string) string
+```
+
+#### 3.2 DB Schema（新增三张表）
+
+```sql
+-- providers 表：上游 LLM 提供商
+CREATE TABLE IF NOT EXISTS providers (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    name           TEXT    NOT NULL,                          -- 显示名，如 "智谱 GLM"
+    slug           TEXT    NOT NULL UNIQUE,                   -- 唯一标识，如 "zhipu"
+    endpoint       TEXT    NOT NULL,                          -- 上游端点 URL
+    encrypted_key  BLOB    NOT NULL,                          -- AES-256-GCM 密文
+    is_default     INTEGER NOT NULL DEFAULT 0,                -- 是否为默认 provider
+    enabled        INTEGER NOT NULL DEFAULT 1,                -- 是否启用
+    created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_providers_slug ON providers(slug);
+CREATE INDEX IF NOT EXISTS idx_providers_enabled ON providers(enabled);
+
+-- model_mappings 表：外部模型名 → 各 provider 真实模型名
+CREATE TABLE IF NOT EXISTS model_mappings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    external    TEXT    NOT NULL,                             -- 对外模型名，如 "glm-5.2"
+    provider_id TEXT    NOT NULL,                             -- provider slug
+    real_model  TEXT    NOT NULL,                             -- 该 provider 的真实模型名
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (provider_id) REFERENCES providers(slug) ON DELETE CASCADE
+);
+
+-- 联合唯一约束：(external, provider_id)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_model_mappings_ext_prov 
+    ON model_mappings(external, provider_id);
+
+-- audit_logs 表：操作审计日志
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    action      TEXT    NOT NULL,                             -- "provider.create" 等
+    target_type TEXT    NOT NULL,                             -- "provider" / "model_mapping" / "routing_rule"
+    target_id   TEXT    NOT NULL,                             -- 操作对象标识
+    detail      TEXT    NOT NULL DEFAULT '',                  -- JSON 摘要
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
+```
+
+#### 3.3 API 契约
+
+**所有 API 前缀**：`/admin/api/`（沿用现有约定）
+
+##### Provider API
+
+| Method | Path | Request Body | Response | 说明 |
+|--------|------|-------------|----------|------|
+| `GET` | `/admin/api/providers` | — | `{"data": [ProviderRecord, ...]}` | 列表，Key 字段脱敏 |
+| `POST` | `/admin/api/providers` | `{"name":"智谱","slug":"zhipu","endpoint":"https://...","api_key":"sk-xxx","is_default":true}` | `ProviderRecord` | 创建，Key 加密落库 |
+| `PUT` | `/admin/api/providers/{slug}` | `{"name":"...","endpoint":"...","api_key":"...","enabled":true}` | `ProviderRecord` | 更新（api_key 可选，不传则保留旧 Key） |
+| `DELETE` | `/admin/api/providers/{slug}` | — | `204 No Content` | 删除（关联校验：有 mapping/routing 引用时拒绝） |
+
+##### ModelMapping API
+
+| Method | Path | Request Body | Response | 说明 |
+|--------|------|-------------|----------|------|
+| `GET` | `/admin/api/mappings` | — | `{"data": [ModelMappingRecord, ...]}` | 列表 |
+| `POST` | `/admin/api/mappings` | `{"external":"glm-5.2","provider_id":"zhipu","real_model":"glm-5.2"}` | `ModelMappingRecord` | 创建（external+provider_id 唯一约束） |
+| `PUT` | `/admin/api/mappings/{id}` | `{"real_model":"glm-4-flash"}` | `ModelMappingRecord` | 更新 |
+| `DELETE` | `/admin/api/mappings/{id}` | — | `204 No Content` | 删除 |
+
+##### RoutingRules API
+
+| Method | Path | Request Body | Response | 说明 |
+|--------|------|-------------|----------|------|
+| `GET` | `/admin/api/routing-rules` | — | `{"data": [RoutingRule, ...]}` | 列表（含 enabled 和 disabled） |
+| `POST` | `/admin/api/routing-rules` | `{"provider_id":"openai","start_time":"14:00","end_time":"18:01","days_of_week":"*","enabled":true}` | `RoutingRule` | 创建 |
+| `PUT` | `/admin/api/routing-rules/{id}` | `{"enabled":false}` | `RoutingRule` | 更新 |
+| `DELETE` | `/admin/api/routing-rules/{id}` | — | `204 No Content` | 删除 |
+
+##### AuditLog API
+
+| Method | Path | Request Body | Response | 说明 |
+|--------|------|-------------|----------|------|
+| `GET` | `/admin/api/audit-logs?page=1&limit=50` | — | `{"data":[...], "total": N}` | 分页查询 |
+
+##### 统一响应格式
+
+```json
+// 成功
+{"data": {...}} 或 {"data": [...], "total": 100}
+
+// 错误
+{"error": "错误描述"}
+```
+
+#### 3.4 Mermaid 类图
 
 ```mermaid
-graph TB
-    subgraph External["外部"]
-        U[终端用户<br/>使用子 Key]
-        A[管理员<br/>Web 面板]
-        Z[智谱 GLM-5.2 API<br/>api.zhipuai.cn]
+classDiagram
+    direction TB
+
+    class ProviderRecord {
+        +int64 ID
+        +string Name
+        +string Slug
+        +string Endpoint
+        +[]byte EncryptedKey
+        +bool IsDefault
+        +bool Enabled
+        +string CreatedAt
+        +string UpdatedAt
+    }
+
+    class ModelMappingRecord {
+        +int64 ID
+        +string External
+        +string ProviderID
+        +string RealModel
+        +string CreatedAt
+    }
+
+    class AuditLogRecord {
+        +int64 ID
+        +string Action
+        +string TargetType
+        +string TargetID
+        +string Detail
+        +string CreatedAt
+    }
+
+    class RoutingRule {
+        +int64 ID
+        +string ProviderID
+        +string StartTime
+        +string EndTime
+        +string DaysOfWeek
+        +string Timezone
+        +bool Enabled
+    }
+
+    class ProviderStore {
+        -*sql.DB db
+        -[]byte kek
+        +ListProviders() []ProviderRecord
+        +CreateProvider(name,slug,endpoint,apiKey,isDefault) ProviderRecord
+        +UpdateProvider(slug,updates) ProviderRecord
+        +DeleteProvider(slug) error
+        +ListMappings() []ModelMappingRecord
+        +CreateMapping(external,providerID,realModel) ModelMappingRecord
+        +DeleteMapping(id) error
+        +ListRoutingRules() []RoutingRule
+        +CreateRoutingRule(rule) error
+        +UpdateRoutingRule(id,updates) error
+        +DeleteRoutingRule(id) error
+        +BuildProviderTable() ProviderTable
+        +SeedFromConfig(cfg) error
+        +WriteAudit(action,targetType,targetID,detail)
+    }
+
+    class ProviderTable {
+        +map~string~ProviderEntry Providers
+        +map~string~map~string~string Mappings
+        +string Default
+    }
+
+    class ProviderEntry {
+        +string Slug
+        +string Endpoint
+        +string APIKey
+    }
+
+    class Router {
+        -ProviderStore store
+        -atomic.Value table
+        +ResolveProvider(now) Provider
+        +RewriteModel(external,providerID) string
+        +Reload() error
+    }
+
+    class adminHandler {
+        -ProviderStore store
+        -Router router
+        +HandleListProviders()
+        +HandleCreateProvider()
+        +HandleUpdateProvider()
+        +HandleDeleteProvider()
+        +HandleListMappings()
+        +HandleCreateMapping()
+        +HandleDeleteMapping()
+        +HandleListRoutingRules()
+        +HandleCreateRoutingRule()
+        +HandleUpdateRoutingRule()
+        +HandleDeleteRoutingRule()
+        +HandleListAuditLogs()
+    }
+
+    class SecurityPackage {
+        +DeriveKEK() []byte
+        +Encrypt(plaintext,key) []byte
+        +Decrypt(ciphertext,key) string
+        +MaskKey(key) string
+    }
+
+    ProviderStore ..> ProviderRecord : manages
+    ProviderStore ..> ModelMappingRecord : manages
+    ProviderStore ..> AuditLogRecord : writes
+    ProviderStore ..> RoutingRule : manages
+    ProviderStore ..> SecurityPackage : uses
+    ProviderStore --> ProviderTable : builds
+    Router --> ProviderStore : reads via
+    Router --> ProviderTable : atomic swap
+    adminHandler --> ProviderStore : CRUD via
+    adminHandler --> Router : Reload via
+```
+
+---
+
+### 4. 程序调用流程
+
+#### 4.1 (a) 管理员新增 Provider → 加密 Key → 存 DB → 热加载
+
+```mermaid
+sequenceDiagram
+    actor Admin as 管理员
+    participant FE as Admin 前端
+    participant API as Admin Handler
+    participant Store as ProviderStore
+    participant Sec as security.Encrypt
+    participant DB as SQLite
+    participant R as Router
+
+    Admin->>FE: 填写 Provider 表单（含 API Key）
+    FE->>API: POST /admin/api/providers
+    API->>Store: CreateProvider(name, slug, endpoint, apiKey, isDefault)
+
+    Note over Store: 1. 校验 slug 唯一性
+    Store->>DB: SELECT COUNT(*) FROM providers WHERE slug=?
+    DB-->>Store: 0
+
+    Note over Store: 2. 加密 API Key
+    Store->>Sec: Encrypt(apiKey, kek)
+    Sec-->>Store: ciphertext (nonce + encrypted)
+
+    Note over Store: 3. 若 isDefault=true，先取消旧默认
+    Store->>DB: UPDATE providers SET is_default=0 WHERE is_default=1
+
+    Note over Store: 4. 写入新记录
+    Store->>DB: INSERT INTO providers (name,slug,endpoint,encrypted_key,is_default)
+    DB-->>Store: OK
+
+    Note over Store: 5. 写审计日志
+    Store->>DB: INSERT INTO audit_logs (action,target_type,target_id,detail)
+    DB-->>Store: OK
+
+    Store-->>API: ProviderRecord
+
+    Note over API: 6. 触发热加载
+    API->>R: Reload()
+    R->>Store: BuildProviderTable()
+    Store->>DB: SELECT * FROM providers WHERE enabled=1
+    DB-->>Store: rows
+    loop 每个 provider
+        Store->>Sec: Decrypt(encrypted_key, kek)
+        Sec-->>Store: plaintext API Key
     end
+    Store->>DB: SELECT * FROM model_mappings
+    DB-->>Store: rows
+    Store-->>R: ProviderTable
+    R->>R: atomic.Store(table)
 
-    subgraph Server["单机云服务器"]
-        N[Nginx :443<br/>TLS 终止 + 反代]
+    API-->>FE: 201 Created
+    FE-->>Admin: 显示新建成功
+```
 
-        subgraph Gateway["LLM API Gateway<br/>Go 单二进制 :8080"]
-            direction TB
-            MUX[net/http ServeMux]
-            MW_AUTH[AuthMiddleware<br/>子 Key 鉴权]
-            MW_QUOTA[QuotaMiddleware<br/>配额检查]
-            PROXY[ProxyHandler<br/>/v1/chat/completions]
-            ADMIN[AdminHandler<br/>/admin/*]
-            QUOTA_H[QuotaHandler<br/>/v1/quota]
-            SCHED[QuotaScheduler<br/>5h 窗口重置]
+#### 4.2 (b) API 请求到达 → Router 基于 DB 解析 Provider
+
+```mermaid
+sequenceDiagram
+    actor Client as API 客户端
+    participant Mux as http.ServeMux
+    participant Auth as Auth 中间件
+    participant PH as proxy.Handler
+    participant R as Router
+    participant Table as atomic.Value
+    participant US as 上游服务
+
+    Client->>Mux: POST /v1/chat/completions (Bearer sub-key)
+    Mux->>Auth: SubKeyAuth
+    Auth-->>Mux: userID
+
+    Mux->>PH: ServeHTTP
+    PH->>PH: 解析请求 body（model + messages）
+
+    Note over PH: 路由解析（无锁读）
+    PH->>R: ResolveProvider(time.Now())
+    R->>Table: Load() → ProviderTable
+    Table-->>R: Providers + RoutingRules + Default
+
+    loop 遍历 RoutingRules
+        R->>R: 检查时间窗口 + 星期匹配
+        alt 命中规则
+            R-->>PH: Provider(slug, endpoint, apiKey)
         end
-
-        DB[(SQLite<br/>llm_gateway.db)]
-        STATIC[静态资源<br/>管理面板 HTML/JS]
+    end
+    alt 无规则命中
+        R->>Table: 读取 Default slug
+        R-->>PH: Provider(default slug, endpoint, apiKey)
     end
 
-    U -->|Bearer sk-xxx| N
-    A -->|HTTPS| N
-    N -->|:8080| MUX
-    MUX --> MW_AUTH --> MW_QUOTA
-    MW_QUOTA --> PROXY
-    PROXY -->|真实 API Key| Z
-    MW_QUOTA --> ADMIN
-    MW_QUOTA --> QUOTA_H
-    PROXY --> DB
-    ADMIN --> DB
-    QUOTA_H --> DB
-    SCHED --> DB
+    Note over PH: 模型名改写
+    PH->>R: RewriteModel(external, providerSlug)
+    R->>Table: Load() → Mappings
+    Table-->>R: external → providerSlug → realModel
+    R-->>PH: realModel（或 passthrough）
+
+    PH->>PH: 改写 body.model
+
+    Note over PH: 转发到上游
+    PH->>US: POST {endpoint} (Authorization: Bearer {apiKey})
+    US-->>PH: 响应
+    PH-->>Client: 响应 + 记录 call_log
 ```
 
-### 架构分层
+#### 4.3 (c) 首次启动 → 检测 DB 空表 → 种子迁移 yaml → DB
 
-| 层 | 职责 | 组件 |
-|---|---|---|
-| **接入层** | TLS 终止、反向代理、静态资源 | Nginx |
-| **中间件层** | 鉴权、配额检查、日志 | AuthMiddleware、QuotaMiddleware |
-| **核心服务层** | 代理转发、管理 API、配额查询 | ProxyHandler、AdminHandler、QuotaHandler |
-| **定时任务层** | 5h 窗口配额重置、周期性清理 | QuotaScheduler |
-| **数据层** | 用户、配额、调用记录、会话 | SQLite |
+```mermaid
+sequenceDiagram
+    participant Main as main.go
+    participant CFG as config.Load
+    participant DB as db.Open
+    participant Mig as RunMigrations
+    participant Store as ProviderStore
+    participant Sec as security
+    participant SQL as SQLite
 
-### 数据流（一次 LLM 代理请求）
+    Main->>Main: 解析 -config 参数
+    Main->>CFG: Load(config.yaml)
+    CFG-->>Main: *Config (含 providers / model_mappings)
 
-```
-用户 → Nginx(:443) → Gateway(:8080)
-  → AuthMiddleware: 解析子 Key → 查 DB 验证 → 获取 user_id
-  → QuotaMiddleware: 计算时段倍率 → 查 DB 配额 → 5h_used + effective_calls ≤ 5h_limit? total_used + effective_calls ≤ total_limit?
-    → 准入: 原子扣减 effective_calls 次 → ProxyHandler → 智谱 API → 记录调用日志（token 统计）
-    → 拒绝: 429 Too Many Requests
-```
+    Main->>Sec: DeriveKEK()
+    Sec->>Sec: os.Getenv("GATEWAY_KEK_ENV")
+    alt KEK 未设置
+        Sec-->>Main: error → log.Fatal("GATEWAY_KEK_ENV 未设置")
+    else KEK 已设置
+        Sec-->>Main: 32-byte key
+    end
 
----
+    Main->>DB: Open(dbPath)
+    DB-->>Main: *DB
 
-## 2. 技术栈选型
+    Main->>Mig: RunMigrations(database)
+    Mig->>SQL: CREATE TABLE IF NOT EXISTS providers
+    Mig->>SQL: CREATE TABLE IF NOT EXISTS model_mappings
+    Mig->>SQL: CREATE TABLE IF NOT EXISTS audit_logs
+    Mig-->>Main: OK
 
-| 组件 | 选型 | 版本 | 理由 |
-|---|---|---|---|
-| **语言** | Go | 1.22+ | 单二进制编译、原生并发、零运行时依赖 |
-| **HTTP 路由** | `net/http` 标准库 | 1.22 | Go 1.22 已支持路径参数（`{param}`），无需第三方路由库 |
-| **数据库** | SQLite | — | 单机部署首选，无需独立数据库进程 |
-| **SQLite 驱动** | `modernc.org/sqlite` | latest | **纯 Go 实现，零 CGO 依赖**。不依赖系统 libsqlite3，真正单二进制 |
-| **配置解析** | `gopkg.in/yaml.v3` | v3 | YAML 配置，可读性强 |
-| **密码哈希** | `golang.org/x/crypto` | latest | bcrypt 标准实现 |
-| **前端** | 原生 HTML + Vanilla JS | — | 管理面板：无框架依赖，内嵌到二进制 |
-| **嵌入资源** | `embed` 标准库 | 1.22 | 前端静态文件编译进二进制 |
-| **模板渲染** | `html/template` | 标准库 | Admin 页面渲染 |
-| **反向代理** | Nginx | 任意 | TLS 终止、静态资源、SSE 代理 |
-| **进程管理** | systemd | — | 开机自启、崩溃重启 |
+    Main->>Store: NewProviderStore(db, kek)
+    Main->>Store: SeedFromConfig(cfg)
 
-### 依赖总结
+    Note over Store: 检测空表（幂等）
+    Store->>SQL: SELECT COUNT(*) FROM providers
+    SQL-->>Store: 0 → 需要种子
 
-```
-直接依赖数: 3
-├── modernc.org/sqlite    (纯 Go SQLite)
-├── gopkg.in/yaml.v3      (YAML 配置)
-└── golang.org/x/crypto   (bcrypt)
-```
+    loop cfg.Providers
+        Store->>Sec: Encrypt(apiKeyEnv→os.Getenv, kek)
+        Sec-->>Store: ciphertext
+        Store->>SQL: INSERT INTO providers
+    end
 
----
+    loop cfg.ModelMappings
+        Note over Store: 展开 per_provider map
+        loop 每个 provider
+            Store->>SQL: INSERT INTO model_mappings (external,provider_id,real_model)
+        end
+    end
 
-## 3. 数据库表结构
+    Store-->>Main: 种子完成（或跳过）
 
-### 3.1 ER 图
-
-```
-┌──────────────┐       ┌──────────────────┐
-│    users     │ 1──1  │     quotas       │
-├──────────────┤       ├──────────────────┤
-│ id (PK)      │       │ id (PK)          │
-│ username     │       │ user_id (FK, UQ) │
-│ password_hash│       │ quota_5h_limit   │
-│ sub_key_hash │       │ quota_5h_used    │
-│ sub_key_preview│      │ quota_total_limit│
-│ status       │       │ quota_total_used │
-│ created_at   │       │ window_start     │
-│ updated_at   │       │ updated_at       │
-└──────────────┘       └──────────────────┘
-       │
-       │ 1──N
-       ▼
-┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│    call_logs     │    │  admin_sessions  │    │ time_multipliers │
-├──────────────────┤    ├──────────────────┤    ├──────────────────┤
-│ id (PK)          │    │ id (PK)          │    │ id (PK)          │
-│ user_id (FK)     │    │ session_token    │    │ start_time       │
-│ model            │    │ created_at       │    │ end_time         │
-│ prompt_tokens    │    │ expires_at       │    │ multiplier       │
-│ completion_tokens│    └──────────────────┘    │ days_of_week     │
-│ total_tokens     │                            │ enabled          │
-│ effective_calls  │                            │ created_at       │
-│ multiplier_used  │                            └──────────────────┘
-│ status_code      │
-│ latency_ms       │
-│ error_msg        │
-│ created_at       │
-└──────────────────┘
-```
-
-### 3.2 完整 DDL
-
-```sql
--- 用户表
-CREATE TABLE IF NOT EXISTS users (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    username        TEXT    NOT NULL UNIQUE,
-    password_hash   TEXT    NOT NULL,             -- bcrypt 哈希（仅 Admin 有密码，普通用户可为空）
-    sub_key_hash    TEXT    NOT NULL UNIQUE,       -- SHA256(子Key) 哈希，用于验证
-    sub_key_preview TEXT    NOT NULL,              -- 子 Key 前缀展示（sk-3f8a2...）
-    role            TEXT    NOT NULL DEFAULT 'user', -- 'admin' | 'user'
-    status          TEXT    NOT NULL DEFAULT 'active', -- 'active' | 'disabled'
-    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
-    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX idx_users_sub_key_hash ON users(sub_key_hash);
-CREATE INDEX idx_users_status ON users(status);
-
--- 配额表（与用户 1:1）
-CREATE TABLE IF NOT EXISTS quotas (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id           INTEGER NOT NULL UNIQUE,
-    quota_5h_limit    INTEGER NOT NULL DEFAULT 100,      -- 5h 窗口调用次数上限
-    quota_5h_used     INTEGER NOT NULL DEFAULT 0,        -- 当前窗口已使用次数
-    quota_total_limit INTEGER NOT NULL DEFAULT 10000,    -- 总调用次数上限
-    quota_total_used  INTEGER NOT NULL DEFAULT 0,        -- 累计已使用次数
-    window_start      TEXT    NOT NULL,                   -- 当前 5h 窗口起始时间
-    updated_at        TEXT    NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE INDEX idx_quotas_window_start ON quotas(window_start);
-
--- 调用记录表（配额主单位：次数；token 为辅助统计）
-CREATE TABLE IF NOT EXISTS call_logs (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id           INTEGER NOT NULL,
-    model             TEXT    NOT NULL DEFAULT 'glm-5.2',
-    prompt_tokens     INTEGER NOT NULL DEFAULT 0,        -- 统计：prompt token
-    completion_tokens INTEGER NOT NULL DEFAULT 0,        -- 统计：completion token
-    total_tokens      INTEGER NOT NULL DEFAULT 0,        -- 统计：上游原始 token
-    effective_calls   INTEGER NOT NULL DEFAULT 1,        -- 实际消耗次数 = 1 × multiplier（进位取整）
-    multiplier_used   REAL    NOT NULL DEFAULT 1.0,       -- 生效的时段倍率
-    status_code       INTEGER NOT NULL,                   -- 200/429/500
-    latency_ms        INTEGER NOT NULL DEFAULT 0,
-    error_msg         TEXT,
-    created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE INDEX idx_call_logs_user_id    ON call_logs(user_id);
-CREATE INDEX idx_call_logs_created_at ON call_logs(created_at);
-
--- Admin 会话表
-CREATE TABLE IF NOT EXISTS admin_sessions (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_token   TEXT    NOT NULL UNIQUE,
-    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
-    expires_at      TEXT    NOT NULL                   -- 24h 过期
-);
-
-CREATE INDEX idx_admin_sessions_token ON admin_sessions(session_token);
-
--- 时段倍率表（全局规则，非用户级别）
-CREATE TABLE IF NOT EXISTS time_multipliers (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    start_time    TEXT    NOT NULL,              -- 时段开始 "14:00"
-    end_time      TEXT    NOT NULL,              -- 时段结束 "18:00"
-    multiplier    REAL    NOT NULL DEFAULT 1.0,   -- 倍率，如 2.0 表示消耗翻倍
-    days_of_week  TEXT    NOT NULL DEFAULT '*',   -- 生效星期：'*'=每天, '1,2,3,4,5'=工作日
-    enabled       INTEGER NOT NULL DEFAULT 1,     -- 是否启用
-    created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
-    CONSTRAINT chk_multiplier CHECK (multiplier >= 1.0),
-    CONSTRAINT chk_time CHECK (start_time < end_time)
-);
-
-CREATE INDEX idx_time_multipliers_enabled ON time_multipliers(enabled);
+    Note over Main: 后续正常流程...
+    Main->>Store: 创建 Router(store)
+    Main->>Main: 启动 HTTP Server
 ```
 
 ---
 
-## 4. API 接口设计
+### 5. 待明确事项
 
-### 4.1 端点总览
+| # | 事项 | 假设/处理 |
+|---|------|----------|
+| 1 | **KEK 轮换策略** | P2 不做，KEK 仅从 `GATEWAY_KEK_ENV` 读取一次。如需轮换，需重新加密所有 Key（离线脚本） |
+| 2 | **旧 `provider_routing_rules` 表的 `default_provider_id` 列** | 保留但继续不使用（P2 预留），全局默认由 `providers.is_default=1` 决定 |
+| 3 | **`config.yaml` 中的 `api.zhipu_endpoint` / `api.zhipu_api_key`** | 种子迁移后不再读取（DB 优先），但保留在 config 结构体中防止解析失败 |
+| 4 | **`admin.Handler` 的 `APIKeyGetter` / `APIKeySetter` / `EndpointGetter` 字段** | 保留但不再使用（Router 接管），标记 `// Deprecated` |
+| 5 | **审计日志保留策略** | 不做自动清理（P2），表大小由 SQLite 自行管理；后续可加 `DELETE FROM audit_logs WHERE created_at < date('now','-90 day')` |
 
-| # | 路由 | 方法 | 鉴权 | 说明 |
-|---|---|---|---|---|
-| 1 | `/v1/chat/completions` | POST | 子 Key | LLM 代理（同步 + SSE 流式） |
-| 2 | `/v1/quota` | GET | 子 Key | 用户自助查询剩余配额 |
-| 3 | `/admin/login` | POST | 无 | Admin 登录 |
-| 4 | `/admin/logout` | POST | Admin Session | Admin 登出 |
-| 5 | `/admin/` | GET | Admin Session | 管理面板首页（Dashboard） |
-| 6 | `/admin/api/users` | GET | Admin Session | 用户列表 |
-| 7 | `/admin/api/users` | POST | Admin Session | 创建用户 |
-| 8 | `/admin/api/users/{id}` | PUT | Admin Session | 更新用户（配额、状态、重新生成子 Key） |
-| 9 | `/admin/api/users/{id}/calls` | GET | Admin Session | 用户调用记录 |
-| 10 | `/admin/api/overview` | GET | Admin Session | Dashboard 概览 |
-| 11 | `/admin/api/multipliers` | GET | Admin Session | 时段倍率规则列表 |
-| 12 | `/admin/api/multipliers` | POST | Admin Session | 创建时段倍率规则 |
-| 13 | `/admin/api/multipliers/{id}` | PUT | Admin Session | 更新时段倍率规则 |
-| 14 | `/admin/api/multipliers/{id}` | DELETE | Admin Session | 删除时段倍率规则 |
+---
 
-### 4.2 接口详细设计
+## Part B: 任务分解
 
-#### 4.2.1 请求头规范
+### 6. 依赖包列表
 
 ```
-# 下游鉴权
-Authorization: Bearer sk-<sub_key>
-
-# Admin 鉴权
-Cookie: admin_session=<session_token>
-
-# Content-Type
-Content-Type: application/json
+- golang.org/x/crypto v0.24.0      (已有 — bcrypt)
+- gopkg.in/yaml.v3 v3.0.1          (已有 — 配置解析)
+- modernc.org/sqlite v1.30.0       (已有 — SQLite 驱动)
 ```
 
-#### 4.2.2 `/v1/chat/completions` — LLM 代理
+**无需新增任何第三方依赖**。AES-256-GCM 使用 Go 标准库 `crypto/aes` + `crypto/cipher`。
+
+### 7. 任务列表
+
+| 任务 ID | 任务名称 | 描述 | 依赖 | 优先级 | 涉及文件 |
+|---------|----------|------|------|--------|----------|
+| **T01** | **项目基础设施** | DB 迁移（三张新表 DDL + 幂等列检测）、AES-256-GCM 加密/解密模块（含单元测试）、Go 数据模型定义（ProviderRecord / ModelMappingRecord / AuditLogRecord）、go.mod 依赖确认 | — | P0 | `internal/db/migrations.go`(改), `internal/security/encrypt.go`(新), `internal/security/encrypt_test.go`(新), `internal/models/provider.go`(新), `go.mod`(改) |
+| **T02** | **数据层 + Router 热加载** | ProviderStore 完整 CRUD（含加密存储/解密读取）、种子迁移函数 SeedFromConfig、Router 改造为 atomic.Value + ProviderTable 快照、config.go 调整（移除 Load 中默认 provider 注入）、main.go 接线（KEK 加载 + ProviderStore 创建 + Router 注入 Admin） | T01 | P0 | `internal/provider/store.go`(新), `internal/provider/store_test.go`(新), `internal/router/selector.go`(改), `internal/config/config.go`(改), `main.go`(改) |
+| **T03** | **Admin API 全部端点** | Provider CRUD handler、ModelMapping CRUD handler、RoutingRules CRUD handler、AuditLog 查询 handler、admin/handler.go 路由注册 + 结构体字段扩展 | T02 | P0 | `internal/admin/providers.go`(新), `internal/admin/mappings.go`(新), `internal/admin/routing.go`(新), `internal/admin/audit.go`(新), `internal/admin/handler.go`(改) |
+| **T04** | **前端 UI 全部** | 左侧导航重构（新增「上游管理」「模型映射」「路由规则」「审计日志」入口，过渡期隐藏旧「设置」入口）、Provider 列表/创建/编辑/删除表单、ModelMapping 矩阵表格+新增/删除、RoutingRules 时间窗口编辑器（复用 multipliers 模式）、审计日志分页表格、Key 掩码脱敏显示、全局样式补充 | T03 | P1 | `web/admin/index.html`(改), `web/admin/app.js`(改), `web/admin/style.css`(改) |
+| **T05** | **文档 + 集成验证** | ADR-0007 编写（Key 加密落库 + 热加载架构决策）、端到端手动集成验证（启动→种子迁移→CRUD→热加载→API 路由正确）、`make ci` 确保 fmt/vet/test/build 全通过 | T04 | P1 | `docs/adr/0007-key-encryption-db-hot-reload.md`(新), `docs/system_design.md`(改) |
+
+### 8. 共享知识（跨文件约定）
 
 ```
-POST /v1/chat/completions
-Authorization: Bearer sk-3f8a2b1c4d5e6f7a8b9c0d1e2f3a4b5c
-Content-Type: application/json
+1. KEK 加载：
+   - 环境变量名：GATEWAY_KEK_ENV
+   - KEK 未设置 → 服务启动时 log.Fatal，不允许明文降级
+   - DeriveKEK() = SHA-256(GATEWAY_KEK_ENV)，输出 32 字节固定密钥
+   - KEK 在 main.go 中加载一次，通过参数传入 ProviderStore，之后不再读取环境变量
 
-请求体（透传智谱标准格式）:
-{
-  "model": "glm-5.2",
-  "messages": [
-    {"role": "user", "content": "Hello"}
-  ],
-  "stream": false
-}
+2. 加密格式：
+   - AES-256-GCM，nonce 12 字节（随机生成），附加到密文头部
+   - 密文格式：[12字节 nonce][GCM密文+16字节 tag]
+   - 解密时从头部提取 nonce，余下为密文
 
-成功响应:
-HTTP/1.1 200 OK
-{
-  "id": "chatcmpl-xxx",
-  "object": "chat.completion",
-  "created": 1712345678,
-  "model": "glm-5.2",
-  "choices": [...],
-  "usage": {
-    "prompt_tokens": 10,
-    "completion_tokens": 50,
-    "total_tokens": 60
-  }
-}
+3. API 响应格式：
+   - 列表接口统一 {"data": [...]}
+   - 单条接口统一 {"data": {...}} 或直接返回对象（保持与现有 multiplier 风格一致）
+   - 错误统一 {"error": "描述"}
+   - 删除成功返回 204 No Content（保持与现有 multiplier 风格一致）
 
-配额耗尽:
-HTTP/1.1 429 Too Many Requests
-{
-  "error": {
-    "message": "Quota exceeded. 5h limit: 100 calls, used: 100. Resets at 15:00",
-    "type": "quota_exceeded",
-    "code": "quota_exceeded"
-  }
-}
+4. 数据库约定：
+   - 时间字段统一使用 TEXT 类型，格式 RFC3339（与现有 users/call_logs 一致）
+   - enabled 字段用 INTEGER (0/1)，查询时转 bool
+   - 外键使用 provider slug（TEXT），而非自增 ID（便于人工识别）
 
-子 Key 无效:
-HTTP/1.1 401 Unauthorized
-{
-  "error": {
-    "message": "Invalid API key",
-    "type": "invalid_api_key",
-    "code": "invalid_api_key"
-  }
-}
+5. 日志红线：
+   - 禁止在任何日志、错误信息、响应中输出明文 API Key
+   - encrypted_key BLOB 字段不参与 JSON 序列化（json:"-"）
+   - 前端显示使用 MaskKey() 脱敏（保留前4后4字符）
 
-子 Key 已禁用:
-HTTP/1.1 403 Forbidden
-{
-  "error": {
-    "message": "API key has been disabled",
-    "type": "key_disabled",
-    "code": "key_disabled"
-  }
-}
+6. 路由热加载安全：
+   - Router.Reload() 使用 atomic.Value.Store，不持锁
+   - 热路径（ResolveProvider/RewriteModel）使用 atomic.Value.Load，零锁竞争
+   - Reload 仅在 Admin CRUD 成功后调用（低频），失败不影响现有快照
+
+7. 种子迁移幂等性：
+   - SeedFromConfig 先检查 providers 表是否为空（SELECT COUNT）
+   - 仅空表时执行种子（INSERT），非空直接返回
+   - config.yaml 中的 api_key_env 引用的环境变量需在种子时可用（否则种子 Key 为空，后续通过 Admin 手动设置）
+
+8. 删除校验：
+   - 删除 provider 前检查 model_mappings 和 provider_routing_rules 是否有引用
+   - 有引用时返回 409 Conflict + 引用详情，不静默级联删除
 ```
 
-#### 4.2.3 `/admin/api/users` — 创建用户
+### 9. 任务依赖图
 
-```
-POST /admin/api/users
-Cookie: admin_session=xxx
-Content-Type: application/json
-
-请求体:
-{
-  "username": "zhangsan",
-  "quota_5h_limit": 100,        // 5h 调用次数上限
-  "quota_total_limit": 10000    // 总调用次数上限
-}
-
-成功响应 (201):
-{
-  "id": 2,
-  "username": "zhangsan",
-  "sub_key": "sk-3f8a2b1c4d5e6f7a8b9c0d1e2f3a4b5c",
-  "sub_key_preview": "sk-3f8a2...",
-  "quota_5h_limit": 100,        // 单位：次数
-  "quota_5h_used": 0,
-  "quota_total_limit": 10000,
-  "quota_total_used": 0,
-  "status": "active",
-  "created_at": "2025-07-09T16:30:00Z"
-}
-
-⚠️ 子 Key 明文仅在创建响应中返回一次，之后无法再次获取（数据库仅存哈希）
-```
-
-#### 4.2.4 `/admin/api/users/{id}` — 更新用户
-
-```
-PUT /admin/api/users/2
-Cookie: admin_session=xxx
-Content-Type: application/json
-
-请求体（所有字段可选）:
-{
-  "quota_5h_limit": 2000000,    // 修改 5h 配额上限
-  "quota_total_limit": 200000000, // 修改总配额上限
-  "status": "disabled",         // 启用/禁用
-  "regenerate_key": true        // 重新生成子 Key
-}
-
-regenerate_key=true 时的响应:
-{
-  ...
-  "new_sub_key": "sk-9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d",
-  "old_key_disabled": true
-}
-```
-
-#### 4.2.5 `/admin/api/users/{id}/calls` — 调用记录
-
-```
-GET /admin/api/users/2/calls?from=2025-07-01&to=2025-07-09&page=1&limit=20
-
-响应:
-{
-  "data": [
-    {
-      "id": 1234,
-      "model": "glm-5.2",
-      "total_tokens": 1240,
-      "status_code": 200,
-      "latency_ms": 823,
-      "created_at": "2025-07-09T14:32:00Z"
-    },
-    ...
-  ],
-  "pagination": {
-    "page": 1,
-    "limit": 20,
-    "total": 156
-  }
-}
-```
-
-#### 4.2.6 `/v1/quota` — 用户自助查询
-
-```
-GET /v1/quota
-Authorization: Bearer sk-3f8a2...
-
-响应:
-{
-  "quota_5h_limit": 100,
-  "quota_5h_used": 45,
-  "quota_5h_remaining": 55,
-  "quota_total_limit": 10000,
-  "quota_total_used": 2300,
-  "quota_total_remaining": 7700,
-  "window_reset_at": "2025-07-09T15:00:00Z",
-  "status": "active"
-}
-```
-
-#### 4.2.7 `/admin/api/multipliers` — 时段倍率管理
-
-```
-GET /admin/api/multipliers
-响应:
-{
-  "data": [
-    {
-      "id": 1,
-      "start_time": "14:00",
-      "end_time": "18:00",
-      "multiplier": 2.0,
-      "days_of_week": "2,4",
-      "enabled": true
-    }
-  ]
-}
-
-POST /admin/api/multipliers
-请求体:
-{
-  "start_time": "14:00",
-  "end_time": "18:00",
-  "multiplier": 2.0,
-  "days_of_week": "2,4"
-}
-响应 (201): { "id": 1, ... }
-
-PUT /admin/api/multipliers/1
-请求体（所有字段可选）:
-{
-  "enabled": false,      // 禁用该规则
-  "multiplier": 3.0      // 修改倍率
-}
-
-DELETE /admin/api/multipliers/1
-响应 (204): No Content
+```mermaid
+graph TD
+    T01[ T01: 项目基础设施<br/>DB迁移+加密+数据模型 ] --> T02[ T02: 数据层+Router热加载<br/>ProviderStore+atomic+main接线 ]
+    T02 --> T03[ T03: Admin API 全部端点<br/>CRUD handler+路由注册 ]
+    T03 --> T04[ T04: 前端 UI 全部<br/>导航+页面+JS+CSS ]
+    T04 --> T05[ T05: 文档+集成验证<br/>ADR+端到端测试+make ci ]
 ```
 
 ---
 
-## 5. 安全策略
-
-### 5.1 子 Key 安全
-
-```
-生成: sub_key = "sk-" + hex.EncodeToString(sha256.Sum256(secret + userID + timestamp + cryptoRand(32)))[:32]
-
-存储: 数据库仅存 SHA256(sub_key)，不存明文
-验证: 请求时 SHA256(请求中的 sub_key) 与数据库 hash 比对
-
-特点:
-- 子 Key 无法逆向推导真实 API Key
-- 数据库泄露不会暴露子 Key 明文
-- 子 Key 明文仅创建时展示一次（Admin 自行分发）
-```
-
-### 5.2 真实 API Key 保护
-
-```
-┌────────────────────────────────────────────────────┐
-│ 原则：真实 API Key 零持久化，仅内存存在              │
-├────────────────────────────────────────────────────┤
-│ 1. 从配置文件/环境变量读取 → 仅加载进内存变量        │
-│ 2. 不入数据库                                       │
-│ 3. 不出现在日志中（日志输出时替换为 "****"）          │
-│ 4. 不出现在任何 API 响应中                           │
-│ 5. 不传递给任何中间件                                │
-│ 6. 仅 ProxyHandler 内部访问                         │
-│                                                    │
-│ 配置方式（按优先级）:                                │
-│   1. 环境变量 ZHIPU_API_KEY（推荐生产）              │
-│   2. 配置文件 config.yaml 中的 api_key 字段         │
-│   3. 命令行参数 -api-key                            │
-└────────────────────────────────────────────────────┘
-```
-
-### 5.3 Admin 鉴权
-
-```
-登录流程:
-  1. Admin POST /admin/login {username, password}
-  2. 服务端 bcrypt.CompareHashAndPassword 验证
-  3. 生成 session_token = hex(sha256(cryptoRand(64)))
-  4. 写入 admin_sessions 表，expires_at = now + 24h
-  5. 返回 Set-Cookie: admin_session=<token>; HttpOnly; SameSite=Strict; Max-Age=86400
-
-Cookie 安全属性:
-  - HttpOnly: JS 无法读取
-  - SameSite=Strict: 防止 CSRF
-  - Secure: 生产环境通过 Nginx TLS 后设置（Go 端检测 X-Forwarded-Proto）
-  - Path=/admin: 仅管理路径携带
-
-每次 Admin API 请求:
-  1. 从 Cookie 提取 admin_session
-  2. 查 admin_sessions WHERE session_token=? AND expires_at > now
-  3. 存在 → 放行；不存在 → 401
-```
-
-### 5.4 防重放与限流（P2）
-
-```
-- 请求幂等：同一请求 body + 同一 sub_key 在 5s 内不重复计配额（基于请求哈希去重）
-- 限流：单用户 10 req/s（P2 实现）
-- IP 白名单：可选配置 ADMIN_IPS 限制管理面板访问来源
-```
-
-### 5.5 服务器加固
-
-```bash
-# 防火墙：仅开放 443（Nginx），8080 仅监听 127.0.0.1
-ufw allow 443/tcp
-ufw default deny incoming
-
-# 文件权限
-chmod 600 config.yaml       # 包含 API Key
-chmod 600 llm_gateway.db    # 数据库
-```
-
----
-
-## 6. SSE 流式响应透传方案
-
-### 6.1 整体流程
-
-```
-                     Gateway
-客户端                代理层                  智谱 API
-  │                    │                       │
-  │ POST /v1/chat/     │                       │
-  │ stream=true        │                       │
-  │───────────────────▶│                       │
-  │                    │ (鉴权 + 配额预留)       │
-  │                    │ POST /v1/chat/        │
-  │                    │ stream=true           │
-  │                    │──────────────────────▶│
-  │                    │                       │
-  │                    │  data: {"id":...}     │
-  │                    │◀──────────────────────│
-  │  data: {"id":...}  │                       │
-  │◀───────────────────│                       │
-  │                    │  data: {"choices":...}│
-  │                    │◀──────────────────────│
-  │  data: {"choices": │                       │
-  │  ...}              │                       │
-  │◀───────────────────│                       │
-  │                    │       ...             │
-  │                    │  data: [DONE]         │
-  │                    │◀──────────────────────│
-  │  data: [DONE]      │                       │
-  │◀───────────────────│                       │
-  │                    │ (解析 usage → 配额确认) │
-```
-
-### 6.2 Go 实现要点
-
-```go
-// proxy.go — SSE 透传核心
-func (h *ProxyHandler) handleStream(w http.ResponseWriter, upstreamResp *http.Response, userID int64) {
-    // 1. 设置 SSE 响应头
-    w.Header().Set("Content-Type", "text/event-stream")
-    w.Header().Set("Cache-Control", "no-cache")
-    w.Header().Set("Connection", "keep-alive")
-    w.WriteHeader(http.StatusOK)
-
-    flusher := w.(http.Flusher)
-    scanner := bufio.NewScanner(upstreamResp.Body)
-    scanner.Buffer(make([]byte, 64*1024), 1024*1024) // 大缓冲区
-
-    var totalTokens int64
-    for scanner.Scan() {
-        line := scanner.Text()
-
-        // 2. 透传每一行到客户端
-        fmt.Fprintf(w, "%s\n", line)
-        flusher.Flush()
-
-        // 3. 解析 usage 行（最后一帧）
-        if strings.HasPrefix(line, "data:") && strings.Contains(line, "total_tokens") {
-            var sseData struct {
-                Usage struct {
-                    TotalTokens int64 `json:"total_tokens"`
-                } `json:"usage"`
-            }
-            json.Unmarshal([]byte(line[5:]), &sseData) // 去掉 "data:" 前缀
-            totalTokens = sseData.Usage.TotalTokens
-        }
-    }
-
-    // 4. 流结束后，以实际 token 确认配额
-    h.quotaManager.ConfirmStream(userID, totalTokens)
-}
-```
-
-### 6.3 配额两阶段策略（次数计量 + 硬限制）
-
-配额耗尽即**硬性拒绝**，流式请求同样执行：
-
-```
-阶段1 — 预留（请求开始时）:
-  计算本次消耗次数: effective_calls = ceil(1 × multiplier)
-
-  读取当前配额:
-    available_5h   = 5h_limit - 5h_used
-    available_total = total_limit - total_used
-
-  IF available_5h < effective_calls OR available_total < effective_calls:
-    → 429 硬拒绝，不发起上游请求
-
-  → quota_5h_used += effective_calls（预占，原子操作）
-  → 发起上游流式请求
-
-阶段2 — 确认（流结束后）:
-  流结束，配额已预占 effective_calls 次
-  解析 upstream 响应中的 total_tokens → 写入 call_logs（统计用途）
-  不需要回滚（次数固定 = 1 × multiplier，可预知）
-
-关键设计决策：
-- 流式每次请求固定消耗 effective_calls 次（可预知），不依赖 token 量
-- 预占即可确认，无需回滚逻辑 → 比 token 方案更简单
-- 上游返回的 token 仅记录统计，不参与配额计算
-```
-
-### 6.4 Nginx 配置（SSE 兼容）
-
-```nginx
-location /v1/ {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_http_version 1.1;
-    proxy_set_header Connection '';
-    proxy_buffering off;           # ← 关键：SSE 必须关闭缓冲
-    proxy_cache off;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
-```
-
----
-
-## 7. 5h 配额自动重置方案
-
-### 7.1 固定窗口方案
-
-```
-窗口划分:
-┌──────────┬──────────┬──────────┬──────────┬──────────┐
-│ 00:00    │ 05:00    │ 10:00    │ 15:00    │ 20:00    │
-│   ~      │   ~      │   ~      │   ~      │   ~      │
-│ 04:59    │ 09:59    │ 14:59    │ 19:59    │ 23:59    │
-└──────────┴──────────┴──────────┴──────────┴──────────┘
-窗口边界: 00:00, 05:00, 10:00, 15:00, 20:00
-
-边界到达时: 所有用户的 quota_5h_used 重置为 0
-```
-
-### 7.2 调度器实现
-
-```go
-// scheduler.go
-type QuotaScheduler struct {
-    db *sql.DB
-    resetHour int // 5（每5小时）
-}
-
-func (s *QuotaScheduler) Start() {
-    // 1. 启动时检查是否需要立即补偿重置
-    s.compensate()
-
-    // 2. 启动 30s ticker 定时检查
-    ticker := time.NewTicker(30 * time.Second)
-    go func() {
-        for range ticker.C {
-            s.tryReset()
-        }
-    }()
-}
-
-func (s *QuotaScheduler) tryReset() {
-    now := time.Now()
-    hours := now.Hour()
-
-    // 判断是否到达窗口边界
-    if hours % s.resetHour == 0 && now.Minute() == 0 {
-        // 使用互斥锁防止并发重置
-        s.mu.Lock()
-        defer s.mu.Unlock()
-
-        // 批量归零所有用户的 5h 配额
-        _, err := s.db.Exec(`
-            UPDATE quotas
-            SET quota_5h_used = 0,
-                window_start = ?,
-                updated_at = ?
-        `, now.Format(time.RFC3339), now.Format(time.RFC3339))
-
-        if err != nil {
-            log.Printf("quota reset failed: %v", err)
-        } else {
-            log.Printf("quota reset completed at %s", now.Format(time.RFC3339))
-        }
-    }
-}
-
-func (s *QuotaScheduler) compensate() {
-    // 启动补偿：如果窗口起始时间不在当前窗口内，立即重置
-    now := time.Now()
-    currentWindowStart := now.Truncate(s.resetHour * time.Hour)
-    // 检查 window_start < currentWindowStart 的用户并重置
-    s.db.Exec(`
-        UPDATE quotas
-        SET quota_5h_used = 0, window_start = ?, updated_at = ?
-        WHERE window_start < ?
-    `, now.Format(time.RFC3339), currentWindowStart.Format(time.RFC3339))
-}
-```
-
-### 7.3 设计要点
-
-| 要点 | 方案 |
-|---|---|
-| 重置粒度 | 30s 定时检查（窗口边界最多 30s 延迟） |
-| 并发安全 | 互斥锁 + SQLite WAL 模式 |
-| 启动补偿 | 服务重启后检查 window_start，可能跨窗口 → 自动补偿 |
-| 重置原子性 | 单条 SQL UPDATE 语句，SQLite 保证原子性 |
-| 重置条件 | `hour % 5 == 0 AND minute == 0`，忽略秒 |
-
----
-
-## 8. 配额模型详解
-
-### 8.1 配额检查流程（次数计量 + 时段倍率）
-
-```
-请求到达
-  │
-  ▼
-1. 鉴权 → 获取 user_id
-  │
-  ▼
-2. 计算时段倍率
-   GET * FROM time_multipliers WHERE enabled=1
-   判断当前时间是否命中任一规则
-   effective_multiplier = MAX(匹配规则的 multiplier)
-  │
-  ▼
-3. 计算本次消耗次数
-   effective_calls = ceil(1 × effective_multiplier)
-   （默认 1 次/请求，倍率时段如 ×2.0 = 消耗 2 次）
-  │
-  ▼
-4. 读取 quotas WHERE user_id = ?
-  │
-  ├── 5h_used + effective_calls > 5h_limit ?
-  │     └── YES → 429 "5h quota exceeded. Resets at {next_window}"
-  │
-  ├── total_used + effective_calls > total_limit ?
-  │     └── YES → 429 "Total quota exceeded. Contact admin"
-  │
-  └── PASS → 执行代理请求
-        │
-        ├── stream=false (同步):
-        │     proxy → parse response
-        │     quota_5h_used   += effective_calls
-        │     quota_total_used += effective_calls
-        │     记录 call_logs: total_tokens=X, effective_calls=N, multiplier_used=M
-        │
-        └── stream=true (流式):
-              预占 effective_calls 次 → 同样按次数计
-              （见 6.3 节硬限制策略，单位改为次数）
-```
-
-### 8.2 并发配额管理（SQLite）
-
-```sql
--- 原子配额更新（次数计量，利用 SQLite 行锁）
-UPDATE quotas
-SET quota_5h_used = quota_5h_used + ?,
-    quota_total_used = quota_total_used + ?,
-    updated_at = ?
-WHERE user_id = ?
-  AND quota_5h_used + ? <= quota_5h_limit
-  AND quota_total_used + ? <= quota_total_limit;
-
--- 检查 RowsAffected:
---   = 1 → 更新成功，配额准入
---   = 0 → 配额不足，返回 429
-```
-
-### 8.3 默认配额值
-
-| 配额类型 | 默认值 | 说明 |
-|---|---|---|
-| `quota_5h_limit` | 100 次 | 每 5h 窗口上限 |
-| `quota_total_limit` | 10,000 次 | 账户总上限 |
-
----
-
-## 9. 时段倍率系统
-
-### 9.1 功能说明
-
-Admin 可设置**时段倍率规则**：在指定时间段内，每次调用消耗的次数乘以指定倍率计入配额。
-
-**使用场景示例**：
-| 规则 | 说明 |
-|---|---|
-| 周二/周四 14:00-18:00，倍率 2.0 | 高峰期每次调用消耗 2 次配额 |
-| 每天 22:00-06:00，倍率 1.0 | 夜间不翻倍 |
-| 周三全天，倍率 3.0 | 某天每次调用消耗 3 次配额 |
-
-### 9.2 数据模型
-
-```sql
--- time_multipliers 表（全局规则，Admin 级别管理）
-CREATE TABLE time_multipliers (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    start_time    TEXT    NOT NULL,              -- "14:00"（HH:MM 格式）
-    end_time      TEXT    NOT NULL,              -- "18:00"
-    multiplier    REAL    NOT NULL DEFAULT 1.0,   -- 倍率 ≥ 1.0
-    days_of_week  TEXT    NOT NULL DEFAULT '*',   -- '*':每天, '1,2,3,4,5':工作日, '0,6':周末
-    enabled       INTEGER NOT NULL DEFAULT 1,
-    created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
-    CONSTRAINT chk_multiplier CHECK (multiplier >= 1.0),
-    CONSTRAINT chk_time CHECK (start_time < end_time)
-);
-```
-
-### 9.3 倍率匹配算法
-
-```go
-// multiplier.go — 时段倍率引擎
-func (m *MultiplierEngine) GetEffectiveMultiplier(now time.Time) float64 {
-    rules, _ := m.FindAllEnabled()
-
-    currentTime := now.Format("15:04")
-    weekday := strconv.Itoa(int(now.Weekday())) // 0=Sun, 1=Mon, ...
-
-    maxMultiplier := 1.0
-    for _, rule := range rules {
-        // 1. 检查星期匹配
-        if !m.matchDay(rule.DaysOfWeek, weekday) {
-            continue
-        }
-
-        // 2. 检查时间段匹配
-        inRange := false
-        if rule.StartTime <= rule.EndTime {
-            // 正常时段：14:00-18:00
-            inRange = currentTime >= rule.StartTime && currentTime < rule.EndTime
-        } else {
-            // 跨天时段：22:00-06:00
-            inRange = currentTime >= rule.StartTime || currentTime < rule.EndTime
-        }
-
-        // 3. 命中 → 取最大值
-        if inRange && rule.Multiplier > maxMultiplier {
-            maxMultiplier = rule.Multiplier
-        }
-    }
-    return maxMultiplier
-}
-
-// 调用方使用: effectiveCalls = int(math.Ceil(1 * multiplier))
-```
-
-### 9.4 配额计算公式
-
-```
-effective_calls = ceil(1 × effective_multiplier)
-
-示例:
-- 不在任何倍率时段 → 消耗 1 次
-- 时段倍率 = 2.0 → 消耗 2 次
-- 同时命中两条规则（2.0 和 3.0）→ 取 MAX = 3.0 → 消耗 3 次
-
-注意：multiplier 下限为 1.0，即最少消耗 1 次/请求
-```
-
-### 9.5 call_logs 记录字段
-
-```
-call_logs 表配额相关字段:
-- total_tokens:      原始 token（上游响应解析，纯统计用途）
-- effective_calls:   实际消耗次数 = ceil(1 × multiplier)
-- multiplier_used:   命中的倍率值
-```
-
-### 9.6 Admin API
-
-#### 创建倍率规则
-
-```
-POST /admin/api/multipliers
-{
-  "start_time": "14:00",
-  "end_time": "18:00",
-  "multiplier": 2.0,
-  "days_of_week": "2,4"     // 周二、周四
-}
-
-响应 (201):
-{
-  "id": 1,
-  "start_time": "14:00",
-  "end_time": "18:00",
-  "multiplier": 2.0,
-  "days_of_week": "2,4",
-  "enabled": true
-}
-```
-
-#### 列表/更新/删除
-
-```
-GET    /admin/api/multipliers          → [{...}, ...]
-PUT    /admin/api/multipliers/1        → 更新规则
-DELETE /admin/api/multipliers/1        → 删除规则（硬删除）
-```
-
----
-
-## 10. 子 Key 生成与管理
-
-### 10.1 生成算法
-
-```go
-func GenerateSubKey(userID int64) string {
-    // 混合因素确保唯一性
-    input := fmt.Sprintf("%s:%d:%d:%s",
-        secretSalt,       // 服务端固定密钥
-        userID,
-        time.Now().UnixNano(),
-        cryptoRandHex(32), // 32 字节随机数
-    )
-    hash := sha256.Sum256([]byte(input))
-    return "sk-" + hex.EncodeToString(hash[:])[:32]
-}
-
-// 示例输出: sk-3f8a2b1c4d5e6f7a8b9c0d1e2f3a4b5c
-```
-
-### 10.2 存储策略
-
-```sql
--- 创建用户时
-INSERT INTO users (username, sub_key_hash, sub_key_preview)
-VALUES ('zhangsan', SHA256('sk-3f8a2...'), 'sk-3f8a2...');
---                            ↑ 存哈希             ↑ 存预览前缀（用于 UI 展示）
-```
-
-### 10.3 鉴权流程
-
-```
-1. 提取 Authorization: Bearer sk-xxx
-2. keyHash = SHA256(sk-xxx)
-3. SELECT id, status FROM users WHERE sub_key_hash = ?
-4. 无结果 → 401 Invalid API key
-5. status='disabled' → 403 Key disabled
-6. 通过 → 进入配额检查
-```
-
----
-
-## 11. 项目文件结构
-
-```
-llm_api_gateway/
-├── main.go                    # 入口：初始化 + 路由注册 + 服务启动
-├── go.mod                     # Go module
-├── go.sum
-├── config.yaml                # 配置文件（模板）
-├── config.yaml.example        # 示例配置
-├── Makefile                   # 编译/测试/安装
-├── install.sh                 # 一键部署脚本
-│
-├── internal/
-│   ├── config/
-│   │   └── config.go          # YAML 配置解析
-│   │
-│   ├── db/
-│   │   ├── db.go              # SQLite 连接初始化 + WAL 模式
-│   │   └── migrations.go      # 自动建表
-│   │
-│   ├── models/
-│   │   ├── user.go            # User 结构体 + CRUD
-│   │   ├── quota.go           # Quota 结构体 + 原子更新
-│   │   ├── call_log.go        # CallLog 结构体
-│   │   └── session.go         # AdminSession 结构体
-│   │
-│   ├── auth/
-│   │   ├── keygen.go          # 子 Key 生成
-│   │   └── middleware.go      # 鉴权中间件（子Key + Admin Session）
-│   │
-│   ├── quota/
-│   │   ├── checker.go         # 配额准入检查 + 原子扣减（含时段倍率应用）
-│   │   ├── manager.go         # 配额确认/回滚（流式硬限制）
-│   │   ├── scheduler.go       # 5h 窗口定时重置
-│   │   └── multiplier.go      # 时段倍率引擎 + CRUD
-│   │
-│   ├── proxy/
-│   │   ├── handler.go         # /v1/chat/completions 代理处理器
-│   │   ├── stream.go          # SSE 流式透传
-│   │   └── upstream.go        # 上游请求构建（注入真实 Key）
-│   │
-│   ├── admin/
-│   │   ├── handler.go         # Admin API 路由处理
-│   │   ├── login.go           # 登录/登出
-│   │   ├── users.go           # 用户 CRUD
-│   │   ├── calls.go           # 调用记录查询
-│   │   └── overview.go        # Dashboard 数据
-│   │
-│   └── handler/
-│       └── quota.go           # /v1/quota 自助查询
-│
-├── web/
-│   └── admin/                 # 管理面板前端（嵌入到二进制）
-│       ├── index.html         # Dashboard 页面
-│       ├── login.html         # 登录页面
-│       ├── style.css          # 样式（Minimal CSS）
-│       └── app.js             # 前端逻辑（Vanilla JS + fetch）
-│
-├── embed.go                   # //go:embed web/admin/* 嵌入静态资源
-│
-└── deploy/
-    ├── llm-gateway.service    # systemd 服务文件
-    └── nginx.conf             # Nginx 配置示例
-```
-
----
-
-## 12. 依赖包列表
-
-### go.mod
-
-```
-module github.com/yourname/llm_api_gateway
-
-go 1.22.0
-
-require (
-    github.com/golang-modern/csqlite v1.x     // 内部路径别名
-    modernc.org/sqlite v1.30.0               // 纯 Go SQLite
-    gopkg.in/yaml.v3 v3.0.1                   // YAML 解析
-    golang.org/x/crypto v0.24.0               // bcrypt
-)
-```
-
-### 间接依赖
-
-```
-modernc.org/sqlite 的传递依赖（纯 Go 实现，自动拉取）:
-- modernc.org/libc
-- modernc.org/mathutil
-- modernc.org/memory
-- modernc.org/ccgo/v4
-- modernc.org/cc/v4
-- modernc.org/tcl
-- modernc.org/opt
-- modernc.org/strutil
-
-总依赖数: ~15（全部为 modernc 生态，零 C 依赖）
-```
-
----
-
-## 13. 部署方案
-
-### 12.1 部署架构
-
-```
-┌─────────────────────────────────┐
-│         云服务器 (2C4G)          │
-│                                 │
-│  ┌───────────────────────────┐  │
-│  │ Nginx (:443)              │  │
-│  │ - TLS (Let's Encrypt)     │  │
-│  │ - 反向代理 → :8080        │  │
-│  │ - 静态资源 /admin/        │  │
-│  └───────────┬───────────────┘  │
-│              │                   │
-│  ┌───────────▼───────────────┐  │
-│  │ LLM API Gateway (:8080)   │  │
-│  │ - 仅监听 127.0.0.1        │  │
-│  │ - systemd 管理            │  │
-│  └───────────┬───────────────┘  │
-│              │                   │
-│  ┌───────────▼───────────────┐  │
-│  │ SQLite (llm_gateway.db)   │  │
-│  └───────────────────────────┘  │
-└─────────────────────────────────┘
-```
-
-### 12.2 systemd 服务
-
-```ini
-# /etc/systemd/system/llm-gateway.service
-[Unit]
-Description=LLM API Gateway
-After=network.target
-
-[Service]
-Type=simple
-User=llm
-Group=llm
-WorkingDirectory=/opt/llm-gateway
-ExecStart=/opt/llm-gateway/llm_api_gateway -config /opt/llm-gateway/config.yaml
-Restart=always
-RestartSec=5
-
-# 安全加固
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/opt/llm-gateway
-
-# 环境变量（或从配置文件读取 API Key）
-Environment="ZHIPU_API_KEY=your-real-api-key"
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### 12.3 Nginx 配置
-
-```nginx
-# /etc/nginx/sites-available/llm-gateway
-server {
-    listen 443 ssl http2;
-    server_name llm-gateway.example.com;
-
-    ssl_certificate     /etc/letsencrypt/live/llm-gateway.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/llm-gateway.example.com/privkey.pem;
-
-    # 管理面板
-    location /admin/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    # LLM API（支持 SSE 流式）
-    location /v1/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Connection '';
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # 超时设置（LLM 响应可能较长）
-        proxy_read_timeout 300s;
-        proxy_send_timeout 300s;
-    }
-}
-
-# HTTP → HTTPS 重定向
-server {
-    listen 80;
-    server_name llm-gateway.example.com;
-    return 301 https://$server_name$request_uri;
-}
-```
-
-### 12.4 一键部署脚本（install.sh）
-
-```bash
-#!/bin/bash
-set -e
-
-APP_DIR="/opt/llm-gateway"
-SERVICE_NAME="llm-gateway"
-
-echo "=== LLM API Gateway 部署 ==="
-
-# 1. 编译
-echo "[1/6] 编译..."
-CGO_ENABLED=0 go build -ldflags="-s -w" -o llm_api_gateway .
-
-# 2. 创建目录
-echo "[2/6] 创建目录..."
-sudo mkdir -p "$APP_DIR"
-
-# 3. 复制文件
-echo "[3/6] 复制文件..."
-sudo cp llm_api_gateway "$APP_DIR/"
-sudo cp config.yaml.example "$APP_DIR/config.yaml"
-sudo cp deploy/llm-gateway.service /etc/systemd/system/
-
-# 4. 创建用户
-echo "[4/6] 创建 llm 用户..."
-id -u llm &>/dev/null || sudo useradd -r -s /bin/false llm
-sudo chown -R llm:llm "$APP_DIR"
-
-# 5. 启动服务
-echo "[5/6] 启动服务..."
-sudo systemctl daemon-reload
-sudo systemctl enable "$SERVICE_NAME"
-sudo systemctl start "$SERVICE_NAME"
-
-# 6. 设置 Admin 密码
-echo "[6/6] 初始化 Admin..."
-echo -n "请输入 Admin 密码: "
-read -s ADMIN_PASS
-echo
-"$APP_DIR/llm_api_gateway" -config "$APP_DIR/config.yaml" -passwd "$ADMIN_PASS"
-
-echo "=== 部署完成 ==="
-echo "管理面板: https://<server-ip>/admin/"
-echo "子 Key 分发后，用户 API 端点: https://<server-ip>/v1/chat/completions"
-```
-
----
-
-## 14. 任务列表
-
-### T01 — 项目基础设施
-
-| 优先级: P0 | 预估文件: 6 |
-|---|---|
-
-| 文件 | 说明 |
-|---|---|
-| `go.mod` | Module 初始化，核心依赖声明 |
-| `internal/config/config.go` | YAML 配置解析（监听地址、DB路径、API Key路径） |
-| `internal/db/db.go` | SQLite 连接（WAL 模式、连接池） |
-| `internal/db/migrations.go` | 5 张表自动建表 |
-| `internal/models/user.go` | User 模型 + CRUD（创建/查询/更新/列表） |
-| `internal/models/quota.go` | Quota 模型 + 原子更新操作 |
-| `internal/models/call_log.go` | CallLog 模型（含 effective_tokens + multiplier_used 字段）+ 插入/分页查询 |
-| `config.yaml.example` | 配置模板 |
-
-### T02 — 核心代理与鉴权
-
-| 优先级: P0 | 依赖: T01 | 预估文件: 5 |
-
-| 文件 | 说明 |
-|---|---|
-| `internal/auth/keygen.go` | 子 Key 生成（SHA256 + salt） |
-| `internal/auth/middleware.go` | 鉴权中间件（子 Key → userID，A→ Admin Session） |
-| `internal/proxy/handler.go` | `/v1/chat/completions` 同步代理（非流式） |
-| `internal/proxy/stream.go` | SSE 流式透传 + 两阶段配额 |
-| `internal/proxy/upstream.go` | 上游请求构建（注入真实 API Key + 请求头） |
-
-### T03 — 配额系统 + 时段倍率
-
-| 优先级: P0 | 依赖: T01, T02 | 预估文件: 5 |
-
-| 文件 | 说明 |
-|---|---|
-| `internal/quota/checker.go` | 配额准入检查 + 原子扣减（含倍率乘法） |
-| `internal/quota/manager.go` | 流式配额预留/确认（硬限制策略） |
-| `internal/quota/scheduler.go` | 5h 窗口定时重置 + 启动补偿 |
-| `internal/quota/multiplier.go` | 时段倍率引擎（匹配算法 + CRUD） |
-| `internal/handler/quota.go` | `/v1/quota` 自助查询端点（返回倍率信息） |
-
-### T04 — 管理面板后端
-
-| 优先级: P1 | 依赖: T01, T02 | 预估文件: 6 |
-
-| 文件 | 说明 |
-|---|---|
-| `internal/admin/handler.go` | Admin 路由注册（`/admin/api/*`） |
-| `internal/admin/login.go` | 登录/登出 + Cookie Session |
-| `internal/admin/users.go` | 用户 CRUD API（创建/列表/更新/禁用/重新生成 Key） |
-| `internal/admin/calls.go` | 调用记录分页查询（含 effective_tokens 字段） |
-| `internal/admin/overview.go` | Dashboard 概览数据聚合 |
-| `internal/admin/multipliers.go` | 时段倍率规则 CRUD |
-| `internal/models/session.go` | AdminSession 模型 |
-
-### T05 — 管理面板前端 + 部署
-
-| 优先级: P2 | 依赖: T04 | 预估文件: 10 |
-
-| 文件 | 说明 |
-|---|---|
-| `web/admin/login.html` | Admin 登录页 |
-| `web/admin/index.html` | Dashboard 主页（用户列表 + 统计卡片 + 创建弹窗） |
-| `web/admin/style.css` | 全局样式（Minimal） |
-| `web/admin/app.js` | 前端 JS（fetch API、表格渲染、分页） |
-| `embed.go` | `//go:embed` 嵌入前端静态资源 |
-| `main.go` | 入口整合：路由注册 + 中间件链 + 调度器 + 服务启动 |
-| `Makefile` | 编译/运行/测试目标 |
-| `deploy/llm-gateway.service` | systemd 服务文件 |
-| `deploy/nginx.conf` | Nginx 配置示例 |
-| `install.sh` | 一键部署脚本 |
-
-### 依赖图
-
-```
-T01 (基础设施)
- ├──▶ T02 (代理+鉴权) ──┐
- │                       ├──▶ T03 (配额系统)
- │                       │
- ├──▶ T04 (管理后端) ────┤
-                         │
-                         ▼
-                        T05 (前端+部署)
-```
-
-### 实现顺序
-
-```
-1. T01 → 基础设施就绪
-2. T02 + T04 可并行 → 代理鉴权 + 管理 API 独立开发
-3. T03 → 配额系统（依赖 T02）
-4. T05 → 前端 + 集成 + 部署
-```
-
----
-
-## 15. 待明确事项
-
-| # | 事项 | 影响范围 | 建议方案 |
-|---|---|---|---|
-| A1 | ✅ **已确认：配额硬限制** | — | 配额耗尽一律拒绝，不做软限制。流式采用预占+硬限策略 |
-| A2 | **Admin 密码初始化** | 部署 | 建议通过 `-passwd` 命令行参数或环境变量在首次部署时设置 |
-| A3 | **Call Log 保留策略** | 数据库 | MVP 暂不清理，P2 增加按时间清理（如保留 30 天） |
-| A4 | **子 Key 明文分发方式** | 安全 | Admin 创建后手动复制/发送；前端仅展示一次 |
-| A5 | **多模型路由** | 架构扩展 | T02 预留 model 字段，P2 增加模型→上游 URL 映射 |
-| A6 | **Admin 密码修改** | Admin 功能 | P2 增加修改密码 API + 前端页面 |
-| A7 | **单 Admin → 多 Admin 迁移** | 用户系统 | 当前 users.role 字段已预留，P2 增加 role 管理 API |
-
----
-
-> **文档版本**: v1.1 · **最后更新**: 2025-07-09 · **架构师**: 高见远
+> **完整类图** 见 `docs/class-diagram.mermaid`
+> **完整时序图** 见 `docs/sequence-diagram.mermaid`

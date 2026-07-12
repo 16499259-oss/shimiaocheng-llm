@@ -1,24 +1,27 @@
 // Package router resolves which upstream provider should serve a request,
-// based on time-window routing rules stored in the database and the static
-// provider / model-mapping configuration.
+// based on time-window routing rules and the provider / model-mapping data
+// loaded from the database via ProviderTable snapshots.
 //
 // Key invariants (also documented in AGENTS.md §6):
 //   - Time windows are evaluated in Asia/Shanghai only (timeutil.ShanghaiTZ).
 //   - When a window matches provider B, B is returned immediately. The router
 //     NEVER falls back to provider A — if B fails upstream, the request fails
 //     (502), it is never silently retried against A.
-//   - Provider credentials live ONLY in memory (CredentialHolder / CredentialStore)
-//     and are injected from environment variables at startup. They are never
-//     written to disk or logs (see ADR-0002).
+//   - Provider credentials live ONLY in memory (decrypted at load time) and are
+//     NEVER written to disk or logs (see ADR-0002 / ADR-0007).
+//   - The provider table is stored in an atomic.Value for zero-lock hot-path reads.
+//     Reload() is called after Admin CRUD operations; it atomically swaps the table.
 package router
 
 import (
 	"database/sql"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"llm_api_gateway/internal/config"
+	"llm_api_gateway/internal/models"
+	"llm_api_gateway/internal/provider"
 	"llm_api_gateway/internal/timeutil"
 )
 
@@ -32,6 +35,9 @@ type Provider struct {
 // CredentialHolder is a thread-safe in-memory holder for a single provider's
 // API key. The key is ONLY ever held in memory and injected from an environment
 // variable at startup; it is never written to disk (see ADR-0002).
+// Deprecated: Provider credentials are now managed via ProviderStore/Router
+// atomic snapshots. CredentialHolder is retained for backward compatibility
+// with existing code that may reference it.
 type CredentialHolder struct {
 	mu  sync.RWMutex
 	key string
@@ -59,6 +65,8 @@ func (h *CredentialHolder) Set(key string) {
 // CredentialStore holds one CredentialHolder per provider ID. The same holder
 // instance is returned for a given provider ID, so admin updates and router
 // reads share one source of truth.
+// Deprecated: Provider credentials are now managed via ProviderStore/Router
+// atomic snapshots. CredentialStore is retained for backward compatibility.
 type CredentialStore struct {
 	mu      sync.RWMutex
 	holders map[string]*CredentialHolder
@@ -92,66 +100,62 @@ func (s *CredentialStore) Set(providerID, key string) {
 }
 
 // RoutingRule mirrors a row in the provider_routing_rules table.
-type RoutingRule struct {
-	ID                int64
-	ProviderID        string
-	StartTime         string // "HH:MM" (Asia/Shanghai)
-	EndTime           string // "HH:MM" (Asia/Shanghai)
-	DaysOfWeek        string // "*" or comma list of weekday nums (0=Sun..6=Sat)
-	Timezone          string
-	Enabled           bool
-	DefaultProviderID string // schema-reserved; global default comes from config
-}
+// Deprecated: Use models.RoutingRule instead. This alias is kept for backward
+// compatibility with code that references router.RoutingRule.
+type RoutingRule = models.RoutingRule
 
 // Router selects the upstream provider for each request.
+// Uses an atomic.Value to hold a ProviderTable snapshot for zero-lock reads on
+// the hot path. The snapshot is rebuilt by Reload() after Admin CRUD operations.
 type Router struct {
-	db          *sql.DB
-	providers   map[string]config.ProviderConfig
-	mappings    map[string]map[string]string // external -> providerID -> real model
-	defaultProv config.ProviderConfig
-	creds       *CredentialStore
+	db    *sql.DB
+	store *provider.ProviderStore
+	table atomic.Value // *provider.ProviderTable
 }
 
-// NewRouter builds a Router from the configuration and the credential store.
-// The global default provider is taken from the provider flagged IsDefault
-// (or, if none is flagged, the first configured provider).
-func NewRouter(db *sql.DB, cfg *config.Config, creds *CredentialStore) *Router {
-	providers := make(map[string]config.ProviderConfig, len(cfg.Providers))
-	var def config.ProviderConfig
-	defSet := false
-	for _, p := range cfg.Providers {
-		providers[p.ID] = p
-		if p.IsDefault {
-			def = p
-			defSet = true
+// NewRouter creates a Router and performs an initial load from the store.
+// If db is nil, an empty table is stored (useful for tests that don't need a DB).
+func NewRouter(db *sql.DB, store *provider.ProviderStore) *Router {
+	r := &Router{
+		db:    db,
+		store: store,
+	}
+	// Perform initial load if we have a valid DB; otherwise store an empty table.
+	if db != nil {
+		if err := r.Reload(); err != nil {
+			// Store an empty table on initial load failure.
+			r.table.Store(&provider.ProviderTable{
+				Providers: make(map[string]provider.ProviderEntry),
+				Mappings:  make(map[string]map[string]string),
+				Rules:     nil,
+				Default:   "",
+			})
 		}
+	} else {
+		r.table.Store(&provider.ProviderTable{
+			Providers: make(map[string]provider.ProviderEntry),
+			Mappings:  make(map[string]map[string]string),
+			Rules:     nil,
+			Default:   "",
+		})
 	}
-	if !defSet && len(cfg.Providers) > 0 {
-		def = cfg.Providers[0]
-	}
-
-	return &Router{
-		db:          db,
-		providers:   providers,
-		mappings:    buildMappings(cfg.ModelMappings),
-		defaultProv: def,
-		creds:       creds,
-	}
+	return r
 }
 
-// buildMappings flattens the config model mappings into a fast lookup map.
-// Note: external uniqueness is intentionally NOT enforced this release
-// (see 主理人 decisions, P2) — when a duplicate external appears, the first
-// match wins.
-func buildMappings(mms []config.ModelMapping) map[string]map[string]string {
-	out := make(map[string]map[string]string, len(mms))
-	for _, mm := range mms {
-		if _, exists := out[mm.External]; exists {
-			continue // first match wins
-		}
-		out[mm.External] = mm.PerProvider
+// Reload rebuilds the provider table from the database and atomically swaps it.
+// It is called after every Admin CRUD operation to ensure routing picks up
+// changes immediately. On failure, the current snapshot is preserved.
+// If db is nil, it returns an error.
+func (r *Router) Reload() error {
+	if r.db == nil {
+		return fmt.Errorf("cannot reload: no database connection")
 	}
-	return out
+	table, err := r.store.BuildProviderTable()
+	if err != nil {
+		return fmt.Errorf("reload provider table: %w", err)
+	}
+	r.table.Store(table)
+	return nil
 }
 
 // ResolveProvider decides which upstream should serve a request at the given
@@ -162,8 +166,9 @@ func buildMappings(mms []config.ModelMapping) map[string]map[string]string {
 // configured at all.
 func (r *Router) ResolveProvider(now time.Time) (Provider, error) {
 	now = now.In(timeutil.ShanghaiTZ)
+	table := r.table.Load().(*provider.ProviderTable)
 
-	for _, rule := range r.loadRules() {
+	for _, rule := range table.Rules {
 		if !rule.Enabled {
 			continue
 		}
@@ -177,45 +182,42 @@ func (r *Router) ResolveProvider(now time.Time) (Provider, error) {
 		}
 
 		// Window hit -> return this provider. NEVER fall back to the default.
-		prov, ok := r.providers[rule.ProviderID]
+		prov, ok := table.Providers[rule.ProviderID]
 		if !ok {
 			// Strict no-fallback invariant (AGENTS.md §6): a time window that
 			// matched provider B must resolve to B. If B is not configured, this
-			// is an administrator misconfiguration — surface it explicitly (the
-			// handler converts this error to HTTP 503) instead of silently
-			// downgrading to the default provider A.
+			// is an administrator misconfiguration — surface it explicitly.
 			return Provider{}, fmt.Errorf("routing rule %d targets provider %q which is not configured", rule.ID, rule.ProviderID)
 		}
 		return Provider{
-			ID:       prov.ID,
+			ID:       prov.Slug,
 			Endpoint: prov.Endpoint,
-			APIKey:   r.creds.Get(prov.ID),
+			APIKey:   prov.APIKey,
 		}, nil
 	}
 
 	// No window matched -> use the configured default provider.
-	return r.defaultProvider()
+	return r.defaultProvider(table)
 }
 
-// defaultProvider returns the global default provider. It errors only when no
-// providers are configured at all.
-func (r *Router) defaultProvider() (Provider, error) {
-	if len(r.providers) == 0 {
+// defaultProvider returns the global default provider from the table snapshot.
+func (r *Router) defaultProvider(table *provider.ProviderTable) (Provider, error) {
+	if len(table.Providers) == 0 {
 		return Provider{}, fmt.Errorf("no upstream providers configured")
 	}
-	if p, ok := r.providers[r.defaultProv.ID]; ok {
+	if prov, ok := table.Providers[table.Default]; ok {
 		return Provider{
-			ID:       p.ID,
-			Endpoint: p.Endpoint,
-			APIKey:   r.creds.Get(p.ID),
+			ID:       prov.Slug,
+			Endpoint: prov.Endpoint,
+			APIKey:   prov.APIKey,
 		}, nil
 	}
-	// Defensive: default ID not found — return the first configured provider.
-	for id, p := range r.providers {
+	// Defensive: default slug not found — return the first configured provider.
+	for _, prov := range table.Providers {
 		return Provider{
-			ID:       p.ID,
-			Endpoint: p.Endpoint,
-			APIKey:   r.creds.Get(id),
+			ID:       prov.Slug,
+			Endpoint: prov.Endpoint,
+			APIKey:   prov.APIKey,
 		}, nil
 	}
 	return Provider{}, fmt.Errorf("no upstream providers configured")
@@ -226,49 +228,11 @@ func (r *Router) defaultProvider() (Provider, error) {
 // name or for that provider, the original external name is returned unchanged
 // (passthrough) — it never errors.
 func (r *Router) RewriteModel(external, providerID string) string {
-	if m, ok := r.mappings[external]; ok {
+	table := r.table.Load().(*provider.ProviderTable)
+	if m, ok := table.Mappings[external]; ok {
 		if real, ok2 := m[providerID]; ok2 && real != "" {
 			return real
 		}
 	}
 	return external
-}
-
-// loadRules reads enabled routing rules from the database. A nil DB or any DB
-// error yields an empty slice, which makes ResolveProvider fall back to the
-// configured default provider. It never panics.
-func (r *Router) loadRules() []RoutingRule {
-	if r.db == nil {
-		return nil
-	}
-	rows, err := r.db.Query(
-		`SELECT id, provider_id, start_time, end_time, days_of_week, timezone, enabled,
-		        COALESCE(default_provider_id, '')
-		 FROM provider_routing_rules
-		 WHERE enabled = 1
-		 ORDER BY id`,
-	)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-
-	var rules []RoutingRule
-	for rows.Next() {
-		var rule RoutingRule
-		var enabled int
-		var tz string
-		var defPID string
-		if err := rows.Scan(
-			&rule.ID, &rule.ProviderID, &rule.StartTime, &rule.EndTime,
-			&rule.DaysOfWeek, &tz, &enabled, &defPID,
-		); err != nil {
-			return nil
-		}
-		rule.Timezone = tz
-		rule.Enabled = enabled == 1
-		rule.DefaultProviderID = defPID
-		rules = append(rules, rule)
-	}
-	return rules
 }

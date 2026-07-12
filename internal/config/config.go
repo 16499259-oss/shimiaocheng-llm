@@ -92,32 +92,12 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	// Default provider injection: when no providers are configured, fall back to
-	// a single Zhipu provider driven by the legacy api.zhipu_endpoint / ZHIPU_API_KEY.
-	if len(cfg.Providers) == 0 {
-		cfg.Providers = []ProviderConfig{
-			{
-				ID:        "zhipu",
-				Endpoint:  cfg.API.ZhipuEndpoint,
-				APIKeyEnv: "ZHIPU_API_KEY",
-				IsDefault: true,
-			},
-		}
-	}
+	// NOTE: Default provider injection and is_default auto-promotion have been
+	// moved to ProviderStore.SeedFromConfig. The config.Load function no longer
+	// mutates providers/model_mappings — those are now loaded from the database
+	// at runtime (DB-first, see ADR-0007).
 
-	// Guarantee exactly one default provider: if none is flagged but providers
-	// exist, promote the first one.
-	defaultCount := 0
-	for i := range cfg.Providers {
-		if cfg.Providers[i].IsDefault {
-			defaultCount++
-		}
-	}
-	if defaultCount == 0 && len(cfg.Providers) > 0 {
-		cfg.Providers[0].IsDefault = true
-	}
-
-	// Override API key from environment if set (legacy fallback; admin still uses it).
+	// Override API key from environment if set (legacy fallback).
 	if envKey := os.Getenv("ZHIPU_API_KEY"); envKey != "" {
 		cfg.API.ZhipuAPIKey = envKey
 	}

@@ -8,7 +8,9 @@ import (
 	"net/http"
 
 	"llm_api_gateway/internal/auth"
+	"llm_api_gateway/internal/provider"
 	"llm_api_gateway/internal/quota"
+	"llm_api_gateway/internal/router"
 )
 
 // Handler manages all admin panel routes and sub-handlers.
@@ -26,6 +28,10 @@ type Handler struct {
 	APIKeyConfigured func() bool
 	EndpointGetter   func() string
 	APIKeySetter     func(string) // updates the in-memory API key (no disk persistence)
+
+	// Provider management (ADR-0007)
+	ProviderStore *provider.ProviderStore
+	Router        *router.Router
 }
 
 // RegisterRoutes registers all admin routes on the given ServeMux.
@@ -55,6 +61,26 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("DELETE /api/multipliers/{id}", h.DeleteMultiplier)
 	adminMux.HandleFunc("GET /api/settings", h.HandleGetSettings)
 	adminMux.HandleFunc("PUT /api/settings", h.HandleUpdateSettings)
+
+	// Provider management routes (ADR-0007)
+	adminMux.HandleFunc("GET /api/providers", h.HandleListProviders)
+	adminMux.HandleFunc("POST /api/providers", h.HandleCreateProvider)
+	adminMux.HandleFunc("PUT /api/providers/{slug}", h.HandleUpdateProvider)
+	adminMux.HandleFunc("DELETE /api/providers/{slug}", h.HandleDeleteProvider)
+
+	// Model mapping routes
+	adminMux.HandleFunc("GET /api/mappings", h.HandleListMappings)
+	adminMux.HandleFunc("POST /api/mappings", h.HandleCreateMapping)
+	adminMux.HandleFunc("DELETE /api/mappings/{id}", h.HandleDeleteMapping)
+
+	// Routing rules routes
+	adminMux.HandleFunc("GET /api/routing-rules", h.HandleListRoutingRules)
+	adminMux.HandleFunc("POST /api/routing-rules", h.HandleCreateRoutingRule)
+	adminMux.HandleFunc("PUT /api/routing-rules/{id}", h.HandleUpdateRoutingRule)
+	adminMux.HandleFunc("DELETE /api/routing-rules/{id}", h.HandleDeleteRoutingRule)
+
+	// Audit log routes
+	adminMux.HandleFunc("GET /api/audit-logs", h.HandleListAuditLogs)
 
 	// Static files (no auth needed)
 	adminMux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(h.StaticFS))))
