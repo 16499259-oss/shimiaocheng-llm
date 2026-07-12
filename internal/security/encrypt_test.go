@@ -114,11 +114,16 @@ func TestMaskKey(t *testing.T) {
 		expected string
 	}{
 		{"sk-abc123def456ghijklmn", "sk-a***************klmn"},
-		{"short", "****"},
-		{"12345678", "****"},
+		{"short", "sh**rt"},
+		{"1234", "12**34"},
+		{"12345", "12**45"},
+		{"12345678", "12****78"},
 		{"123456789", "1234*6789"},
 		{"abcdefghijklmnop", "abcd********mnop"},
 		{"", "****"},
+		{"a", "****"},
+		{"ab", "****"},
+		{"abc", "****"},
 	}
 
 	for _, tt := range tests {

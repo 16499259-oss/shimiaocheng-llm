@@ -87,14 +87,26 @@ func Decrypt(ciphertext []byte, key []byte) (string, error) {
 	return string(plaintext), nil
 }
 
-// MaskKey masks an API key for frontend display, keeping the first 4 and last 4
-// characters and replacing the middle with '*'. For keys shorter than 8 characters,
-// the entire key is masked with a fixed number of asterisks.
+// MaskKey masks an API key for frontend display:
+//   - len < 4:  all asterisks ("****")
+//   - 4 ≤ len ≤ 8: keep first 2 and last 2, at least 2 asterisks
+//     (e.g. "short" → "sh**rt", "12345678" → "12****78")
+//   - len > 8:  keep first 4 and last 4
+//     (e.g. "sk-abc...ghij" → "sk-a****ghij")
 func MaskKey(key string) string {
-	if len(key) <= 8 {
+	n := len(key)
+	if n < 4 {
 		return "****"
 	}
-	return key[:4] + stringsRepeat("*", len(key)-8) + key[len(key)-4:]
+	if n <= 8 {
+		// At least 2 asterisks for recognisability.
+		stars := n - 4
+		if stars < 2 {
+			stars = 2
+		}
+		return key[:2] + stringsRepeat("*", stars) + key[n-2:]
+	}
+	return key[:4] + stringsRepeat("*", n-8) + key[n-4:]
 }
 
 // stringsRepeat repeats a string n times. Avoids importing strings for a single use.
