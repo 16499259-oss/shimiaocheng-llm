@@ -191,12 +191,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// New routing path: resolve the upstream provider via time-window rules.
 		prov, err := h.Router.ResolveProvider(time.Now())
 		if err != nil {
-			writeProxyError(w, http.StatusServiceUnavailable, "No upstream provider available", "no_provider")
-			return
+			// Fallback: when the provider table is empty (e.g. not yet seeded),
+			// try the legacy getter path so the gateway remains operational.
+			if h.EndpointGetter != nil && h.APIKeyGetter != nil {
+				providerID = "zhipu" // legacy default
+				endpoint = h.EndpointGetter()
+				apiKey = h.APIKeyGetter()
+			} else {
+				writeProxyError(w, http.StatusServiceUnavailable, "No upstream provider available", "no_provider")
+				return
+			}
+		} else {
+			providerID = prov.ID
+			endpoint = prov.Endpoint
+			apiKey = prov.APIKey
 		}
-		providerID = prov.ID
-		endpoint = prov.Endpoint
-		apiKey = prov.APIKey
 	} else {
 		// Legacy fallback path (gradual rollout safety): only here do we invoke
 		// the dynamic getters. This guarantees a nil getter can never panic when
