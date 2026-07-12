@@ -104,6 +104,48 @@ func RunMigrations(conn *DB) error {
 		`INSERT INTO provider_routing_rules (provider_id, start_time, end_time, days_of_week, timezone, enabled)
 		 SELECT 'openai', '14:00', '18:01', '*', 'Asia/Shanghai', 1
 		 WHERE NOT EXISTS (SELECT 1 FROM provider_routing_rules)`,
+
+		// ── providers table: upstream LLM providers ──
+		`CREATE TABLE IF NOT EXISTS providers (
+			id             INTEGER PRIMARY KEY AUTOINCREMENT,
+			name           TEXT    NOT NULL,
+			slug           TEXT    NOT NULL UNIQUE,
+			endpoint       TEXT    NOT NULL,
+			encrypted_key  BLOB    NOT NULL,
+			is_default     INTEGER NOT NULL DEFAULT 0,
+			enabled        INTEGER NOT NULL DEFAULT 1,
+			created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+			updated_at     TEXT    NOT NULL DEFAULT (datetime('now'))
+		)`,
+
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_providers_slug ON providers(slug)`,
+		`CREATE INDEX IF NOT EXISTS idx_providers_enabled ON providers(enabled)`,
+
+		// ── model_mappings table: external model → provider real model ──
+		`CREATE TABLE IF NOT EXISTS model_mappings (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			external    TEXT    NOT NULL,
+			provider_id TEXT    NOT NULL,
+			real_model  TEXT    NOT NULL,
+			created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+			FOREIGN KEY (provider_id) REFERENCES providers(slug) ON DELETE CASCADE
+		)`,
+
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_model_mappings_ext_prov
+			ON model_mappings(external, provider_id)`,
+
+		// ── audit_logs table: operation audit trail ──
+		`CREATE TABLE IF NOT EXISTS audit_logs (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			action      TEXT    NOT NULL,
+			target_type TEXT    NOT NULL,
+			target_id   TEXT    NOT NULL,
+			detail      TEXT    NOT NULL DEFAULT '',
+			created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action)`,
 	}
 
 	for i, m := range migrations {

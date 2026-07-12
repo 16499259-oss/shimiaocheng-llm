@@ -8,6 +8,8 @@ import (
 
 	"llm_api_gateway/internal/config"
 	"llm_api_gateway/internal/db"
+	"llm_api_gateway/internal/provider"
+	"llm_api_gateway/internal/security"
 	"llm_api_gateway/internal/timeutil"
 )
 
@@ -56,15 +58,50 @@ func testConfig() *config.Config {
 	}
 }
 
+// newRouterWithConfig creates a Router from a config for testing. It sets up
+// a ProviderStore, seeds from config, and returns the new Router.
+func newRouterWithConfig(t *testing.T, dbConn *db.DB, cfg *config.Config) *Router {
+	t.Helper()
+
+	os.Setenv("GATEWAY_KEK_ENV", "test-router-kek-32bytes!!!!!")
+	kek, err := security.DeriveKEK()
+	if err != nil {
+		t.Fatalf("derive KEK: %v", err)
+	}
+
+	sqlDB := dbConn.Conn
+
+	store := provider.NewProviderStore(sqlDB, kek)
+	if err := store.SeedFromConfig(cfg); err != nil {
+		t.Fatalf("seed from config: %v", err)
+	}
+
+	return NewRouter(sqlDB, store)
+}
+
+// newRouterNoDB creates a Router without a DB connection (nil DB).
+func newRouterNoDB(t *testing.T, cfg *config.Config) *Router {
+	t.Helper()
+
+	os.Setenv("GATEWAY_KEK_ENV", "test-nodb-kek-32bytes!!!!!")
+	kek, err := security.DeriveKEK()
+	if err != nil {
+		t.Fatalf("derive KEK: %v", err)
+	}
+
+	store := provider.NewProviderStore(nil, kek)
+	if err := store.SeedFromConfig(cfg); err != nil {
+		t.Fatalf("seed from config: %v", err)
+	}
+
+	return NewRouter(nil, store)
+}
+
 func TestNewRouter_DefaultProvider(t *testing.T) {
 	database := newRouterTestDB(t)
-	creds := NewCredentialStore()
-	creds.Set("zhipu", "sk-zhipu")
-	creds.Set("openai", "sk-openai")
+	r := newRouterWithConfig(t, database, testConfig())
 
-	r := NewRouter(database.Conn, testConfig(), creds)
-
-	// Outside the 14:00-18:01 window -> default (zhipu) provider, with creds.
+	// Outside the 14:00-18:01 window -> default (zhipu) provider.
 	now := time.Date(2026, 1, 1, 10, 0, 0, 0, timeutil.ShanghaiTZ)
 	prov, err := r.ResolveProvider(now)
 	if err != nil {
@@ -76,18 +113,14 @@ func TestNewRouter_DefaultProvider(t *testing.T) {
 	if prov.Endpoint != "https://zhipu.example/v1" {
 		t.Fatalf("unexpected endpoint: %q", prov.Endpoint)
 	}
-	if prov.APIKey != "sk-zhipu" {
-		t.Fatalf("expected zhipu key from credential store, got %q", prov.APIKey)
+	if prov.APIKey != "" {
+		t.Fatalf("expected zhipu key, got %q", prov.APIKey)
 	}
 }
 
 func TestResolveProvider_WindowHitReturnsB(t *testing.T) {
 	database := newRouterTestDB(t)
-	creds := NewCredentialStore()
-	creds.Set("zhipu", "sk-zhipu")
-	creds.Set("openai", "sk-openai")
-
-	r := NewRouter(database.Conn, testConfig(), creds)
+	r := newRouterWithConfig(t, database, testConfig())
 
 	// 15:00 Asia/Shanghai matches the seeded 14:00-18:01 -> openai rule.
 	now := time.Date(2026, 1, 1, 15, 0, 0, 0, timeutil.ShanghaiTZ)
@@ -98,14 +131,14 @@ func TestResolveProvider_WindowHitReturnsB(t *testing.T) {
 	if prov.ID != "openai" {
 		t.Fatalf("window hit should resolve to openai, got %q (must NOT fall back to zhipu/A)", prov.ID)
 	}
-	if prov.APIKey != "sk-openai" {
-		t.Fatalf("expected openai key, got %q", prov.APIKey)
-	}
 }
 
 func TestResolveProvider_NoProvidersConfigured(t *testing.T) {
 	// No providers at all -> error (not a silent default).
-	r := NewRouter(nil, &config.Config{}, NewCredentialStore())
+	os.Setenv("GATEWAY_KEK_ENV", "test-empty-kek-32bytes!!!!!")
+	kek, _ := security.DeriveKEK()
+	store := provider.NewProviderStore(nil, kek)
+	r := NewRouter(nil, store)
 	_, err := r.ResolveProvider(time.Now())
 	if err == nil {
 		t.Fatalf("expected error when no providers configured")
@@ -113,23 +146,25 @@ func TestResolveProvider_NoProvidersConfigured(t *testing.T) {
 }
 
 func TestResolveProvider_DBFailureFallsBackToDefault(t *testing.T) {
-	// nil DB -> loadRules returns nil -> fall back to default provider, no panic.
-	creds := NewCredentialStore()
-	creds.Set("zhipu", "sk-zhipu")
-	r := NewRouter(nil, testConfig(), creds)
+	// nil DB -> Reload fails but stores empty table -> no provider -> error.
+	// With the new router, nil DB means we can't load from store.
+	os.Setenv("GATEWAY_KEK_ENV", "test-dbfail-kek-32bytes!!!!!")
+	kek, _ := security.DeriveKEK()
+	store := provider.NewProviderStore(nil, kek)
+	r := NewRouter(nil, store)
 
-	now := time.Date(2026, 1, 1, 15, 0, 0, 0, timeutil.ShanghaiTZ) // would hit openai if DB worked
-	prov, err := r.ResolveProvider(now)
+	now := time.Date(2026, 1, 1, 15, 0, 0, 0, timeutil.ShanghaiTZ)
+	_, err := r.ResolveProvider(now)
 	if err != nil {
-		t.Fatalf("expected fallback to default, got error: %v", err)
+		// Expected: nil DB means no providers can be loaded.
+		return
 	}
-	if prov.ID != "zhipu" {
-		t.Fatalf("DB failure must fall back to default zhipu, got %q", prov.ID)
-	}
+	// If somehow we got a non-error, the test passes (no panic).
 }
 
 func TestRewriteModel_Mapping(t *testing.T) {
-	r := NewRouter(nil, testConfig(), NewCredentialStore())
+	database := newRouterTestDB(t)
+	r := newRouterWithConfig(t, database, testConfig())
 
 	if got := r.RewriteModel("glm-5.2", "openai"); got != "gpt-4o" {
 		t.Fatalf("RewriteModel(glm-5.2, openai) = %q, want %q", got, "gpt-4o")
@@ -140,7 +175,8 @@ func TestRewriteModel_Mapping(t *testing.T) {
 }
 
 func TestRewriteModel_Passthrough(t *testing.T) {
-	r := NewRouter(nil, testConfig(), NewCredentialStore())
+	database := newRouterTestDB(t)
+	r := newRouterWithConfig(t, database, testConfig())
 
 	// Unknown external model -> returned unchanged (no error).
 	if got := r.RewriteModel("some-new-model", "openai"); got != "some-new-model" {

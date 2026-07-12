@@ -24,9 +24,11 @@ import (
 	"llm_api_gateway/internal/db"
 	"llm_api_gateway/internal/handler"
 	"llm_api_gateway/internal/models"
+	"llm_api_gateway/internal/provider"
 	"llm_api_gateway/internal/proxy"
 	"llm_api_gateway/internal/quota"
 	"llm_api_gateway/internal/router"
+	"llm_api_gateway/internal/security"
 )
 
 func main() {
@@ -34,17 +36,49 @@ func main() {
 	adminPasswd := flag.String("passwd", "", "Initialize admin password (hashes and stores)")
 	flag.Parse()
 
-	// Load configuration
+	// ── Phase 0: Load KEK (must come before any provider operations) ──
+	kek, err := security.DeriveKEK()
+	if err != nil {
+		log.Fatalf("FATAL: GATEWAY_KEK_ENV is not set. This environment variable is required "+
+			"for provider key encryption. Set it before starting the gateway. "+
+			"Error: %v", err)
+	}
+	log.Println("KEK loaded from GATEWAY_KEK_ENV")
+
+	// ── Phase 1: Load configuration ──
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 	log.Printf("Configuration loaded from %s", *configPath)
 
-	// Credential store (in-memory only). Provider keys are injected from their
-	// configured environment variables at startup and NEVER written to disk
-	// (see ADR-0002 / AGENTS.md §5). The same holder instance is shared between
-	// the router and the admin panel so admin key updates propagate immediately.
+	// ── Phase 2: Initialize database ──
+	database, err := db.Open(cfg.Database.Path)
+	if err != nil {
+		log.Fatalf("Failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	// Run migrations (creates tables including providers, model_mappings, audit_logs).
+	if err := db.RunMigrations(database); err != nil {
+		log.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	// ── Phase 3: ProviderStore + Seed + Router ──
+	providerStore := provider.NewProviderStore(database.Conn, kek)
+
+	// Seed from config.yaml if providers table is empty (idempotent).
+	if err := providerStore.SeedFromConfig(cfg); err != nil {
+		log.Fatalf("Failed to seed providers from config: %v", err)
+	}
+
+	// Router resolves the upstream provider per request (time-window routing).
+	// Now reads from the ProviderStore via atomic snapshots instead of config.yaml.
+	routerInst := router.NewRouter(database.Conn, providerStore)
+
+	// ── Phase 4: Legacy credential store (backward compat) ──
+	// Credential store is retained for backward compatibility (admin settings
+	// panel may still read/write to it). New code paths use ProviderStore/Router.
 	creds := router.NewCredentialStore()
 	for _, p := range cfg.Providers {
 		initial := ""
@@ -54,7 +88,7 @@ func main() {
 		creds.Set(p.ID, initial)
 	}
 
-	// Determine the default (zhipu) endpoint for the legacy fallback path.
+	// Determine the default endpoint for the legacy fallback path.
 	defaultEndpoint := cfg.API.ZhipuEndpoint
 	for _, p := range cfg.Providers {
 		if p.IsDefault {
@@ -62,46 +96,24 @@ func main() {
 		}
 	}
 
-	// Validate required config
-	if creds.Get("zhipu") == "" {
-		log.Println("WARNING: zhipu upstream key (ZHIPU_API_KEY) is not set. Set it via systemd env or admin panel.")
-	}
-
-	// Initialize database
-	database, err := db.Open(cfg.Database.Path)
-	if err != nil {
-		log.Fatalf("Failed to open database: %v", err)
-	}
-	defer database.Close()
-
-	// Router resolves the upstream provider per request (time-window routing).
-	// Built after the DB is open so it can load rules from provider_routing_rules.
-	routerInst := router.NewRouter(database.Conn, cfg, creds)
-
-	// Run migrations
-	if err := db.RunMigrations(database); err != nil {
-		log.Fatalf("Failed to run migrations: %v", err)
-	}
-
-	// Handle -passwd flag (admin password initialization)
+	// ── Phase 5: Handle -passwd flag ──
 	if *adminPasswd != "" {
 		initAdminPassword(database.Conn, *adminPasswd, cfg.Quota.Default5hLimit, cfg.Quota.DefaultTotalLimit)
 		return
 	}
 
-	// Get sub-FS for admin static files (strip "web/admin/" prefix)
+	// ── Phase 6: Static file systems ──
 	adminFS, err := fs.Sub(adminStaticFS, "web/admin")
 	if err != nil {
 		log.Fatalf("Failed to create admin static FS: %v", err)
 	}
 
-	// Get sub-FS for user static files
 	userFS, err := fs.Sub(userStaticFS, "web/user")
 	if err != nil {
 		log.Fatalf("Failed to create user static FS: %v", err)
 	}
 
-	// Initialize components
+	// ── Phase 7: Initialize components ──
 	authMW := auth.NewMiddleware(database.Conn)
 
 	multiplierEng := quota.NewMultiplierEngine(database.Conn)
@@ -115,7 +127,7 @@ func main() {
 	defer quotaScheduler.Stop()
 
 	// Proxy handler — resolves the upstream provider via the Router.
-	// Legacy getters remain as a fallback when Router is nil (gradual rollout).
+	// Legacy getters remain as a fallback when Router is nil (gradual rollout safety).
 	proxyHandler := &proxy.Handler{
 		APIKeyGetter:   func() string { return creds.Get("zhipu") },
 		EndpointGetter: func() string { return defaultEndpoint },
@@ -136,7 +148,7 @@ func main() {
 		DB: database.Conn,
 	}
 
-	// Admin handler
+	// ── Phase 8: Admin handler with ProviderStore + Router ──
 	adminHandler := &admin.Handler{
 		DB:                database.Conn,
 		AuthMW:            authMW,
@@ -150,9 +162,12 @@ func main() {
 		APIKeyConfigured:  func() bool { return creds.Get("zhipu") != "" },
 		EndpointGetter:    func() string { return defaultEndpoint },
 		APIKeySetter:      func(k string) { creds.Holder("zhipu").Set(k) },
+		// New fields for provider management.
+		ProviderStore: providerStore,
+		Router:        routerInst,
 	}
 
-	// Build routes
+	// ── Phase 9: Build routes ──
 	mux := http.NewServeMux()
 
 	// Public API endpoints
@@ -174,7 +189,7 @@ func main() {
 		http.Redirect(w, r, "/user/", http.StatusMovedPermanently)
 	})
 
-	// Create HTTP server
+	// ── Phase 10: Start server ──
 	server := &http.Server{
 		Addr:         cfg.Server.ListenAddr,
 		Handler:      withLogging(mux),

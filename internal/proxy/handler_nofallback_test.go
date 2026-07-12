@@ -15,8 +15,10 @@ import (
 	"llm_api_gateway/internal/config"
 	"llm_api_gateway/internal/db"
 	"llm_api_gateway/internal/models"
+	"llm_api_gateway/internal/provider"
 	"llm_api_gateway/internal/quota"
 	"llm_api_gateway/internal/router"
+	"llm_api_gateway/internal/security"
 )
 
 // openProxyTestDB opens an isolated temp-file SQLite DB, runs migrations, and
@@ -40,6 +42,21 @@ func openProxyTestDB(t *testing.T) *db.DB {
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	return database
+}
+
+// newProxyTestRouter builds a Router from config for proxy integration tests.
+func newProxyTestRouter(t *testing.T, database *db.DB, cfg *config.Config) *router.Router {
+	t.Helper()
+	os.Setenv("GATEWAY_KEK_ENV", "test-proxy-kek-32bytes!!!!!")
+	kek, err := security.DeriveKEK()
+	if err != nil {
+		t.Fatalf("derive KEK: %v", err)
+	}
+	store := provider.NewProviderStore(database.Conn, kek)
+	if err := store.SeedFromConfig(cfg); err != nil {
+		t.Fatalf("seed from config: %v", err)
+	}
+	return router.NewRouter(database.Conn, store)
 }
 
 // TestHandler_ServeHTTP_StrictNoFallbackReturns502 is an end-to-end check of
@@ -66,6 +83,11 @@ func TestHandler_ServeHTTP_StrictNoFallbackReturns502(t *testing.T) {
 	deadURL := dead.URL
 	dead.Close()
 
+	os.Setenv("ZHIPU_API_KEY", "sk-zhipu")
+	os.Setenv("OPENAI_API_KEY", "sk-openai")
+	defer os.Unsetenv("ZHIPU_API_KEY")
+	defer os.Unsetenv("OPENAI_API_KEY")
+
 	cfg := &config.Config{
 		Providers: []config.ProviderConfig{
 			{ID: "zhipu", Endpoint: "https://zhipu.example/v1", APIKeyEnv: "ZHIPU_API_KEY", IsDefault: false},
@@ -79,7 +101,7 @@ func TestHandler_ServeHTTP_StrictNoFallbackReturns502(t *testing.T) {
 	creds.Set("zhipu", "sk-zhipu")
 	creds.Set("openai", "sk-openai")
 
-	rt := router.NewRouter(database.Conn, cfg, creds)
+	rt := newProxyTestRouter(t, database, cfg)
 	multEng := quota.NewMultiplierEngine(database.Conn)
 	checker := quota.NewChecker(database.Conn, multEng, 5)
 
@@ -138,14 +160,17 @@ func TestHandler_ServeHTTP_QuotaExceededReturns429(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
+	os.Setenv("ZHIPU_API_KEY", "sk-zhipu")
+	defer os.Unsetenv("ZHIPU_API_KEY")
+
 	cfg := &config.Config{
 		Providers: []config.ProviderConfig{
-			{ID: "zhipu", Endpoint: "https://zhipu.example/v1", IsDefault: true},
+			{ID: "zhipu", Endpoint: "https://zhipu.example/v1", APIKeyEnv: "ZHIPU_API_KEY", IsDefault: true},
 		},
 	}
 	creds := router.NewCredentialStore()
 	creds.Set("zhipu", "sk-zhipu")
-	rt := router.NewRouter(database.Conn, cfg, creds)
+	rt := newProxyTestRouter(t, database, cfg)
 	multEng := quota.NewMultiplierEngine(database.Conn)
 	checker := quota.NewChecker(database.Conn, multEng, 5)
 

@@ -1,122 +1,51 @@
-# LLM API Gateway — 核心时序图
-
-## 1. LLM 代理请求流程（同步模式）
-
-```mermaid
-sequenceDiagram
-    actor Client as 终端用户
-    participant Nginx as Nginx :443
-    participant Auth as AuthMiddleware
-    participant Quota as QuotaMiddleware
-    participant Proxy as ProxyHandler
-    participant DB as SQLite
-    participant Zhipu as 智谱 API
-
-    Client->>Nginx: POST /v1/chat/completions<br/>Authorization: Bearer sk-xxx
-    Nginx->>Auth: 转发请求
-
-    rect rgb(240, 248, 255)
-        Note over Auth,DB: 阶段1: 鉴权
-        Auth->>DB: SELECT * FROM users<br/>WHERE sub_key_hash = SHA256(sk-xxx)
-        DB-->>Auth: user {id, status}
-        alt 子 Key 无效
-            Auth-->>Client: 401 Invalid API key
-        else 子 Key 已禁用
-            Auth-->>Client: 403 Key disabled
-        end
-    end
-
-    Auth->>Quota: 通过，传递 user_id
-
-    rect rgb(255, 250, 240)
-        Note over Quota,DB: 阶段2: 配额检查
-        Quota->>DB: SELECT * FROM quotas WHERE user_id = ?
-        DB-->>Quota: {quota_5h_used, quota_5h_limit,<br/>quota_total_used, quota_total_limit}
-        alt 5h 配额耗尽
-            Quota-->>Client: 429 "5h quota exceeded"
-        else 总配额耗尽
-            Quota-->>Client: 429 "Total quota exceeded"
-        end
-    end
-
-    Quota->>Proxy: 准入，传递 user_id + 请求
-
-    rect rgb(240, 255, 240)
-        Note over Proxy,Zhipu: 阶段3: 代理转发
-        Proxy->>Proxy: 构建上游请求<br/>注入真实 API Key
-        Proxy->>Zhipu: POST https://api.zhipuai.cn/v1/chat/completions
-        Zhipu-->>Proxy: 200 {choices, usage: {total_tokens: 60}}
-    end
-
-    rect rgb(255, 240, 255)
-        Note over Proxy,DB: 阶段4: 配额确认 + 日志
-        Proxy->>DB: UPDATE quotas<br/>SET quota_5h_used += 60,<br/>quota_total_used += 60<br/>WHERE user_id = ?
-        Proxy->>DB: INSERT INTO call_logs<br/>(user_id, total_tokens, status_code, latency_ms)
-    end
-
-    Proxy->>Client: 200 {choices, usage: {total_tokens: 60}}
-```
-
----
-
-## 2. Admin 创建用户流程
-
-```mermaid
 sequenceDiagram
     actor Admin as 管理员
-    participant Nginx as Nginx
-    participant AdminAPI as AdminHandler
-    participant Auth as AuthMiddleware
+    participant FE as Admin 前端
+    participant API as Admin Handler
+    participant Store as ProviderStore
+    participant Sec as security
     participant DB as SQLite
-    participant KeyGen as KeyGenerator
+    participant R as Router
+    participant Table as atomic.Value
 
-    Admin->>Nginx: POST /admin/api/users<br/>Cookie: admin_session=xxx
-    Nginx->>Auth: 会话鉴权
+    Admin->>FE: 填写 Provider 表单
+    FE->>API: POST /admin/api/providers
+    API->>Store: CreateProvider(name, slug, endpoint, apiKey, isDefault)
 
-    rect rgb(240, 248, 255)
-        Note over Auth,DB: 验证 Admin Session
-        Auth->>DB: SELECT * FROM admin_sessions<br/>WHERE session_token = ? AND expires_at > now
-        alt Session 无效
-            Auth-->>Admin: 401 未登录
-        end
+    Note over Store: 1. 校验 slug 唯一性
+    Store->>DB: SELECT COUNT(*) FROM providers WHERE slug=?
+    DB-->>Store: 0
+
+    Note over Store: 2. 加密 API Key
+    Store->>Sec: Encrypt(apiKey, kek)
+    Sec-->>Store: ciphertext
+
+    Note over Store: 3. 若 isDefault=true，先取消旧默认
+    Store->>DB: UPDATE providers SET is_default=0
+
+    Note over Store: 4. INSERT
+    Store->>DB: INSERT INTO providers
+    DB-->>Store: OK
+
+    Note over Store: 5. 写审计日志
+    Store->>DB: INSERT INTO audit_logs
+    DB-->>Store: OK
+
+    Store-->>API: ProviderRecord
+
+    Note over API: 6. 触发热加载
+    API->>R: Reload()
+    R->>Store: BuildProviderTable()
+    Store->>DB: SELECT * FROM providers WHERE enabled=1
+    DB-->>Store: rows
+    loop 每个 provider
+        Store->>Sec: Decrypt(encrypted_key, kek)
+        Sec-->>Store: plaintext
     end
+    Store->>DB: SELECT * FROM model_mappings
+    DB-->>Store: mappings
+    Store-->>R: ProviderTable
+    R->>Table: Store(新快照)
 
-    Auth->>AdminAPI: 通过
-
-    rect rgb(255, 250, 240)
-        Note over AdminAPI,KeyGen: 创建用户
-        AdminAPI->>KeyGen: GenerateSubKey(userID)
-        KeyGen-->>AdminAPI: sk-3f8a2b1c...
-        AdminAPI->>DB: BEGIN TRANSACTION
-        AdminAPI->>DB: INSERT INTO users<br/>(username, sub_key_hash, sub_key_preview, role)
-        AdminAPI->>DB: INSERT INTO quotas<br/>(user_id, quota_5h_limit, quota_total_limit)
-        AdminAPI->>DB: COMMIT
-    end
-
-    AdminAPI-->>Admin: 201 {user, sub_key: "sk-3f8a2b1c...", quotas}
-    Note over Admin,KeyGen: ⚠️ 子 Key 明文仅此一次返回<br/>后续无法获取
-```
-
----
-
-## 3. 用户自助查询配额流程
-
-```mermaid
-sequenceDiagram
-    actor Client as 终端用户
-    participant Auth as AuthMiddleware
-    participant QuotaH as QuotaHandler
-    participant DB as SQLite
-
-    Client->>Auth: GET /v1/quota<br/>Authorization: Bearer sk-xxx
-
-    Auth->>DB: 子 Key 鉴权
-    DB-->>Auth: user_id = 2
-
-    Auth->>QuotaH: 通过
-
-    QuotaH->>DB: SELECT q.*, u.status<br/>FROM quotas q JOIN users u<br/>ON q.user_id = u.id<br/>WHERE q.user_id = 2
-    DB-->>QuotaH: {quota_5h_limit, quota_5h_used,<br/>quota_total_limit, quota_total_used,<br/>window_start, status}
-
-    QuotaH-->>Client: 200 {<br/>  quota_5h_remaining: 550000,<br/>  quota_total_remaining: 97700000,<br/>  window_reset_at: "15:00",<br/>  status: "active"<br/>}
-```
+    API-->>FE: 201 Created
+    FE-->>Admin: 创建成功

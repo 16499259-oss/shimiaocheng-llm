@@ -4,6 +4,7 @@
 package router
 
 import (
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -17,10 +18,7 @@ import (
 // half-open [14:00, 18:01): 14:00 included, 18:01 excluded.
 func TestResolveProvider_SeedWindowBoundaries(t *testing.T) {
 	database := newRouterTestDB(t)
-	creds := NewCredentialStore()
-	creds.Set("zhipu", "sk-zhipu")
-	creds.Set("openai", "sk-openai")
-	r := NewRouter(database.Conn, testConfig(), creds)
+	r := newRouterWithConfig(t, database, testConfig())
 
 	cases := []struct {
 		name     string
@@ -50,10 +48,7 @@ func TestResolveProvider_SeedWindowBoundaries(t *testing.T) {
 // excluded upper bound; 22:59 is outside.
 func TestResolveProvider_OvernightRoutingRule(t *testing.T) {
 	database := newRouterTestDB(t)
-	creds := NewCredentialStore()
-	creds.Set("zhipu", "sk-zhipu")
-	creds.Set("openai", "sk-openai")
-	r := NewRouter(database.Conn, testConfig(), creds)
+	r := newRouterWithConfig(t, database, testConfig())
 
 	if _, err := database.Conn.Exec(
 		`INSERT INTO provider_routing_rules (provider_id, start_time, end_time, days_of_week, timezone, enabled)
@@ -61,6 +56,10 @@ func TestResolveProvider_OvernightRoutingRule(t *testing.T) {
 		"openai", "23:00", "01:00", "*", "Asia/Shanghai", 1,
 	); err != nil {
 		t.Fatalf("insert overnight rule: %v", err)
+	}
+	// Reload to pick up the new rule.
+	if err := r.Reload(); err != nil {
+		t.Fatalf("reload after insert overnight rule: %v", err)
 	}
 
 	cases := []struct {
@@ -93,10 +92,18 @@ func TestResolveProvider_OvernightRoutingRule(t *testing.T) {
 // default provider.
 func TestResolveProvider_NoFallbackWhenTargetHasNoKey(t *testing.T) {
 	database := newRouterTestDB(t)
-	creds := NewCredentialStore()
-	creds.Set("zhipu", "sk-zhipu")
-	creds.Set("openai", "") // target provider has no key -> simulate down/unconfigured
-	r := NewRouter(database.Conn, testConfig(), creds)
+	// Build a config where openai has an empty API key env var.
+	cfg := &config.Config{
+		Providers: []config.ProviderConfig{
+			{ID: "zhipu", Endpoint: "https://zhipu.example/v1", APIKeyEnv: "ZHIPU_API_KEY", IsDefault: true},
+			{ID: "openai", Endpoint: "https://openai.example/v1", APIKeyEnv: "OPENAI_EMPTY_KEY", IsDefault: false},
+		},
+	}
+	os.Setenv("ZHIPU_API_KEY", "sk-zhipu")
+	defer os.Unsetenv("ZHIPU_API_KEY")
+	os.Unsetenv("OPENAI_EMPTY_KEY") // intentionally empty
+
+	r := newRouterWithConfig(t, database, cfg)
 
 	now := time.Date(2026, 1, 1, 15, 0, 0, 0, timeutil.ShanghaiTZ) // inside seed window
 	prov, err := r.ResolveProvider(now)
@@ -114,7 +121,8 @@ func TestResolveProvider_NoFallbackWhenTargetHasNoKey(t *testing.T) {
 // TestRewriteModel_CaseSensitivity verifies that external/provider lookups are
 // exact (case-sensitive); a differing case must passthrough unchanged.
 func TestRewriteModel_CaseSensitivity(t *testing.T) {
-	r := NewRouter(nil, testConfig(), NewCredentialStore())
+	database := newRouterTestDB(t)
+	r := newRouterWithConfig(t, database, testConfig())
 
 	if got := r.RewriteModel("GLM-5.2", "openai"); got != "GLM-5.2" {
 		t.Fatalf("external case mismatch should passthrough, got %q", got)
@@ -127,7 +135,14 @@ func TestRewriteModel_CaseSensitivity(t *testing.T) {
 // TestRewriteModel_EmptyConfigPassthrough verifies that with no model mappings
 // configured, every external name passes through unchanged.
 func TestRewriteModel_EmptyConfigPassthrough(t *testing.T) {
-	r := NewRouter(nil, &config.Config{Providers: testConfig().Providers}, NewCredentialStore())
+	database := newRouterTestDB(t)
+	cfg := &config.Config{Providers: []config.ProviderConfig{
+		{ID: "openai", Endpoint: "https://openai.example/v1", APIKeyEnv: "OPENAI_API_KEY", IsDefault: true},
+	}}
+	os.Setenv("OPENAI_API_KEY", "sk-openai")
+	defer os.Unsetenv("OPENAI_API_KEY")
+	r := newRouterWithConfig(t, database, cfg)
+
 	if got := r.RewriteModel("anything", "openai"); got != "anything" {
 		t.Fatalf("empty model mappings should passthrough, got %q", got)
 	}
@@ -136,13 +151,19 @@ func TestRewriteModel_EmptyConfigPassthrough(t *testing.T) {
 // TestRewriteModel_EmptyRealModelPassthrough verifies the `real != ""` guard:
 // an explicitly empty per-provider real model yields passthrough.
 func TestRewriteModel_EmptyRealModelPassthrough(t *testing.T) {
+	database := newRouterTestDB(t)
 	cfg := &config.Config{
-		Providers: []config.ProviderConfig{{ID: "openai", Endpoint: "x", IsDefault: true}},
+		Providers: []config.ProviderConfig{
+			{ID: "openai", Endpoint: "https://openai.example/v1", APIKeyEnv: "OPENAI_API_KEY", IsDefault: true},
+		},
 		ModelMappings: []config.ModelMapping{
 			{External: "m", PerProvider: map[string]string{"openai": ""}},
 		},
 	}
-	r := NewRouter(nil, cfg, NewCredentialStore())
+	os.Setenv("OPENAI_API_KEY", "sk-openai")
+	defer os.Unsetenv("OPENAI_API_KEY")
+	r := newRouterWithConfig(t, database, cfg)
+
 	if got := r.RewriteModel("m", "openai"); got != "m" {
 		t.Fatalf("empty real model should passthrough, got %q", got)
 	}
@@ -168,28 +189,24 @@ func TestCredentialStore_ConcurrentAccess(t *testing.T) {
 // TestResolveProvider_WindowHitProviderNotConfigured is the REPRODUCTION for a
 // P1 finding against the strict no-fallback invariant (AGENTS.md §6:
 // "命中即走，绝不回退"). When a time window matches a provider that is NOT
-// present in the configured providers, selector.go:181-185 silently `continue`s
-// and ultimately falls back to the default provider. Per the invariant it should
-// instead surface an error (or otherwise refuse) so the misconfiguration is
-// visible. This test asserts the DESIRED behavior and therefore FAILS on the
-// current implementation — hand it to the engineer (寇豆码) as the failing test.
+// present in the configured providers, the router returns an error.
 func TestResolveProvider_WindowHitProviderNotConfigured(t *testing.T) {
 	database := newRouterTestDB(t) // seeds 14:00-18:01 -> openai
-	creds := NewCredentialStore()
-	creds.Set("zhipu", "sk-zhipu") // openai intentionally NOT configured
 
 	cfg := &config.Config{
 		Providers: []config.ProviderConfig{
-			{ID: "zhipu", Endpoint: "https://zhipu.example/v1", IsDefault: true},
+			{ID: "zhipu", Endpoint: "https://zhipu.example/v1", APIKeyEnv: "ZHIPU_API_KEY", IsDefault: true},
 		},
 	}
-	r := NewRouter(database.Conn, cfg, creds)
+	os.Setenv("ZHIPU_API_KEY", "sk-zhipu")
+	defer os.Unsetenv("ZHIPU_API_KEY")
+	r := newRouterWithConfig(t, database, cfg)
 
 	now := time.Date(2026, 1, 1, 15, 0, 0, 0, timeutil.ShanghaiTZ) // inside seed window
 	prov, err := r.ResolveProvider(now)
 
 	// DESIRED: a window that matched openai (not configured) must NOT silently
-	// resolve to zhipu. It should error (or otherwise refuse) the request.
+	// resolve to zhipu. It should error.
 	if err == nil && prov.ID == "zhipu" {
 		t.Fatalf("P1 reproduction: window matched 'openai' (not configured) but router silently fell back to default %q; expected an error / no silent downgrade (AGENTS.md §6 strict no-fallback)", prov.ID)
 	}

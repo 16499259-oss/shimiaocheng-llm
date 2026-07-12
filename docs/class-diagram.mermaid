@@ -1,200 +1,137 @@
-# LLM API Gateway — 数据模型与类图
-
-## 1. 数据模型 ER 图
-
-```mermaid
-erDiagram
-    users ||--|| quotas : "1:1"
-    users ||--o{ call_logs : "1:N"
-    users ||--o{ admin_sessions : "1:N (Admin only)"
-
-    users {
-        int id PK
-        string username UK
-        string password_hash
-        string sub_key_hash UK
-        string sub_key_preview
-        string role "admin | user"
-        string status "active | disabled"
-        string created_at
-        string updated_at
-    }
-
-    quotas {
-        int id PK
-        int user_id FK_UK
-        int quota_5h_limit "默认 1000000"
-        int quota_5h_used "每5h重置"
-        int quota_total_limit "默认 100000000"
-        int quota_total_used "累计不重置"
-        string window_start "当前窗口起始"
-        string updated_at
-    }
-
-    call_logs {
-        int id PK
-        int user_id FK
-        string model "glm-5.2"
-        int prompt_tokens
-        int completion_tokens
-        int total_tokens
-        int status_code "200/429/500"
-        int latency_ms
-        string error_msg
-        string created_at
-    }
-
-    admin_sessions {
-        int id PK
-        string session_token UK
-        string created_at
-        string expires_at "24h"
-    }
-```
-
----
-
-## 2. 核心服务类图
-
-```mermaid
 classDiagram
-    class Config {
-        +string ListenAddr
-        +string DBPath
-        +string ZhipuBaseURL
-        +int ResetIntervalHours
-        +Load(path string) Config
-    }
+    direction TB
 
-    class DB {
-        +*sql.DB Conn
-        +Open(path string) DB
-        +Migrate()
-        +Close()
-    }
-
-    class User {
+    class ProviderRecord {
         +int64 ID
-        +string Username
-        +string PasswordHash
-        +string SubKeyHash
-        +string SubKeyPreview
-        +string Role
-        +string Status
-        +Create(db, user) error
-        +FindBySubKeyHash(db, hash) User
-        +List(db) []User
-        +Update(db, id, fields) error
+        +string Name
+        +string Slug
+        +string Endpoint
+        +[]byte EncryptedKey
+        +bool IsDefault
+        +bool Enabled
+        +string CreatedAt
+        +string UpdatedAt
     }
 
-    class Quota {
+    class ModelMappingRecord {
         +int64 ID
-        +int64 UserID
-        +int Quota5hLimit
-        +int Quota5hUsed
-        +int QuotaTotalLimit
-        +int QuotaTotalUsed
-        +string WindowStart
-        +FindByUserID(db, userID) Quota
-        +AtomicDeduct(db, userID, tokens) bool
-        +ResetAll5h(db) error
+        +string External
+        +string ProviderID
+        +string RealModel
+        +string CreatedAt
     }
 
-    class CallLog {
+    class AuditLogRecord {
         +int64 ID
-        +int64 UserID
-        +string Model
-        +int TotalTokens
-        +int StatusCode
-        +int LatencyMs
-        +Insert(db, log) error
-        +FindByUserID(db, userID, from, to, page, limit) []CallLog
+        +string Action
+        +string TargetType
+        +string TargetID
+        +string Detail
+        +string CreatedAt
     }
 
-    class AdminSession {
+    class RoutingRule {
         +int64 ID
-        +string SessionToken
-        +string ExpiresAt
-        +Create(db) AdminSession
-        +Validate(db, token) bool
-        +Delete(db, token) error
+        +string ProviderID
+        +string StartTime
+        +string EndTime
+        +string DaysOfWeek
+        +string Timezone
+        +bool Enabled
     }
 
-    class AuthMiddleware {
-        +AuthenticateSubKey(r *http.Request) (userID, error)
-        +AuthenticateAdmin(r *http.Request) bool
+    class ProviderStore {
+        -*sql.DB db
+        -[]byte kek
+        +NewProviderStore(db, kek) *ProviderStore
+        +ListProviders() []ProviderRecord
+        +GetProvider(slug) ProviderRecord
+        +CreateProvider(name,slug,endpoint,apiKey,isDefault) ProviderRecord
+        +UpdateProvider(slug,updates) ProviderRecord
+        +DeleteProvider(slug) error
+        +SetDefaultProvider(slug) error
+        +ListMappings() []ModelMappingRecord
+        +CreateMapping(external,providerID,realModel) ModelMappingRecord
+        +UpdateMapping(id,updates) error
+        +DeleteMapping(id) error
+        +ListRoutingRules() []RoutingRule
+        +CreateRoutingRule(rule) error
+        +UpdateRoutingRule(id,updates) error
+        +DeleteRoutingRule(id) error
+        +ListAuditLogs(page,limit) []AuditLogRecord
+        +WriteAudit(action,targetType,targetID,detail)
+        +BuildProviderTable() ProviderTable
+        +SeedFromConfig(cfg) error
     }
 
-    class QuotaChecker {
-        +Check(userID, estimatedTokens) (allowed bool, reason string)
-        +Deduct(userID, actualTokens) error
+    class ProviderTable {
+        +map~string~ProviderEntry Providers
+        +map~string~map~string~string Mappings
+        +string Default
     }
 
-    class QuotaScheduler {
-        +Start()
-        +Reset()
-        +Compensate()
+    class ProviderEntry {
+        +string Slug
+        +string Endpoint
+        +string APIKey
     }
 
-    class ProxyHandler {
-        +ServeHTTP(w, r)
-        -handleSync(w, r, userID)
-        -handleStream(w, r, userID)
+    class Router {
+        -*sql.DB db
+        -ProviderStore store
+        -atomic.Value table
+        +NewRouter(db,store) *Router
+        +ResolveProvider(now) Provider
+        +RewriteModel(external,providerID) string
+        +Reload() error
+    }
+
+    class ProviderResult {
+        +string ID
+        +string Endpoint
+        +string APIKey
     }
 
     class AdminHandler {
-        +ServeHTTP(w, r)
-        +handleLogin(w, r)
-        +handleCreateUser(w, r)
-        +handleListUsers(w, r)
-        +handleUpdateUser(w, r)
-        +handleGetCalls(w, r)
-        +handleOverview(w, r)
+        -*sql.DB DB
+        -ProviderStore Store
+        -Router Router
+        +HandleListProviders()
+        +HandleCreateProvider()
+        +HandleUpdateProvider()
+        +HandleDeleteProvider()
+        +HandleListMappings()
+        +HandleCreateMapping()
+        +HandleUpdateMapping()
+        +HandleDeleteMapping()
+        +HandleListRoutingRules()
+        +HandleCreateRoutingRule()
+        +HandleUpdateRoutingRule()
+        +HandleDeleteRoutingRule()
+        +HandleListAuditLogs()
     }
 
-    class KeyGenerator {
-        +GenerateSubKey(userID) string
-        +HashKey(subKey) string
+    class SecurityPackage {
+        +DeriveKEK() []byte
+        +Encrypt(plaintext,key) []byte
+        +Decrypt(ciphertext,key) string
+        +MaskKey(key) string
     }
 
-    Config --> DB : configures
-    AuthMiddleware --> User : queries
-    AuthMiddleware --> AdminSession : validates
-    QuotaChecker --> Quota : reads/updates
-    QuotaScheduler --> Quota : resets
-    ProxyHandler --> QuotaChecker : checks
-    ProxyHandler --> KeyGenerator : uses
-    ProxyHandler --> CallLog : logs
-    AdminHandler --> User : manages
-    AdminHandler --> Quota : reads
-    AdminHandler --> CallLog : queries
-    AdminHandler --> AdminSession : manages
-    AdminHandler --> KeyGenerator : generates
-```
+    class Config {
+        +[]ProviderConfig Providers
+        +[]ModelMapping ModelMappings
+    }
 
----
-
-## 3. 配额状态机
-
-```mermaid
-stateDiagram-v2
-    [*] --> Normal : 配额充足
-
-    Normal --> Warn5h : 5h_used >= 80% limit
-    Normal --> WarnTotal : total_used >= 80% limit
-
-    Warn5h --> Exhausted5h : 5h_used >= 5h_limit
-    Warn5h --> Normal : 窗口重置
-
-    WarnTotal --> ExhaustedTotal : total_used >= total_limit
-    WarnTotal --> Normal : Admin 提升配额
-
-    Exhausted5h --> Normal : 窗口重置（自动）
-    Exhausted5h --> ExhaustedBoth : total 也耗尽
-
-    ExhaustedTotal --> Normal : Admin 提升配额
-    ExhaustedTotal --> ExhaustedBoth : 5h 也耗尽
-
-    ExhaustedBoth --> ExhaustedTotal : 窗口重置
-    ExhaustedBoth --> Exhausted5h : Admin 提升总配额
-```
+    ProviderStore ..> ProviderRecord : CRUD
+    ProviderStore ..> ModelMappingRecord : CRUD
+    ProviderStore ..> AuditLogRecord : writes
+    ProviderStore ..> RoutingRule : CRUD
+    ProviderStore ..> SecurityPackage : encrypt/decrypt
+    ProviderStore --> ProviderTable : BuildProviderTable()
+    ProviderStore ..> Config : SeedFromConfig()
+    Router --> ProviderStore : reads via
+    Router --> ProviderTable : atomic.Value
+    Router --> ProviderResult : returns
+    AdminHandler --> ProviderStore : CRUD via
+    AdminHandler --> Router : Reload()
