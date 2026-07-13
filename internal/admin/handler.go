@@ -39,6 +39,11 @@ type Handler struct {
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Admin login/logout (no auth required) — top-level
 	mux.HandleFunc("POST /admin/login", h.HandleLogin)
+	// Also accept the /admin/api/login path. nginx rewrites the external
+	// path /m-7xa2/api/login to /admin/api/login before it hits the gateway.
+	// Registering it here (outside the authed /admin/ sub-mux) keeps login
+	// reachable without a session, so external API clients can authenticate.
+	mux.HandleFunc("POST /admin/api/login", h.HandleLogin)
 	mux.HandleFunc("POST /admin/logout", h.HandleLogout)
 	mux.HandleFunc("GET /admin/login", h.ServeLoginPage)
 

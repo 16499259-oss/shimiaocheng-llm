@@ -2,15 +2,19 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"llm_api_gateway/internal/auth"
 	"llm_api_gateway/internal/models"
 	"llm_api_gateway/internal/timeutil"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // createUserRequest is the JSON body for POST /admin/api/users.
@@ -82,6 +86,13 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Printf("ERROR: create user: %v", err)
+		// A duplicate username triggers the users.username UNIQUE constraint.
+		// Surface a 409 Conflict with a clear message instead of a generic 500,
+		// so API clients get actionable feedback (keeping errors explicit, never silent).
+		if isUniqueConstraintError(err) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "username already exists"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to create user: " + err.Error()})
 		return
 	}
@@ -438,4 +449,16 @@ func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("User %d (%s) deleted", userID, user.Username)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "User deleted"})
+}
+
+// isUniqueConstraintError reports whether err is (or wraps) a SQLite UNIQUE
+// constraint violation. The modernc.org/sqlite driver enables extended result
+// codes by default, so a duplicate-key error carries code SQLITE_CONSTRAINT_UNIQUE (2067).
+// A message-based fallback is kept for robustness against driver variations.
+func isUniqueConstraintError(err error) bool {
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE {
+		return true
+	}
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
