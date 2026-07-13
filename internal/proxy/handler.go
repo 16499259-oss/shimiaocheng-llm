@@ -271,7 +271,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Log the rejected call
 		callLog := &models.CallLog{
 			UserID:         userID,
-			Model:          chatReq.Model,
+			Model:          rewrittenModel,
 			ProviderID:     providerID,
 			EffectiveCalls: effectiveCalls,
 			MultiplierUsed: multiplier,
@@ -287,17 +287,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Handle SSE streaming
 	if chatReq.Stream {
-		h.handleStream(w, r, bodyBytes, userID, chatReq.Model, providerID, endpoint, apiKey, effectiveCalls, multiplier, startTime)
+		h.handleStream(w, r, bodyBytes, userID, rewrittenModel, chatReq.Model, providerID, endpoint, apiKey, effectiveCalls, multiplier, startTime)
 		return
 	}
 
 	// Handle synchronous request
-	h.handleSync(w, bodyBytes, userID, chatReq.Model, providerID, endpoint, apiKey, effectiveCalls, multiplier, startTime)
+	h.handleSync(w, bodyBytes, userID, rewrittenModel, chatReq.Model, providerID, endpoint, apiKey, effectiveCalls, multiplier, startTime)
 }
 
 // handleSync processes a non-streaming chat completion request.
 // endpoint/apiKey/providerID are the resolved upstream target for this request.
-func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int64, model, providerID, endpoint, apiKey string, effectiveCalls int, multiplier float64, startTime time.Time) {
+func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int64, model, requestModel, providerID, endpoint, apiKey string, effectiveCalls int, multiplier float64, startTime time.Time) {
 	// Build upstream request
 	upstreamReq, err := BuildUpstreamRequest(endpoint, apiKey, bodyBytes)
 	if err != nil {
@@ -349,7 +349,7 @@ func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int
 
 	// Rewrite model in upstream response back to the original request model
 	// so that the client sees the model name it originally requested (transparent proxy).
-	respBody = rewriteResponseModel(respBody, model)
+	respBody = rewriteResponseModel(respBody, requestModel)
 
 	latencyMs := int(time.Since(startTime).Milliseconds())
 
