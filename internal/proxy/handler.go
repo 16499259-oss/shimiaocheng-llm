@@ -144,6 +144,28 @@ func rewriteBodyModel(body []byte, model string) []byte {
 	return out
 }
 
+// rewriteResponseModel replaces the "model" field in an upstream JSON response
+// body with the target model name (the original request model), preserving all
+// other fields. If the body cannot be parsed, the upstream model is empty, or
+// already matches the target model, the body is returned unchanged.
+func rewriteResponseModel(body []byte, model string) []byte {
+	if model == "" {
+		return body
+	}
+	var respCheck struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &respCheck); err != nil {
+		return body
+	}
+	if respCheck.Model == "" || respCheck.Model == model {
+		return body
+	}
+	oldPattern := []byte(`"model":"` + respCheck.Model + `"`)
+	newPattern := []byte(`"model":"` + model + `"`)
+	return bytes.Replace(body, oldPattern, newPattern, 1)
+}
+
 // ServeHTTP handles the /v1/chat/completions request.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
@@ -324,6 +346,10 @@ func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int
 		writeProxyError(w, http.StatusBadGateway, "Failed to read upstream response", "upstream_error")
 		return
 	}
+
+	// Rewrite model in upstream response back to the original request model
+	// so that the client sees the model name it originally requested (transparent proxy).
+	respBody = rewriteResponseModel(respBody, model)
 
 	latencyMs := int(time.Since(startTime).Milliseconds())
 

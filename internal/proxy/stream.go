@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -112,6 +113,24 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, bodyBytes
 		}
 
 		line := scanner.Text()
+
+		// Rewrite model in SSE data lines back to the original request model
+		// for transparent proxying (e.g. "astron-code-latest" → "glm-5.2").
+		if model != "" && strings.HasPrefix(line, "data:") && !strings.Contains(line, "[DONE]") {
+			dataStr := strings.TrimPrefix(line, "data:")
+			dataStr = strings.TrimSpace(dataStr)
+			if dataStr != "" {
+				var sseData struct {
+					Model string `json:"model"`
+				}
+				if json.Unmarshal([]byte(dataStr), &sseData) == nil && sseData.Model != "" && sseData.Model != model {
+					oldPattern := []byte(`"model":"` + sseData.Model + `"`)
+					newPattern := []byte(`"model":"` + model + `"`)
+					rewritten := bytes.Replace([]byte(dataStr), oldPattern, newPattern, 1)
+					line = "data: " + string(rewritten)
+				}
+			}
+		}
 
 		// Write line to client
 		fmt.Fprintf(w, "%s\n", line)
