@@ -426,6 +426,11 @@ async function createUser(e) {
             document.getElementById('share-all-text').value = buildShareText(data.sub_key);
             closeModal('create-user-modal'); showModal('subkey-modal');
             document.getElementById('create-user-form').reset();
+        } else if (data.error) {
+            const resultEl = document.getElementById('create-user-result');
+            resultEl.textContent = '创建失败: ' + data.error;
+            resultEl.classList.remove('hidden');
+            return;
         }
         loadUsers(); loadOverview();
     } catch (err) { document.getElementById('create-user-result').textContent = '创建失败: ' + err.message; document.getElementById('create-user-result').classList.remove('hidden'); }
