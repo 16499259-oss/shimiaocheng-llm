@@ -23,6 +23,20 @@ func testStore(t *testing.T) (*ProviderStore, *sql.DB) {
 
 	// Run migrations for the tables we need.
 	migrations := []string{
+		`CREATE TABLE IF NOT EXISTS users (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			username        TEXT    NOT NULL UNIQUE,
+			password_hash   TEXT    NOT NULL,
+			sub_key_hash    TEXT    NOT NULL UNIQUE,
+			sub_key_preview TEXT    NOT NULL,
+			role            TEXT    NOT NULL DEFAULT 'user',
+			status          TEXT    NOT NULL DEFAULT 'active',
+			created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+			updated_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+			expires_at      TEXT    NOT NULL DEFAULT '',
+			route_mode      TEXT    NOT NULL DEFAULT 'auto',
+			fixed_provider  TEXT    NOT NULL DEFAULT ''
+		)`,
 		`CREATE TABLE IF NOT EXISTS providers (
 			id             INTEGER PRIMARY KEY AUTOINCREMENT,
 			name           TEXT    NOT NULL,

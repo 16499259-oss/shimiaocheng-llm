@@ -36,6 +36,13 @@ function setupEventListeners() {
     document.getElementById('new-expiry-type').addEventListener('change', function() {
         document.getElementById('new-expiry-date-group').style.display = this.value === 'custom' ? '' : 'none';
     });
+    // Route mode toggle: show/hide fixed provider selector
+    document.getElementById('new-route-mode').addEventListener('change', function() {
+        document.getElementById('new-fixed-provider-group').style.display = this.value === 'fixed' ? '' : 'none';
+    });
+    document.getElementById('update-route-mode').addEventListener('change', function() {
+        document.getElementById('update-fixed-provider-group').style.display = this.value === 'fixed' ? '' : 'none';
+    });
 }
 
 // ===== Tab Switching =====
@@ -134,7 +141,20 @@ async function loadProviders() {
                 </td>
             </tr>`;
         }).join('');
+
+        // Refresh provider dropdowns for user create/edit modals.
+        refreshProviderDropdowns();
     } catch (err) { console.error('Failed to load providers:', err); }
+}
+
+function refreshProviderDropdowns() {
+    const opts = Object.entries(providerMap).map(([slug, name]) =>
+        `<option value="${escapeHtml(slug)}">${escapeHtml(name)}</option>`
+    ).join('');
+    const newSel = document.getElementById('new-fixed-provider');
+    if (newSel) newSel.innerHTML = opts;
+    const updSel = document.getElementById('update-fixed-provider');
+    if (updSel) updSel.innerHTML = opts;
 }
 
 function openProviderModal(slug) {
@@ -408,13 +428,24 @@ async function loadUsers() {
     try {
         const data = await apiFetch('api/users');
         const tbody = document.getElementById('users-tbody');
-        if (!data.data || data.data.length === 0) { tbody.innerHTML = '<tr><td colspan="10" class="text-center">暂无用户</td></tr>'; return; }
+        if (!data.data || data.data.length === 0) { tbody.innerHTML = '<tr><td colspan="11" class="text-center">暂无用户</td></tr>'; return; }
         const now = new Date();
         tbody.innerHTML = data.data.map(u => {
             const quota5h = `${u.quota_5h_used} / ${u.quota_5h_limit}`;
             const quotaTotal = `${u.quota_total_used.toLocaleString()} / ${u.quota_total_limit.toLocaleString()}`;
             const tokens = (u.total_tokens || 0).toLocaleString();
             let s = u.status === 'active' ? '<span class="badge badge-active">启用</span>' : '<span class="badge badge-disabled">禁用</span>';
+            // Route mode badge
+            let routeHtml = '';
+            const rm = u.route_mode || 'auto';
+            if (rm === 'fixed') {
+                routeHtml = `<span class="badge badge-warning">📌 ${escapeHtml(u.fixed_provider || '?')}</span>`;
+            } else {
+                routeHtml = '<span class="badge" style="background:#e5e7eb;color:#6b7280;">auto</span>';
+            }
+            if (u.fixed_multiplier != null) {
+                routeHtml += `<br><span class="badge badge-info" style="font-size:0.75rem;">${u.fixed_multiplier.toFixed(1)}x</span>`;
+            }
             // Expiry cell
             let expiryHtml = '永久';
             let rowClass = '';
@@ -430,11 +461,11 @@ async function loadUsers() {
             }
             return `<tr${rowClass}>
                 <td>${u.id}</td><td>${escapeHtml(u.username)}</td><td><code>${escapeHtml(u.sub_key_preview)}</code></td>
-                <td>${quota5h}</td><td>${quotaTotal}</td><td>${tokens}</td><td>${expiryHtml}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
+                <td>${quota5h}</td><td>${quotaTotal}</td><td>${tokens}</td><td>${routeHtml}</td><td>${expiryHtml}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
                 <td><div class="btn-group">
                     <button class="btn btn-outline btn-sm" onclick="extendUser(${u.id},'${escapeAttr(u.username)}','${escapeAttr(u.expires_at || '')}')">🕐 延期</button>
                     <button class="btn btn-outline btn-sm" onclick="shareUser('${escapeAttr(u.username)}',${u.id})">📋 分享</button>
-                    <button class="btn btn-outline btn-sm" onclick="editUser(${u.id},'${escapeAttr(u.status)}',${u.quota_5h_limit},${u.quota_total_limit})">编辑</button>
+                    <button class="btn btn-outline btn-sm" onclick="editUser(${u.id},'${escapeAttr(u.status)}',${u.quota_5h_limit},${u.quota_total_limit},'${escapeAttr(u.route_mode || 'auto')}','${escapeAttr(u.fixed_provider || '')}',${u.fixed_multiplier != null ? u.fixed_multiplier : 'null'})">编辑</button>
                     <button class="btn btn-outline btn-sm" onclick="viewCalls(${u.id},'${escapeAttr(u.username)}')">记录</button>
                     <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id},'${escapeAttr(u.username)}')">删除</button>
                 </div></td>
@@ -467,14 +498,24 @@ async function createUser(e) {
             expiresAt = new Date(dateVal + 'T00:00:00+08:00').toISOString();
         }
     }
+    // Route mode fields
+    const routeMode = document.getElementById('new-route-mode').value;
+    const fixedProvider = routeMode === 'fixed' ? document.getElementById('new-fixed-provider').value : '';
+    const fmRaw = document.getElementById('new-fixed-multiplier').value;
+    const fixedMultiplier = fmRaw ? parseFloat(fmRaw) : null;
+
+    const body = { username, quota_5h_limit: q5, quota_total_limit: qt, expires_at: expiresAt, route_mode: routeMode, fixed_provider: fixedProvider };
+    if (fixedMultiplier != null) body.fixed_multiplier = fixedMultiplier;
+
     try {
         const data = await apiFetch('api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, quota_5h_limit: q5, quota_total_limit: qt, expires_at: expiresAt }) });
+            body: JSON.stringify(body) });
         if (data.sub_key) {
             document.getElementById('subkey-value').textContent = data.sub_key;
             document.getElementById('share-all-text').value = buildShareText(data.sub_key);
             closeModal('create-user-modal'); showModal('subkey-modal');
             document.getElementById('create-user-form').reset();
+            document.getElementById('new-fixed-provider-group').style.display = 'none';
         } else if (data.error) {
             const resultEl = document.getElementById('create-user-result');
             resultEl.textContent = '创建失败: ' + data.error;
@@ -485,13 +526,31 @@ async function createUser(e) {
     } catch (err) { document.getElementById('create-user-result').textContent = '创建失败: ' + err.message; document.getElementById('create-user-result').classList.remove('hidden'); }
 }
 
-function editUser(id, status, q5, qt) {
+function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier) {
     document.getElementById('update-user-id').value = id;
     document.getElementById('update-quota-5h').value = q5;
     document.getElementById('update-quota-total').value = qt;
     document.getElementById('update-status').value = '';
     document.getElementById('update-regenerate-key').checked = false;
+    document.getElementById('update-route-mode').value = '';
+    document.getElementById('update-fixed-provider').value = '';
+    document.getElementById('update-fixed-provider-group').style.display = 'none';
+    document.getElementById('update-fixed-multiplier').value = '';
     document.getElementById('update-user-result').classList.add('hidden');
+    // Pre-fill existing route mode info (display only, user can change)
+    if (routeMode && routeMode !== 'null') {
+        document.getElementById('update-route-mode').value = routeMode;
+        if (routeMode === 'fixed') {
+            document.getElementById('update-fixed-provider-group').style.display = '';
+            if (fixedProvider && fixedProvider !== 'null' && fixedProvider !== '') {
+                document.getElementById('update-fixed-provider').value = fixedProvider;
+            }
+        }
+    }
+    if (fixedMultiplier && fixedMultiplier !== 'null') {
+        document.getElementById('update-fixed-multiplier').value = parseFloat(fixedMultiplier);
+    }
+    refreshProviderDropdowns();
     showModal('update-user-modal');
 }
 
@@ -506,6 +565,16 @@ async function updateUser(e) {
     const st = document.getElementById('update-status').value;
     if (st) body.status = st;
     body.regenerate_key = document.getElementById('update-regenerate-key').checked;
+    // Route mode fields
+    const rm = document.getElementById('update-route-mode').value;
+    if (rm) {
+        body.route_mode = rm;
+        body.fixed_provider = rm === 'fixed' ? document.getElementById('update-fixed-provider').value : '';
+    }
+    const fmRaw = document.getElementById('update-fixed-multiplier').value;
+    if (fmRaw !== '') {
+        body.fixed_multiplier = parseFloat(fmRaw) || null;  // 0 or empty → null (clear override)
+    }
     if (body.regenerate_key && !confirm('确定要重新生成 Key 吗？旧 Key 将立即失效。')) return;
     try {
         const data = await apiFetch('api/users/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

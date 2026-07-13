@@ -10,6 +10,8 @@ classDiagram
         +string CreatedAt
         +string UpdatedAt
         +string ExpiresAt
+        +string RouteMode
+        +string FixedProvider
     }
 
     class UserWithQuota {
@@ -20,16 +22,19 @@ classDiagram
         +int QuotaTotalUsed
         +int64 TotalTokens
         +string SubKey
+        +sql.NullFloat64 FixedMultiplier
     }
 
-    class DashboardOverview {
-        +int TotalUsers
-        +int ActiveUsers
-        +int TotalCalls
-        +int TotalCallsToday
-        +int AvgLatencyMs
-        +int TotalTokensToday
-        +int ExpiringSoon
+    class Quota {
+        +int64 ID
+        +int64 UserID
+        +int Quota5hLimit
+        +int Quota5hUsed
+        +int QuotaTotalLimit
+        +int QuotaTotalUsed
+        +string WindowStart
+        +string UpdatedAt
+        +sql.NullFloat64 FixedMultiplier
     }
 
     class createUserRequest {
@@ -37,49 +42,97 @@ classDiagram
         +int Quota5hLimit
         +int QuotaTotalLimit
         +string ExpiresAt
+        +string RouteMode
+        +string FixedProvider
+        +float64 FixedMultiplier
     }
 
-    class extendUserRequest {
-        +int Days
-        +string Until
+    class updateUserRequest {
+        +int Quota5hLimit
+        +int QuotaTotalLimit
+        +string Status
+        +bool RegenerateKey
+        +string RouteMode
+        +string FixedProvider
+        +float64 FixedMultiplier
     }
 
-    class extendUserResponse {
-        +string ExpiresAt
-        +string Message
+    class Router {
+        +ResolveProvider(now time.Time) Provider, error
+        +RewriteModel(external, providerID string) string
+        +Reload() error
+        +GetProviderBySlug(slug string) Provider, bool
     }
 
-    class Middleware {
+    class Provider {
+        +string ID
+        +string Endpoint
+        +string APIKey
+    }
+
+    class ProviderTable {
+        +map~string,ProviderEntry~ Providers
+        +map~string,map~string,string~ Mappings
+        +RoutingRule[] Rules
+        +string Default
+    }
+
+    class ProviderEntry {
+        +string Slug
+        +string Endpoint
+        +string APIKey
+    }
+
+    class authMiddleware {
         +SubKeyAuth(http.Handler) http.Handler
-        +AdminSessionAuth(http.Handler) http.Handler
-        +AdminSessionAuthAPI(http.Handler) http.Handler
+        +CtxKeyUserID
+        +CtxKeyUserRole
+        +CtxKeyRouteMode
+        +CtxKeyFixedProvider
     }
 
-    class Handler {
+    class ProxyHandler {
+        +ServeHTTP(w, r)
+        +handleSync(...)
+        +handleStream(...)
+        +Router *Router
+        +MultiplierEng *MultiplierEngine
+        +QuotaChecker *Checker
+    }
+
+    class AdminHandler {
         +CreateUser(w, r)
-        +ListUsers(w, r)
         +UpdateUser(w, r)
-        +ExtendUser(w, r)
-        +GetOverview(w, r)
+        +ListUsers(w, r)
         +DeleteUser(w, r)
-        +GetUserCalls(w, r)
+        +ProviderStore *ProviderStore
+        +Router *Router
+    }
+
+    class ProviderStore {
+        +DeleteProvider(slug string) error
+        +GetProvider(slug string) *ProviderRecord
+    }
+
+    class QuotaModel {
+        +GetFixedMultiplier(db, userID) sql.NullFloat64
+        +UpdateFixedMultiplier(db, userID, multiplier)
     }
 
     class UserModel {
-        +CreateUser(db, username, passwordHash, subKeyHash, subKeyPreview, role, status, expiresAt, quota5hLimit, quotaTotalLimit) *UserWithQuota
-        +GetUserBySubKeyHash(db, subKeyHash) *User
-        +GetUserByID(db, id) *User
-        +ListUsers(db) []UserWithQuota
-        +UpdateUserStatus(db, userID, status)
-        +ExtendUserExpiry(db, userID, newExpiresAt)
-        +GetDashboardOverview(db) *DashboardOverview
+        +CreateUser(...)
+        +GetUserBySubKeyHash(db, hash) User
+        +GetUserByID(db, id) User
+        +GetUsersByFixedProvider(db, slug) []string
+        +UpdateUserRoute(db, id, mode, provider) error
     }
 
-    Handler --> UserModel : uses
-    Handler --> Middleware : uses
-    Middleware --> UserModel : GetUserBySubKeyHash
     UserWithQuota --|> User : embeds
-    Handler ..> createUserRequest : decodes
-    Handler ..> extendUserRequest : decodes
-    Handler ..> extendUserResponse : returns
-    Handler ..> DashboardOverview : returns
+    ProxyHandler --> Router : uses
+    ProxyHandler --> authMiddleware : GetUserID/GetRouteMode
+    Router --> ProviderTable : atomic snapshot
+    AdminHandler --> ProviderStore : uses
+    AdminHandler ..> createUserRequest : decodes
+    AdminHandler ..> updateUserRequest : decodes
+    Quota ..> QuotaModel : CRUD
+    User ..> UserModel : CRUD

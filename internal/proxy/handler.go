@@ -205,28 +205,44 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Normalize content arrays → strings (Cursor sends content as array-of-parts)
 	bodyBytes = normalizeContentArrays(bodyBytes)
 
-	// Resolve the upstream provider ONCE for this request (time-window routing).
-	// When no Router is wired, fall back to the legacy getters (gradual rollout).
+	// ── Route resolution ──
+	// Read routing mode from context (injected by auth middleware — zero extra DB query).
+	routeMode := auth.GetRouteMode(r)
+	fixedProvider := auth.GetFixedProvider(r)
+
 	providerID := "zhipu" // default fallback id when no Router is wired (legacy path)
 	var endpoint, apiKey string
+
 	if h.Router != nil {
-		// New routing path: resolve the upstream provider via time-window rules.
-		prov, err := h.Router.ResolveProvider(time.Now())
-		if err != nil {
-			// Fallback: when the provider table is empty (e.g. not yet seeded),
-			// try the legacy getter path so the gateway remains operational.
-			if h.EndpointGetter != nil && h.APIKeyGetter != nil {
-				providerID = "zhipu" // legacy default
-				endpoint = h.EndpointGetter()
-				apiKey = h.APIKeyGetter()
-			} else {
-				writeProxyError(w, http.StatusServiceUnavailable, "No upstream provider available", "no_provider")
+		// Fixed route mode: bypass Router.ResolveProvider, use the specified provider directly.
+		if routeMode == "fixed" && fixedProvider != "" {
+			prov, ok := h.Router.GetProviderBySlug(fixedProvider)
+			if !ok {
+				writeProxyError(w, http.StatusServiceUnavailable, "Fixed provider not available: "+fixedProvider, "provider_unavailable")
 				return
 			}
-		} else {
 			providerID = prov.ID
 			endpoint = prov.Endpoint
 			apiKey = prov.APIKey
+		} else {
+			// New routing path: resolve the upstream provider via time-window rules.
+			prov, err := h.Router.ResolveProvider(time.Now())
+			if err != nil {
+				// Fallback: when the provider table is empty (e.g. not yet seeded),
+				// try the legacy getter path so the gateway remains operational.
+				if h.EndpointGetter != nil && h.APIKeyGetter != nil {
+					providerID = "zhipu" // legacy default
+					endpoint = h.EndpointGetter()
+					apiKey = h.APIKeyGetter()
+				} else {
+					writeProxyError(w, http.StatusServiceUnavailable, "No upstream provider available", "no_provider")
+					return
+				}
+			} else {
+				providerID = prov.ID
+				endpoint = prov.Endpoint
+				apiKey = prov.APIKey
+			}
 		}
 	} else {
 		// Legacy fallback path (gradual rollout safety): only here do we invoke
@@ -256,9 +272,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get effective multiplier for the current time (Asia/Shanghai)
-	multiplier := h.MultiplierEng.GetEffectiveMultiplier(time.Now())
-	effectiveCalls := int(math.Ceil(1.0 * multiplier))
+	// ── Multiplier resolution ──
+	// Fixed multiplier takes priority over the global time-based multiplier.
+	var multiplier float64
+	var effectiveCalls int
+	fixedMult, err := models.GetFixedMultiplier(h.QuotaChecker.DB(), userID)
+	if err == nil && fixedMult.Valid {
+		multiplier = fixedMult.Float64
+		effectiveCalls = int(math.Ceil(fixedMult.Float64))
+	} else {
+		multiplier = h.MultiplierEng.GetEffectiveMultiplier(time.Now())
+		effectiveCalls = int(math.Ceil(1.0 * multiplier))
+	}
 
 	// Quota check and atomic deduction
 	allowed, err := h.QuotaChecker.CheckAndDeduct(userID, effectiveCalls)

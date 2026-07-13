@@ -21,6 +21,10 @@ const (
 	CtxKeyUserID contextKey = "user_id"
 	// CtxKeyUserRole is the context key for the user's role.
 	CtxKeyUserRole contextKey = "user_role"
+	// CtxKeyRouteMode is the context key for the user's routing mode ("auto" | "fixed").
+	CtxKeyRouteMode contextKey = "route_mode"
+	// CtxKeyFixedProvider is the context key for the user's fixed provider slug.
+	CtxKeyFixedProvider contextKey = "fixed_provider"
 )
 
 // Middleware provides authentication middleware functions.
@@ -34,7 +38,7 @@ func NewMiddleware(db *sql.DB) *Middleware {
 }
 
 // SubKeyAuth is a middleware that authenticates requests using a Bearer sub-key.
-// It sets user_id and user_role in the request context.
+// It sets user_id, user_role, route_mode and fixed_provider in the request context.
 func (m *Middleware) SubKeyAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Extract Bearer token
@@ -82,9 +86,11 @@ func (m *Middleware) SubKeyAuth(next http.Handler) http.Handler {
 			}
 		}
 
-		// Set user info in context
+		// Set user info in context (including route_mode and fixed_provider).
 		ctx := context.WithValue(r.Context(), CtxKeyUserID, user.ID)
 		ctx = context.WithValue(ctx, CtxKeyUserRole, user.Role)
+		ctx = context.WithValue(ctx, CtxKeyRouteMode, user.RouteMode)
+		ctx = context.WithValue(ctx, CtxKeyFixedProvider, user.FixedProvider)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -155,6 +161,24 @@ func GetUserID(r *http.Request) int64 {
 	v, ok := r.Context().Value(CtxKeyUserID).(int64)
 	if !ok {
 		return 0
+	}
+	return v
+}
+
+// GetRouteMode extracts the route_mode from the request context.
+func GetRouteMode(r *http.Request) string {
+	v, ok := r.Context().Value(CtxKeyRouteMode).(string)
+	if !ok {
+		return "auto"
+	}
+	return v
+}
+
+// GetFixedProvider extracts the fixed_provider from the request context.
+func GetFixedProvider(r *http.Request) string {
+	v, ok := r.Context().Value(CtxKeyFixedProvider).(string)
+	if !ok {
+		return ""
 	}
 	return v
 }

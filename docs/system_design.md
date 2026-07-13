@@ -1,10 +1,10 @@
-# 系统设计：用户账号有效期管理
+# 系统设计：用户路由模式与倍率解耦
 
 | 字段 | 内容 |
 |------|------|
 | 架构师 | Bob（高见远） |
-| 日期 | 2025-07-16 |
-| 基于 PRD | `docs/prd-user-expiry.md` |
+| 日期 | 2025-07-13 |
+| 基于 | PRD: 用户路由模式与倍率解耦 |
 
 ---
 
@@ -16,32 +16,35 @@
 
 | 挑战 | 分析 |
 |------|------|
-| **幂等迁移** | SQLite 不支持 `ALTER TABLE ... IF NOT EXISTS`，但已有 `columnExists()` 辅助函数，复用即可 |
-| **时区一致性** | 已有 `timeutil.ShanghaiTZ` 作为全局时区入口，时间比较必须走 Go `time.Now().In(timeutil.ShanghaiTZ)`，与现有 quota/multiplier 窗口逻辑一致 |
-| **Admin 保护** | 两处拦截：(a) 写入时 `role=admin` 强写 NULL；(b) 认证时 `role=admin` 跳过到期检查 |
-| **延期即启用** | Q1 决策：延期 API 同时将 status 设为 `active`，覆盖手动停用状态 |
-| **前端颜色逻辑** | 纯 Vanilla JS，在 `loadUsers()` 中按 `expires_at` 计算行颜色：过期=红行、7天内=橙字 |
+| **热路径零额外 DB 查询** | `route_mode` / `fixed_provider` 由中间件在认证时从 User 表一并加载并注入 context；`fixed_multiplier` 需额外查 quotas 表（1次索引查询，可接受） |
+| **Router 快照即权限检查** | `ProviderTable.Providers` 仅含 `enabled=1` 的上游 —— 禁用/删除的 provider 天然不在快照中，`GetProviderBySlug` 返回 false → 503 |
+| **Admin 强制约束** | 写入时 `role=admin` → `route_mode='auto'` + `fixed_provider=''`；读取时不校验 `fixed_multiplier` |
+| **Provider 删除保护** | `DeleteProvider` 新增检查：`SELECT username FROM users WHERE fixed_provider=?`，有结果则阻止并列出用户名 |
+| **幂等迁移** | 复用已有 `columnExists()` 辅助函数，3 条 ALTER TABLE 均 idempotent |
 
 #### 1.2 技术栈与架构
 
 - **后端**：Go 1.22, 零 CGO, SQLite (`modernc.org/sqlite`), 标准库 `net/http` (Go 1.22 路由)
 - **前端**：Vanilla HTML/CSS/JS，Go embed 内嵌
-- **时间格式**：RFC3339 (`2006-01-02T15:04:05+08:00`)，与现有 `models/user.go` 中 `time.Now().Format(time.RFC3339)` 一致
-- **审计日志**：复用已有 `audit_logs` 表，`action="extend"`, `target_type="user"`, `target_id=<userID>`
+- **路由决策**：`proxy.Handler.ServeHTTP` 中新增 "fixed" 分支，绕过 `Router.ResolveProvider`
+- **倍率决策**：`ServeHTTP` 中优先检查 `fixed_multiplier`，为 NULL 时回退 `MultiplierEng.GetEffectiveMultiplier`
+- **审计日志**：复用已有 `audit_logs` 表，`action="user.route_update"`, `target_type="user"`
 
 #### 1.3 模块改动清单
 
 ```
-internal/db/migrations.go     → +1 ALTER TABLE (idempotent)
-internal/models/user.go       → +ExpiresAt 字段，所有 query/scan 更新，+ExtendUserExpiry()
-internal/models/call_log.go   → DashboardOverview +ExpiringSoon
-internal/auth/middleware.go   → SubKeyAuth +expiry check
-internal/admin/users.go       → CreateUser +expires_at，+ExtendUser handler
-internal/admin/handler.go     → +route POST /api/users/{id}/extend
-internal/admin/overview.go    → +expiring_soon_count (P1)
-web/admin/index.html          → 创建弹窗 +有效期选择，延期弹窗，表头 +有效期列
-web/admin/app.js              → createUser/loadUsers/extendUser 更新
-web/admin/style.css           → +过期行红色、即将到期橙色样式 (P1)
+internal/db/migrations.go        → +3 ALTER TABLE (idempotent via columnExists)
+internal/models/user.go          → User +RouteMode/+FixedProvider, 全部 query/scan, +GetUsersByFixedProvider()
+internal/models/quota.go         → Quota +FixedMultiplier, +GetFixedMultiplier()
+internal/auth/middleware.go      → SubKeyAuth 注入 route_mode/fixed_provider 到 context
+internal/proxy/handler.go        → ServeHTTP: fixed 路由分支 + fixed 倍率分支
+internal/router/selector.go      → +GetProviderBySlug() 公开方法
+internal/provider/store.go       → DeleteProvider: 检查 fixed 用户引用
+internal/admin/users.go          → Create/Update 请求结构体 + 处理逻辑 + audit 写入
+internal/admin/handler.go        → RegisterRoutes 无需新增路由（复用现有 PUT /api/users/{id}）
+web/admin/index.html             → 创建/编辑弹窗增加路由模式、固定上游、倍率字段
+web/admin/app.js                 → createUser/loadUsers/editUser/updateUser 更新
+web/admin/style.css              → 无需大改（复用现有样式体系）
 ```
 
 ---
@@ -49,16 +52,17 @@ web/admin/style.css           → +过期行红色、即将到期橙色样式 (P
 ### 2. 文件列表
 
 ```
-internal/db/migrations.go          # 修改：ALTER TABLE users ADD COLUMN expires_at TEXT
-internal/models/user.go            # 修改：User.ExpiresAt, 全部查询, ExtendUserExpiry()
-internal/models/call_log.go        # 修改：DashboardOverview +ExpiringSoon, GetDashboardOverview()
-internal/auth/middleware.go        # 修改：SubKeyAuth() 插入 expires_at 检查
-internal/admin/users.go            # 修改：CreateUser(), +ExtendUser()
-internal/admin/handler.go          # 修改：RegisterRoutes() +extend 路由
-internal/admin/overview.go         # 修改：GetOverview() +expiring_soon_count (P1)
-web/admin/index.html               # 修改：创建弹窗 +有效期UI，延期弹窗，表头
-web/admin/app.js                   # 修改：createUser(), loadUsers(), +extendUser(), loadOverview()
-web/admin/style.css                # 修改：+过期/即将到期行样式 (P1)
+internal/db/migrations.go          # 修改：ALTER TABLE users +route_mode, +fixed_provider; ALTER TABLE quotas +fixed_multiplier
+internal/models/user.go            # 修改：User struct +RouteMode/FixedProvider, 全部 SQL query/scan 更新, +GetUsersByFixedProvider()
+internal/models/quota.go           # 修改：Quota struct +FixedMultiplier, +GetFixedMultiplier()
+internal/auth/middleware.go        # 修改：SubKeyAuth 注入 CtxKeyRouteMode/CtxKeyFixedProvider, GetUserBySubKeyHash SQL 增加 route_mode/fixed_provider
+internal/proxy/handler.go          # 修改：ServeHTTP 增加 fixed 路由分支 + fixed 倍率分支
+internal/router/selector.go        # 修改：+GetProviderBySlug() 公开方法
+internal/provider/store.go         # 修改：DeleteProvider 增加 fixed 用户引用检查
+internal/admin/users.go            # 修改：createUserRequest/updateUserRequest 增加新字段, CreateUser/UpdateUser/ListUsers 处理新字段, audit 写入
+internal/admin/handler.go          # 无需新增路由（复用现有 PUT /api/users/{id}）
+web/admin/index.html               # 修改：创建用户弹窗 + 编辑用户弹窗 增加路由模式/固定上游/倍率
+web/admin/app.js                   # 修改：createUser/loadUsers/editUser/updateUser 支持新字段
 ```
 
 ---
@@ -78,6 +82,8 @@ classDiagram
         +string CreatedAt
         +string UpdatedAt
         +string ExpiresAt
+        +string RouteMode
+        +string FixedProvider
     }
 
     class UserWithQuota {
@@ -88,16 +94,19 @@ classDiagram
         +int QuotaTotalUsed
         +int64 TotalTokens
         +string SubKey
+        +sql.NullFloat64 FixedMultiplier
     }
 
-    class DashboardOverview {
-        +int TotalUsers
-        +int ActiveUsers
-        +int TotalCalls
-        +int TotalCallsToday
-        +int AvgLatencyMs
-        +int TotalTokensToday
-        +int ExpiringSoon
+    class Quota {
+        +int64 ID
+        +int64 UserID
+        +int Quota5hLimit
+        +int Quota5hUsed
+        +int QuotaTotalLimit
+        +int QuotaTotalUsed
+        +string WindowStart
+        +string UpdatedAt
+        +sql.NullFloat64 FixedMultiplier
     }
 
     class createUserRequest {
@@ -105,164 +114,275 @@ classDiagram
         +int Quota5hLimit
         +int QuotaTotalLimit
         +string ExpiresAt
+        +string RouteMode
+        +string FixedProvider
+        +float64 FixedMultiplier
     }
 
-    class extendUserRequest {
-        +int Days
-        +string Until
+    class updateUserRequest {
+        +int Quota5hLimit
+        +int QuotaTotalLimit
+        +string Status
+        +bool RegenerateKey
+        +string RouteMode
+        +string FixedProvider
+        +float64 FixedMultiplier
     }
 
-    class extendUserResponse {
-        +string ExpiresAt
-        +string Message
+    class Router {
+        +ResolveProvider(now time.Time) Provider, error
+        +RewriteModel(external, providerID string) string
+        +Reload() error
+        +GetProviderBySlug(slug string) Provider, bool
     }
 
-    class Middleware {
+    class Provider {
+        +string ID
+        +string Endpoint
+        +string APIKey
+    }
+
+    class ProviderTable {
+        +map~string,ProviderEntry~ Providers
+        +map~string,map~string,string~ Mappings
+        +RoutingRule[] Rules
+        +string Default
+    }
+
+    class ProviderEntry {
+        +string Slug
+        +string Endpoint
+        +string APIKey
+    }
+
+    class authMiddleware {
         +SubKeyAuth(http.Handler) http.Handler
-        +AdminSessionAuth(http.Handler) http.Handler
-        +AdminSessionAuthAPI(http.Handler) http.Handler
+        +CtxKeyUserID
+        +CtxKeyUserRole
+        +CtxKeyRouteMode
+        +CtxKeyFixedProvider
     }
 
     class Handler {
+        +ServeHTTP(w, r)
+        +handleSync(...)
+        +handleStream(...)
+        +Router *Router
+        +MultiplierEng *MultiplierEngine
+        +QuotaChecker *Checker
+    }
+
+    class adminHandler {
         +CreateUser(w, r)
-        +ListUsers(w, r)
         +UpdateUser(w, r)
-        +ExtendUser(w, r)
-        +GetOverview(w, r)
+        +ListUsers(w, r)
         +DeleteUser(w, r)
-        +GetUserCalls(w, r)
+        +ProviderStore *ProviderStore
+        +Router *Router
     }
 
-    class UserModel {
-        +CreateUser(db, username, passwordHash, subKeyHash, subKeyPreview, role, status, expiresAt, quota5hLimit, quotaTotalLimit) *UserWithQuota
-        +GetUserBySubKeyHash(db, subKeyHash) *User
-        +GetUserByID(db, id) *User
-        +ListUsers(db) []UserWithQuota
-        +UpdateUserStatus(db, userID, status)
-        +ExtendUserExpiry(db, userID, newExpiresAt)
-        +GetDashboardOverview(db) *DashboardOverview
+    class ProviderStore {
+        +DeleteProvider(slug string) error
+        +GetProvider(slug string) *ProviderRecord
     }
 
-    Handler --> UserModel : uses
-    Handler --> Middleware : uses
-    Middleware --> UserModel : GetUserBySubKeyHash
+    class QuotaModel {
+        +GetFixedMultiplier(db, userID) sql.NullFloat64
+        +UpdateFixedMultiplier(db, userID, multiplier)
+    }
+
     UserWithQuota --|> User : embeds
-    Handler ..> createUserRequest : decodes
-    Handler ..> extendUserRequest : decodes
-    Handler ..> extendUserResponse : returns
-    Handler ..> DashboardOverview : returns
+    Handler --> Router : uses
+    Handler --> authMiddleware : GetUserID/GetRouteMode
+    Router --> ProviderTable : atomic snapshot
+    adminHandler --> ProviderStore : uses
+    adminHandler ..> createUserRequest : decodes
+    adminHandler ..> updateUserRequest : decodes
+    Quota ..> QuotaModel : CRUD
+    User ..> UserModel : CRUD
 ```
 
 #### 3.1 API 契约
 
 **POST /admin/api/users** (修改)
+```json
+Request: {
+  "username": "alice",
+  "quota_5h_limit": 100,
+  "quota_total_limit": 10000,
+  "expires_at": "2026-01-15T00:00:00+08:00",
+  "route_mode": "fixed",
+  "fixed_provider": "openai",
+  "fixed_multiplier": 2.5
+}
 ```
-Request:  {"username":"alice","quota_5h_limit":100,"quota_total_limit":10000,"expires_at":"2026-01-15T00:00:00+08:00"}
-Response: {"id":1,"username":"alice","sub_key":"sk-...","sub_key_preview":"sk-a1...","quota_5h_limit":100,...}
-```
-- `expires_at`：可选，RFC3339 格式；不传/空串 → NULL（永久）
-- 若 `role=admin` → 忽略 expires_at，强制 NULL
+- `route_mode`: 可选，默认 `"auto"`。若 `role=admin` → 强制 `"auto"`
+- `fixed_provider`: 可选，默认 `""`。若 `role=admin` → 强制 `""`
+- `fixed_multiplier`: 可选，默认 `null`（走全局倍率）。范围 `0.1~100.0`
 
-**POST /admin/api/users/{id}/extend** (新增)
+**PUT /admin/api/users/{id}** (修改)
+```json
+Request: {
+  "route_mode": "auto",
+  "fixed_provider": "",
+  "fixed_multiplier": null
+}
 ```
-Request:  {"days": 30}           ← 在当前到期时间上 +N 天
-Request:  {"until": "2026-02-15T00:00:00+08:00"}  ← 直接设置
-Response: {"expires_at":"2026-02-14T17:30:00+08:00","message":"有效期已更新至 2026-02-14"}
-```
-- `days` 和 `until` 互斥；如当前为永久 → `days` 基于 `NOW()` 计算
-- 自动将 status 设为 `active`（Q1：延期即启用）
-- 写入 audit_logs：`action=extend, target_type=user, target_id=<id>, detail="expires_at: ... → ..."`
-- 若 `role=admin` → 拒绝（admin 永不过期，无需延期）
+- 新增三个可选字段。若 `role=admin` → route_mode/fixed_provider 忽略
 
 **GET /admin/api/users** (修改)
-```
-Response: {"data":[{"id":1,"username":"alice",...,"expires_at":"2026-01-15T00:00:00+08:00"},...]}
-```
-- 返回每个用户的 `expires_at` 字段（NULL 时 JSON 为 `null`）
-
-**403 错误响应格式**（auth 中间件 — 新增 code）
 ```json
-{"error":{"message":"API key has expired","type":"key_expired","code":"key_expired"}}
+Response: {
+  "data": [{
+    "id": 1, "username": "alice", ...,
+    "route_mode": "fixed",
+    "fixed_provider": "openai",
+    "fixed_multiplier": 2.5
+  }, ...]
+}
+```
+- `fixed_multiplier` 为 null 时 JSON 序列化为 `null`
+
+**DELETE /admin/api/providers/{slug}** (修改)
+```json
+Response 409: {
+  "error": "cannot delete provider \"openai\": referenced by 2 user(s) as fixed provider: alice, bob"
+}
+```
+
+**503 错误响应格式**（proxy handler — 新增）
+```json
+{"error":{"message":"Provider not available","type":"provider_not_available","code":"provider_not_available"}}
 ```
 
 ---
 
 ### 4. 程序调用流
 
-#### 4.1 API 请求过期拦截
+#### 4.1 请求主流程（fixed 路由 + fixed 倍率）
 
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant M as SubKeyAuth Middleware
+    participant M as SubKeyAuth
     participant DB as SQLite
     participant H as ProxyHandler
+    participant R as Router
+    participant Q as QuotaChecker
+    participant U as Upstream
 
     C->>M: POST /v1/chat/completions<br/>Authorization: Bearer sk-xxx
-    M->>M: HashSubKey(subKey)
     M->>DB: GetUserBySubKeyHash(hash)
-    DB-->>M: User{ID,Status,Role,ExpiresAt}
+    DB-->>M: User{RouteMode, FixedProvider}
+    M->>M: ctx: user_id, route_mode, fixed_provider
+    M->>H: ServeHTTP
 
-    alt user == nil
-        M-->>C: 401 invalid_api_key
-    else status == disabled/deleted
-        M-->>C: 403 key_revoked
-    else Role != "admin" AND ExpiresAt != "" AND ExpiresAt < NOW()
-        M-->>C: 403 key_expired
+    Note over H: === 路由决策 ===
+    alt route_mode == "fixed" AND fixed_provider != ""
+        H->>R: GetProviderBySlug(fixed_provider)
+        alt not found (disabled/deleted)
+            H-->>C: 503 Provider not available
+        else found
+            R-->>H: Provider{ID, Endpoint, APIKey}
+        end
+    else route_mode == "auto" | empty
+        H->>R: ResolveProvider(now)
+        R-->>H: Provider{ID, Endpoint, APIKey}
+    end
+
+    Note over H: === 倍率决策 ===
+    H->>DB: GetFixedMultiplier(userID) FROM quotas
+    alt fixed_multiplier IS NOT NULL
+        DB-->>H: 2.5
+        H->>H: effectiveCalls = ceil(2.5) = 3
+    else fixed_multiplier IS NULL
+        H->>H: multiplier = MultiplierEng.GetEffectiveMultiplier(now)<br/>effectiveCalls = ceil(multiplier)
+    end
+
+    Note over H: === 配额扣减 ===
+    H->>Q: CheckAndDeduct(userID, effectiveCalls)
+    alt quota exceeded
+        H-->>C: 429 Quota exceeded
     else OK
-        M->>M: ctx.WithValue(user_id, user_role)
-        M->>H: ServeHTTP(w, r.WithContext(ctx))
-        H-->>C: 200 stream
+        H->>U: Forward request
+        U-->>H: Response
+        H-->>C: Stream / Sync response
     end
 ```
 
-#### 4.2 管理员创建用户（含有效期）+ 延期
+#### 4.2 管理员创建用户（含路由模式 + 固定倍率）
 
 ```mermaid
 sequenceDiagram
     participant A as Admin Browser
-    participant API as Admin API Handler
+    participant API as Admin API
     participant M as UserModel
     participant DB as SQLite
     participant AL as AuditLogs
 
-    Note over A: === 创建用户 (设置30天有效期) ===
-    A->>API: POST /admin/api/users<br/>{username, quota, expires_at}
-    API->>API: role="user" → expires_at 保留
-    API->>M: CreateUser(..., expires_at="2026-08-15T...")
-    M->>DB: BEGIN TX<br/>INSERT users (..., expires_at)<br/>INSERT quotas (...)<br/>COMMIT
+    A->>API: POST /admin/api/users<br/>{username, route_mode, fixed_provider, fixed_multiplier, ...}
+    API->>API: role="user" → fields preserved
+    API->>M: CreateUser(..., routeMode, fixedProvider)
+    M->>DB: BEGIN<br/>INSERT users (..., route_mode, fixed_provider)<br/>INSERT quotas (..., fixed_multiplier)<br/>COMMIT
     DB-->>M: userID
     M-->>API: UserWithQuota
+    API->>DB: INSERT INTO audit_logs<br/>(action='user.create', target_type='user', ...)
     API-->>A: {id, sub_key, ...}
 
-    Note over A: === 延期操作 ===
-    A->>API: POST /admin/api/users/2/extend<br/>{days: 30}
+    Note over A: === 编辑用户路由/倍率 ===
+    A->>API: PUT /admin/api/users/2<br/>{route_mode:"fixed", fixed_provider:"openai", fixed_multiplier:2.0}
     API->>M: GetUserByID(2)
     M->>DB: SELECT ... FROM users WHERE id=2
-    DB-->>M: User{ExpiresAt:"2026-08-15T..."}
-    M-->>API: User
-    API->>API: 计算 newExpiresAt = old + 30d<br/>= "2026-09-14T..."
-    API->>M: ExtendUserExpiry(2, newExpiresAt)
-    M->>DB: UPDATE users SET expires_at=?, status='active', updated_at=? WHERE id=2
-    DB-->>M: OK
-    API->>DB: INSERT INTO audit_logs<br/>(action='extend', target_type='user', target_id='2',<br/>detail='expires_at: 2026-08-15 → 2026-09-14')
-    API-->>A: {expires_at:"2026-09-14T...", message:"有效期已更新至 2026-09-14"}
+    DB-->>M: User{RouteMode:"auto", FixedProvider:""}
+    API->>API: role!="admin" → accept fields
+    API->>DB: UPDATE users SET route_mode=?, fixed_provider=?
+    API->>DB: UPDATE quotas SET fixed_multiplier=?
+    API->>DB: INSERT INTO audit_logs<br/>(action='user.route_update', target_type='user', ...)
+    API-->>A: {route_mode:"fixed", fixed_provider:"openai", fixed_multiplier:2.0}
+```
+
+#### 4.3 删除 Provider 前检查 fixed 用户引用
+
+```mermaid
+sequenceDiagram
+    participant A as Admin Browser
+    participant API as Admin API
+    participant PS as ProviderStore
+    participant DB as SQLite
+
+    A->>API: DELETE /admin/api/providers/openai
+    API->>PS: DeleteProvider("openai")
+    PS->>DB: SELECT COUNT(*) FROM provider_routing_rules WHERE provider_id='openai'
+    DB-->>PS: 0 (existing check)
+    PS->>DB: SELECT COUNT(*) FROM model_mappings WHERE provider_id='openai'
+    DB-->>PS: 0 (existing check)
+    PS->>DB: SELECT username FROM users WHERE fixed_provider='openai' AND status!='deleted'
+    DB-->>PS: ["alice", "bob"] (NEW check)
+    alt count > 0
+        PS-->>API: error "referenced by 2 user(s): alice, bob"
+        API-->>A: 409 {error: "cannot delete: ..."}
+    else count == 0
+        PS->>DB: DELETE FROM providers WHERE slug='openai'
+        PS->>DB: INSERT INTO audit_logs (action='provider.delete', ...)
+        PS-->>API: nil
+        API-->>A: 204 No Content
+    end
 ```
 
 ---
 
 ### 5. 待明确事项
 
-无。所有 6 项决策已锁定：
+无。所有关键决策已锁定：
 
 | Q | 决策 | 实现方式 |
 |---|------|---------|
-| Q1 | 手动启用覆盖到期 | `ExtendUserExpiry()` 同时 `SET status='active'` |
-| Q2 | 无需二次确认 | 前端弹窗内一次确认，无额外 confirm() |
-| Q3 | 过期 quota 保留 | 无需任何操作 — 当前架构无过期清理逻辑 |
-| Q4 | /user/ 自助面板 | P1 范围，本期不涉及 |
-| Q5 | 服务器时间 `time.Now().In(timeutil.ShanghaiTZ)` | 与 `timeutil` 包一致 |
-| Q6 | 子 Key 不清理 | 无需任何操作 — 过期仅 auth 拦截 |
+| Q1 | admin 强制约束 | 写入时 role=admin → route_mode='auto', fixed_provider=''；不校验 fixed_multiplier |
+| Q2 | fixed provider 不可用 → 503 | 禁用/删除的 provider 不在 ProviderTable 快照中，`GetProviderBySlug` 返回 false |
+| Q3 | 删除 provider 阻止 | `DeleteProvider` 新增 `SELECT username FROM users WHERE fixed_provider=?` 检查 |
+| Q4 | 不暴露给自助面板 | /user/ 路由不变，返回数据不含新字段 |
+| Q5 | Router 为 nil 时 fixed 路由 | 直接返回 503（fixed 路由依赖 Router 快照） |
+| Q6 | fixed_multiplier NULL→全局 | `sql.NullFloat64`，Valid=false 时走 `MultiplierEng.GetEffectiveMultiplier` |
 
 ---
 
@@ -270,7 +390,7 @@ sequenceDiagram
 
 ### 6. 所需依赖包
 
-无新增第三方依赖。所有功能基于现有标准库 + `modernc.org/sqlite`。
+无新增第三方依赖。`database/sql` 的 `sql.NullFloat64` 已在标准库中。
 
 ---
 
@@ -278,115 +398,285 @@ sequenceDiagram
 
 | Task ID | 任务名称 | 源文件 | 依赖 | 优先级 |
 |---------|---------|--------|------|--------|
-| **T01** | 数据模型与迁移层 | `internal/db/migrations.go`, `internal/models/user.go`, `internal/models/call_log.go` | 无 | P0 |
-| **T02** | 认证中间件与 API 端点 | `internal/auth/middleware.go`, `internal/admin/users.go`, `internal/admin/handler.go`, `internal/admin/overview.go` | T01 | P0 |
-| **T03** | 前端页面与交互逻辑 | `web/admin/index.html`, `web/admin/app.js`, `web/admin/style.css` | T02 | P0 |
+| **T01** | 数据库迁移 + 数据模型层 | `internal/db/migrations.go`, `internal/models/user.go`, `internal/models/quota.go` | 无 | P0 |
+| **T02** | 认证中间件 + 代理热路径 + 路由扩展 | `internal/auth/middleware.go`, `internal/proxy/handler.go`, `internal/router/selector.go` | T01 | P0 |
+| **T03** | Provider 安全约束 + Admin API | `internal/provider/store.go`, `internal/admin/users.go`, `internal/admin/handler.go` | T01 | P0 |
+| **T04** | 前端页面与交互 | `web/admin/index.html`, `web/admin/app.js`, `web/admin/style.css` | T03 | P0 |
+| **T05** | 集成验证 | `make ci` + 手动功能验证 | T02, T03, T04 | P0 |
 
-#### T01 详情：数据模型与迁移层
-
-**范围**：
-- `migrations.go`：在 `RunMigrations()` 末尾添加 `ALTER TABLE users ADD COLUMN expires_at TEXT`（通过 `columnExists` 保证幂等）
-- `user.go`：
-  - `User` struct 新增 `ExpiresAt string \`json:"expires_at"\``
-  - `GetUserBySubKeyHash()` — SQL 增加 `u.expires_at`，Scan 增加 `&u.ExpiresAt`
-  - `GetUserByID()` — 同上
-  - `GetUserByUsername()` — 同上
-  - `ListUsers()` — SQL 增加 `u.expires_at`，Scan 增加 `&uwq.ExpiresAt`（注意 `UserWithQuota` 的 ExpiresAt 从嵌入 User 继承）
-  - `CreateUser()` — 签名增加 `expiresAt string`，INSERT 增加 `expires_at` 列；若 `role="admin"` 强写空串→NULL
-  - 新增 `ExtendUserExpiry(db *sql.DB, userID int64, newExpiresAt string) error` — `UPDATE users SET expires_at=?, status='active', updated_at=? WHERE id=?`
-- `call_log.go`：
-  - `DashboardOverview` struct 新增 `ExpiringSoon int \`json:"expiring_soon"\``
-  - `GetDashboardOverview()` 增加查询：`SELECT COUNT(*) FROM users WHERE expires_at IS NOT NULL AND expires_at >= ? AND expires_at < ?`（now ~ now+7d），使用 `time.Now().In(timeutil.ShanghaiTZ)` 计算边界
-
-**产出物**：编译通过且现有测试不回归。
-
-#### T02 详情：认证中间件与 API 端点
+#### T01 详情：数据库迁移 + 数据模型层
 
 **范围**：
-- `middleware.go`：在 `SubKeyAuth()` 第 72 行之后、context 注入之前插入过期检查：
+
+- **`migrations.go`**：在 `RunMigrations()` 末尾（`expires_at` 迁移之后）添加 3 条幂等迁移：
   ```go
-  if user.Role != "admin" && user.ExpiresAt != "" {
-      expiresAt, err := time.Parse(time.RFC3339, user.ExpiresAt)
-      if err == nil && time.Now().In(timeutil.ShanghaiTZ).After(expiresAt) {
-          writeAuthError(w, http.StatusForbidden, "API key has expired", "key_expired")
-          return
-      }
+  // route_mode (user routing mode: "auto" | "fixed")
+  if !columnExists(conn, "users", "route_mode") {
+      _, err := conn.Conn.Exec(`ALTER TABLE users ADD COLUMN route_mode TEXT NOT NULL DEFAULT 'auto'`)
+  }
+  // fixed_provider (target provider slug when route_mode=fixed)
+  if !columnExists(conn, "users", "fixed_provider") {
+      _, err := conn.Conn.Exec(`ALTER TABLE users ADD COLUMN fixed_provider TEXT NOT NULL DEFAULT ''`)
+  }
+  // fixed_multiplier (per-user multiplier override, NULL=global)
+  if !columnExists(conn, "quotas", "fixed_multiplier") {
+      _, err := conn.Conn.Exec(`ALTER TABLE quotas ADD COLUMN fixed_multiplier REAL`)
   }
   ```
-  需增加 `"time"` 和 `"llm_api_gateway/internal/timeutil"` 导入
-- `users.go`：
-  - `createUserRequest` 新增 `ExpiresAt string \`json:"expires_at"\``
-  - `CreateUser()` — 传入 `req.ExpiresAt` 给 `models.CreateUser()`
-  - 新增 `extendUserRequest` struct：`Days int \`json:"days"\`` + `Until string \`json:"until"\``
-  - 新增 `ExtendUser()` handler — 完整实现延期逻辑：
-    1. 解析 `{id}` → int64
-    2. `models.GetUserByID(h.DB, userID)` → 校验存在
-    3. 若 `user.Role == "admin"` → 400 `"Admin users do not expire"`
-    4. 解析 body → `extendUserRequest`
-    5. 计算 `newExpiresAt`：
-       - `until` 非空 → 直接使用
-       - `days > 0` → 基于当前 `expires_at`（若为空则用 `NOW()`）+ days
-       - 均无效 → 400
-    6. `models.ExtendUserExpiry(h.DB, userID, newExpiresAt)`
-    7. 写入 `audit_logs`（直接 `h.DB.Exec` SQL，action=extend, target_type=user, target_id=userID, detail=描述）
-    8. 返回 `{"expires_at": newExpiresAt, "message": "..."}`
-- `handler.go`：`RegisterRoutes()` 中注册 `adminMux.HandleFunc("POST /api/users/{id}/extend", h.ExtendUser)`
-- `overview.go`：`GetOverview()` 中 response 的 `expiring_soon` 字段已由 T01 的 `GetDashboardOverview()` 自动填充，前端在 T03 展示
 
-**产出物**：API 端点可用，`make ci` 通过。
+- **`user.go`**：
+  - `User` struct 新增：
+    ```go
+    RouteMode     string `json:"route_mode"`     // "auto" | "fixed"
+    FixedProvider string `json:"fixed_provider"`  // provider slug
+    ```
+  - `UserWithQuota` struct 新增：
+    ```go
+    FixedMultiplier *float64 `json:"fixed_multiplier"` // nil = global
+    ```
+  - **所有 SQL 查询和 Scan 更新**：
+    - `GetUserBySubKeyHash()`: SELECT 增加 `u.route_mode, u.fixed_provider`，Scan 增加 `&u.RouteMode, &u.FixedProvider`
+    - `GetUserByID()`: 同上
+    - `GetUserByUsername()`: 同上
+    - `ListUsers()`: SELECT 增加 `u.route_mode, u.fixed_provider, q.fixed_multiplier`，Scan 增加对应字段
+  - `CreateUser()`: 签名增加 `routeMode, fixedProvider string`；INSERT users 增加 `route_mode, fixed_provider`；INSERT quotas 增加 `fixed_multiplier` 列（传入值或 NULL）；若 `role="admin"` → 强写 `route_mode='auto', fixed_provider=''`
+  - 新增 `GetUsersByFixedProvider(db *sql.DB, providerSlug string) ([]string, error)`:
+    ```sql
+    SELECT username FROM users WHERE fixed_provider = ? AND status != 'deleted'
+    ```
+  - 新增 `UpdateUserRoute(db *sql.DB, userID int64, routeMode, fixedProvider string) error`
+  - 新增 `UpdateFixedMultiplier(db *sql.DB, userID int64, multiplier *float64) error`:
+    ```sql
+    UPDATE quotas SET fixed_multiplier = ? WHERE user_id = ?
+    ```
 
-#### T03 详情：前端页面与交互逻辑
+- **`quota.go`**：
+  - `Quota` struct 新增：
+    ```go
+    FixedMultiplier sql.NullFloat64 `json:"fixed_multiplier"`
+    ```
+  - `GetQuota()`: SELECT/Scan 增加 `fixed_multiplier`
+  - 新增 `GetFixedMultiplier(db *sql.DB, userID int64) (sql.NullFloat64, error)`:
+    ```sql
+    SELECT fixed_multiplier FROM quotas WHERE user_id = ?
+    ```
+
+**产出物**：`make test` 通过（已有 user_test.go 需适配新签名）。
+
+#### T02 详情：认证中间件 + 代理热路径 + 路由扩展
 
 **范围**：
-- `index.html`：
-  - **创建用户弹窗**（`#create-user-modal`）：在配额输入之后、提交按钮之前，增加"有效期"下拉 + 日期选择器：
+
+- **`middleware.go`**：
+  - 新增 context keys：
+    ```go
+    CtxKeyRouteMode     contextKey = "route_mode"
+    CtxKeyFixedProvider contextKey = "fixed_provider"
+    ```
+  - `SubKeyAuth()` 中，在 context 注入 user_id/user_role 之后，增加：
+    ```go
+    ctx = context.WithValue(ctx, CtxKeyRouteMode, user.RouteMode)
+    ctx = context.WithValue(ctx, CtxKeyFixedProvider, user.FixedProvider)
+    ```
+  - 新增辅助函数：
+    ```go
+    func GetRouteMode(r *http.Request) string { ... }
+    func GetFixedProvider(r *http.Request) string { ... }
+    ```
+
+- **`handler.go`** (`internal/proxy/handler.go`)：
+  - `ServeHTTP` 方法改造 —— 在解析请求体之后、路由决策之前，修改路由逻辑：
+    ```go
+    routeMode := auth.GetRouteMode(r)
+    fixedProvider := auth.GetFixedProvider(r)
+
+    if routeMode == "fixed" && fixedProvider != "" {
+        if h.Router == nil {
+            writeProxyError(w, 503, "Provider not available", "provider_not_available")
+            return
+        }
+        prov, ok := h.Router.GetProviderBySlug(fixedProvider)
+        if !ok {
+            writeProxyError(w, 503, "Provider not available", "provider_not_available")
+            return
+        }
+        providerID = prov.ID
+        endpoint = prov.Endpoint
+        apiKey = prov.APIKey
+    } else {
+        // 原有 Router.ResolveProvider 逻辑
+    }
+    ```
+  - 倍率决策改造（在 quota check 之前）：
+    ```go
+    // Get effective multiplier
+    var effectiveCalls int
+    fixedMult, _ := models.GetFixedMultiplier(h.QuotaChecker.DB(), userID)
+    if fixedMult.Valid {
+        effectiveCalls = int(math.Ceil(fixedMult.Float64))
+    } else {
+        multiplier := h.MultiplierEng.GetEffectiveMultiplier(time.Now())
+        effectiveCalls = int(math.Ceil(1.0 * multiplier))
+    }
+    ```
+  - 注意：重构现有 multiplier 变量为有效倍率值（用于 call_log 记录）
+
+- **`selector.go`** (`internal/router/selector.go`)：
+  - 新增公开方法 `GetProviderBySlug`:
+    ```go
+    func (r *Router) GetProviderBySlug(slug string) (Provider, bool) {
+        table := r.table.Load().(*provider.ProviderTable)
+        prov, ok := table.Providers[slug]
+        if !ok {
+            return Provider{}, false
+        }
+        return Provider{
+            ID:       prov.Slug,
+            Endpoint: prov.Endpoint,
+            APIKey:   prov.APIKey,
+        }, true
+    }
+    ```
+
+**产出物**：固定路由 + 固定倍率热路径可用，`make vet` 通过。
+
+#### T03 详情：Provider 安全约束 + Admin API
+
+**范围**：
+
+- **`store.go`** (`internal/provider/store.go`)：
+  - `DeleteProvider()` 方法：在现有 routing rules + model mappings 检查之后、实际 DELETE 之前，新增：
+    ```go
+    // Check fixed-provider user references.
+    usernames, err := models.GetUsersByFixedProvider(s.db, slug)
+    if err != nil {
+        return fmt.Errorf("check fixed users: %w", err)
+    }
+    if len(usernames) > 0 {
+        return fmt.Errorf("cannot delete provider %q: referenced by %d user(s) as fixed provider: %s",
+            slug, len(usernames), strings.Join(usernames, ", "))
+    }
+    ```
+
+- **`users.go`** (`internal/admin/users.go`)：
+  - `createUserRequest` struct 新增：
+    ```go
+    RouteMode       string   `json:"route_mode"`
+    FixedProvider   string   `json:"fixed_provider"`
+    FixedMultiplier *float64 `json:"fixed_multiplier"`
+    ```
+  - `updateUserRequest` struct 新增（使用指针以区分"不传"和"传0"）：
+    ```go
+    RouteMode       *string  `json:"route_mode"`
+    FixedProvider   *string  `json:"fixed_provider"`
+    FixedMultiplier *float64 `json:"fixed_multiplier"`
+    ```
+  - `CreateUser()`: 
+    - 默认 `route_mode` 为 `"auto"` 当为空时
+    - 传入新字段给 `models.CreateUser()`
+    - 若 `route_mode != "auto" || fixed_provider != "" || fixed_multiplier != nil`，写入 audit log
+  - `UpdateUser()`:
+    - 若 `user.Role == "admin"` → 忽略 `route_mode` / `fixed_provider`（WARNING 日志但不报错）
+    - 更新 `route_mode` / `fixed_provider` 时调用 `models.UpdateUserRoute()`
+    - 更新 `fixed_multiplier` 时调用 `models.UpdateFixedMultiplier()`
+    - 写入 audit log：`action="user.route_update"`, `target_type="user"`, detail=变化的字段
+  - `ListUsers()`: 响应已由 T01 的 `UserWithQuota` 结构自动包含新字段
+
+- **`handler.go`** (`internal/admin/handler.go`)：
+  - 无需新增路由 — 复用现有 `PUT /admin/api/users/{id}` 和 `POST /admin/api/users`
+
+**产出物**：Admin API 完整支持新字段，provider 删除保护生效。
+
+#### T04 详情：前端页面与交互
+
+**范围**：
+
+- **`index.html`**：
+  - **创建用户弹窗**（`#create-user-modal`）：在有效期选择器之后、提交按钮之前，增加：
     ```html
     <div class="form-group">
-      <label for="new-expiry-type">有效期</label>
-      <select id="new-expiry-type">
-        <option value="permanent">永久</option>
-        <option value="7">7天</option>
-        <option value="30">30天</option>
-        <option value="custom">自定义日期</option>
-      </select>
+        <label for="new-route-mode">路由模式</label>
+        <select id="new-route-mode">
+            <option value="auto">自动（全局路由）</option>
+            <option value="fixed">固定上游</option>
+        </select>
     </div>
-    <div class="form-group" id="new-expiry-date-group" style="display:none">
-      <label for="new-expiry-date">到期日期</label>
-      <input type="date" id="new-expiry-date">
+    <div class="form-group" id="new-fixed-provider-group" style="display:none">
+        <label for="new-fixed-provider">固定上游</label>
+        <select id="new-fixed-provider"></select>
+    </div>
+    <div class="form-group">
+        <label for="new-fixed-multiplier">固定倍率（留空=全局）</label>
+        <input type="number" id="new-fixed-multiplier" min="0.1" max="100.0" step="0.1" placeholder="留空使用全局倍率">
     </div>
     ```
-  - **延期弹窗**（新增 `#extend-user-modal`）：参考 PRD 4.3 设计，含当前到期显示、延期方式 radio（+7天/+30天/自定义日期）、日期选择器、预览行、确认/取消按钮
-  - **用户表格**：表头 `<th>有效期</th>` 插入在"Token"之后、"状态"之前（即原第7列位置），colspan 从 9 改为 10
-- `app.js`：
-  - `createUser()`：读取 `#new-expiry-type` → 计算 `expires_at`（7天/30天→`new Date(Date.now()+N*864e7).toISOString()`；自定义→`#new-expiry-date` 值；永久→不传），加入 request body
-  - `loadUsers()`：渲染 `expires_at` 列（格式 `yyyy-MM-dd` 或"永久"）；按 `expires_at < now` → 整行 `class="row-expired"`；`expires_at` 在 7 天内 → 有效期文字 `class="text-warning"`（橙色）
-  - 新增 `extendUser(id, username, currentExpiry)` → 打开延期弹窗，填充当前到期信息
-  - 新增 `submitExtend()` → 调 `POST /admin/api/users/{id}/extend` → 成功后刷新列表 + toast
-  - `loadOverview()`：展示 `data.expiring_soon` 统计卡片
-  - 新增 `#new-expiry-type` 的 change 事件 → 选"自定义"时展示日期选择器
-  - 延期弹窗 radio change 事件 → 实时更新预览日期
-- `style.css`：新增样式：
-  ```css
-  .row-expired td { color: #dc2626; }
-  .text-warning { color: #ea580c; font-weight: 500; }
-  ```
+  - **编辑用户弹窗**（`#update-user-modal`）：在现有字段之后、提交按钮之前，增加：
+    ```html
+    <div class="form-group">
+        <label for="update-route-mode">路由模式</label>
+        <select id="update-route-mode">
+            <option value="">不修改</option>
+            <option value="auto">自动（全局路由）</option>
+            <option value="fixed">固定上游</option>
+        </select>
+    </div>
+    <div class="form-group" id="update-fixed-provider-group" style="display:none">
+        <label for="update-fixed-provider">固定上游</label>
+        <select id="update-fixed-provider"></select>
+    </div>
+    <div class="form-group">
+        <label for="update-fixed-multiplier">固定倍率（不填=不修改，0=清除）</label>
+        <input type="number" id="update-fixed-multiplier" min="0" max="100.0" step="0.1" placeholder="不填则不修改">
+    </div>
+    ```
 
-**产出物**：前端交互完整，创建/延期/列表过期标记均可用。
+- **`app.js`**：
+  - `createUser()`: 读取 `#new-route-mode`, `#new-fixed-provider`, `#new-fixed-multiplier`，加入 request body
+  - `editUser()`: 从行数据读取 `route_mode`, `fixed_provider`, `fixed_multiplier` 并填入编辑弹窗
+  - `updateUser()`: 读取 `#update-route-mode`, `#update-fixed-provider`, `#update-fixed-multiplier`，加入 request body
+  - `loadUsers()`: 表格增加"路由/倍率"列，显示 `route_mode` + `fixed_multiplier` 缩略信息
+  - 新增事件处理：`#new-route-mode` change → 选 `fixed` 时显示 `#new-fixed-provider-group`
+  - 新增事件处理：`#update-route-mode` change → 选 `fixed` 时显示 `#update-fixed-provider-group`
+  - `loadProviders()` 后更新所有 provider 下拉选项（复用现有 `providerMap`）
+
+- **`style.css`**：无需新增样式（复用现有 `.form-group`, `select`, `input` 体系）
+
+**产出物**：前端完整支持路由模式 + 倍率配置。
+
+#### T05 详情：集成验证
+
+**范围**：
+- 运行 `make ci`（fmt + vet + test + build-linux + shellcheck），确保无回归
+- 手动验证关键路径：
+  1. 创建 fixed 路由用户 → API 请求走到指定上游
+  2. 创建 fixed 倍率用户 → 配额扣除按固定倍率计算
+  3. 禁用 fixed_provider 指向的上游 → 用户请求返回 503
+  4. 删除有 fixed 用户的 provider → 阻止并提示用户名
+  5. admin 用户创建/编辑时 route_mode 强制 auto
+  6. 审计日志记录 route_mode/fixed_provider/fixed_multiplier 变更
+
+**产出物**：`make ci` 通过，手动验证清单完成。
 
 ---
 
 ### 8. 共享约定
 
 ```
-- 时间格式：统一使用 RFC3339 (time.RFC3339)，即 "2006-01-02T15:04:05+08:00"
+- 路由模式值："auto" | "fixed"，默认 "auto"
+- 固定上游值：空字符串 "" 表示未设置
+- 固定倍率：sql.NullFloat64 — Valid=false 时走全局 GetEffectiveMultiplier
+- 倍率范围：0.1 ~ 100.0（与全局 time_multipliers 保持一致的语义）
+- admin 角色保护：两处 — 写入时强写 route_mode='auto', fixed_provider=''；读取时 role=admin 忽略 route check
+- 审计日志 action：
+  - 创建时含路由/倍率 → action="user.create"，detail 包含 JSON
+  - 修改路由/倍率 → action="user.route_update"，detail 描述变化字段
+- 时间格式：统一使用 RFC3339 (time.RFC3339)
 - 时区：所有服务器时间比较使用 time.Now().In(timeutil.ShanghaiTZ)
-- NULL 语义：expires_at = "" (Go) / NULL (SQLite) = 永久有效
-- 403 code：key_expired（与现有 key_revoked 平级，均在 error.code 和 error.type 中返回）
-- Admin 保护：两处 — 写入时 role=admin 强写 NULL；认证时 role=admin 跳过检查
-- 延期即启用：ExtendUserExpiry 同时 SET status='active'（Q1 决策）
-- 审计日志格式：action="extend", target_type="user", target_id=<userID>, detail="expires_at: <old> → <new>"
-- 前端日期计算：使用客户端 Date 对象（用户本地时间），传给后端的是 ISO 8601/RFC3339 字符串
-- 现有测试：T01/T02 完成后必须 make ci 通过，不引入回归
+- 503 code：provider_not_available（在 error.code 和 error.type 中返回）
+- 热路径：route_mode/fixed_provider 从 context 读取（零额外 DB 查询）；fixed_multiplier 1次 索引查询
+- 前端日期计算：使用客户端 Date 对象
+- 现有测试：T01/T02 完成后必须 make test 通过，不引入回归
+- Router nil 保护：fixed 路由需要 Router 实例，nil 时直接返回 503
 ```
 
 ---
@@ -395,9 +685,15 @@ sequenceDiagram
 
 ```mermaid
 graph TD
-    T01["T01: 数据模型与迁移层<br/>migrations.go + user.go + call_log.go"]
-    T02["T02: 认证中间件与 API 端点<br/>middleware.go + users.go + handler.go + overview.go"]
-    T03["T03: 前端页面与交互逻辑<br/>index.html + app.js + style.css"]
+    T01["T01: 数据库迁移 + 数据模型层<br/>migrations.go + user.go + quota.go"]
+    T02["T02: 认证中间件 + 代理热路径 + 路由扩展<br/>middleware.go + handler.go + selector.go"]
+    T03["T03: Provider安全约束 + Admin API<br/>store.go + users.go + handler.go"]
+    T04["T04: 前端页面与交互<br/>index.html + app.js + style.css"]
+    T05["T05: 集成验证<br/>make ci + 手动验证"]
 
-    T01 --> T02 --> T03
+    T01 --> T02
+    T01 --> T03
+    T02 --> T05
+    T03 --> T04
+    T04 --> T05
 ```

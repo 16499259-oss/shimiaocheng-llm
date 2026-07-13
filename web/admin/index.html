@@ -51,8 +51,8 @@
                     <button id="create-user-btn" class="btn btn-primary">+ 创建用户</button>
                 </div>
                 <table class="table" id="users-table">
-                    <thead><tr><th>ID</th><th>用户名</th><th>Key</th><th>5h 配额</th><th>总配额</th><th>Token</th><th>有效期</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
-                    <tbody id="users-tbody"><tr><td colspan="10" class="text-center">加载中...</td></tr></tbody>
+                    <thead><tr><th>ID</th><th>用户名</th><th>Key</th><th>5h 配额</th><th>总配额</th><th>Token</th><th>路由/倍率</th><th>有效期</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
+                    <tbody id="users-tbody"><tr><td colspan="11" class="text-center">加载中...</td></tr></tbody>
                 </table>
                 <!-- Calls sub-section -->
                 <div id="calls-section" style="display:none; margin-top:24px;">
@@ -246,6 +246,21 @@
                     <label for="new-expiry-date">到期日期</label>
                     <input type="date" id="new-expiry-date">
                 </div>
+                <div class="form-group">
+                    <label for="new-route-mode">路由模式</label>
+                    <select id="new-route-mode">
+                        <option value="auto">自动（全局路由）</option>
+                        <option value="fixed">固定上游</option>
+                    </select>
+                </div>
+                <div class="form-group" id="new-fixed-provider-group" style="display:none">
+                    <label for="new-fixed-provider">固定上游</label>
+                    <select id="new-fixed-provider"></select>
+                </div>
+                <div class="form-group">
+                    <label for="new-fixed-multiplier">固定倍率（留空=全局）</label>
+                    <input type="number" id="new-fixed-multiplier" min="0.1" max="100.0" step="0.1" placeholder="留空使用全局倍率">
+                </div>
                 <div id="create-user-result" class="result-box hidden"></div>
                 <button type="submit" class="btn btn-primary btn-block">创建</button>
             </form>
@@ -280,6 +295,22 @@
                 <div class="form-group"><label for="update-quota-total">总配额上限</label><input type="number" id="update-quota-total" min="1"></div>
                 <div class="form-group"><label for="update-status">状态</label><select id="update-status"><option value="">不修改</option><option value="active">启用</option><option value="disabled">禁用</option></select></div>
                 <div class="form-group"><label><input type="checkbox" id="update-regenerate-key"> 重新生成 Key</label></div>
+                <div class="form-group">
+                    <label for="update-route-mode">路由模式</label>
+                    <select id="update-route-mode">
+                        <option value="">不修改</option>
+                        <option value="auto">自动（全局路由）</option>
+                        <option value="fixed">固定上游</option>
+                    </select>
+                </div>
+                <div class="form-group" id="update-fixed-provider-group" style="display:none">
+                    <label for="update-fixed-provider">固定上游</label>
+                    <select id="update-fixed-provider"></select>
+                </div>
+                <div class="form-group">
+                    <label for="update-fixed-multiplier">固定倍率（不填=不修改，0=清除）</label>
+                    <input type="number" id="update-fixed-multiplier" min="0" max="100.0" step="0.1" placeholder="不填则不修改">
+                </div>
                 <div id="update-user-result" class="result-box hidden"></div>
                 <button type="submit" class="btn btn-primary btn-block">保存</button>
             </form>

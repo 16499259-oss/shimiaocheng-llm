@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"llm_api_gateway/internal/config"
@@ -249,8 +250,8 @@ func (s *ProviderStore) UpdateProvider(slug string, updates map[string]any) (*mo
 }
 
 // DeleteProvider deletes a provider by slug. Before deletion it checks whether
-// the provider is referenced by routing rules or model mappings; if so, it
-// returns an error with details.
+// the provider is referenced by routing rules, model mappings, or user fixed_provider
+// settings; if so, it returns an error with details.
 func (s *ProviderStore) DeleteProvider(slug string) error {
 	// Check routing rules reference.
 	var ruleCount int
@@ -274,6 +275,16 @@ func (s *ProviderStore) DeleteProvider(slug string) error {
 		return fmt.Errorf("cannot delete provider %q: referenced by %d model mapping(s)", slug, mappingCount)
 	}
 
+	// Check fixed-provider user references (T03: prevent deletion when users pin this provider).
+	usernames, err := models.GetUsersByFixedProvider(s.db, slug)
+	if err != nil {
+		return fmt.Errorf("check fixed users: %w", err)
+	}
+	if len(usernames) > 0 {
+		return fmt.Errorf("cannot delete provider %q: referenced by %d user(s) as fixed provider: %s",
+			slug, len(usernames), strings.Join(usernames, ", "))
+	}
+
 	// Also check if it's the last provider — refuse if it's the only one.
 	var totalCount int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM providers`).Scan(&totalCount); err != nil {
@@ -283,7 +294,7 @@ func (s *ProviderStore) DeleteProvider(slug string) error {
 		return fmt.Errorf("cannot delete the last provider")
 	}
 
-	_, err := s.db.Exec(`DELETE FROM providers WHERE slug = ?`, slug)
+	_, err = s.db.Exec(`DELETE FROM providers WHERE slug = ?`, slug)
 	if err != nil {
 		return fmt.Errorf("delete provider: %w", err)
 	}
