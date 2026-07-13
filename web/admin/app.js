@@ -445,6 +445,9 @@ async function loadUsers() {
 
 function refreshUsers() {
     loadUsers();
+    if (currentCallsUserId && document.getElementById('calls-section').style.display !== 'none') {
+        loadCalls();
+    }
 }
 
 async function createUser(e) {
