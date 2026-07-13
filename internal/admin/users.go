@@ -208,8 +208,8 @@ func (h *Handler) GetUserCalls(w http.ResponseWriter, r *http.Request) {
 }
 
 // DeleteUser handles DELETE /admin/api/users/{id}.
-// Soft-deletes the user by setting status to "deleted". The user's sub_key
-// is immediately revoked — all subsequent API calls with this key get 403.
+// Hard-deletes the user row from the database. Sub-keys and call logs are
+// automatically cleaned up via ON DELETE CASCADE foreign key constraints.
 func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	userID, err := strconv.ParseInt(idStr, 10, 64)
@@ -231,7 +231,7 @@ func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := models.UpdateUserStatus(h.DB, userID, "deleted"); err != nil {
+	if _, err := h.DB.Exec("DELETE FROM users WHERE id = ?", userID); err != nil {
 		log.Printf("ERROR: delete user %d: %v", userID, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to delete user"})
 		return
