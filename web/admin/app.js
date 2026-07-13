@@ -8,6 +8,7 @@ let providerMap = {}; // slug -> name for dropdowns
 // ===== Initialization =====
 document.addEventListener('DOMContentLoaded', () => {
     loadOverview();
+    loadProviders(); // preload provider map for route mode dropdowns
     setupEventListeners();
 
     // Restore tab from URL hash, default to dashboard
