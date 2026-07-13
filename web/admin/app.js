@@ -9,14 +9,18 @@ let providerMap = {}; // slug -> name for dropdowns
 document.addEventListener('DOMContentLoaded', () => {
     loadOverview();
     setupEventListeners();
-    // Preload first visible tab
-    switchTab('dashboard');
+
+    // Restore tab from URL hash, default to dashboard
+    const hash = location.hash.replace(/^#/, '');
+    const initialTab = VALID_TABS.includes(hash) ? hash : 'dashboard';
+    switchTab(initialTab);
 });
 
 // ===== Event Listeners =====
 function setupEventListeners() {
     document.getElementById('logout-btn').addEventListener('click', logout);
     document.getElementById('create-user-btn').addEventListener('click', () => showModal('create-user-modal'));
+    document.getElementById('refresh-users-btn').addEventListener('click', refreshUsers);
     document.getElementById('create-user-form').addEventListener('submit', createUser);
     document.getElementById('update-user-form').addEventListener('submit', updateUser);
     document.getElementById('extend-user-form').addEventListener('submit', submitExtend);
@@ -35,6 +39,8 @@ function setupEventListeners() {
 }
 
 // ===== Tab Switching =====
+const VALID_TABS = ['dashboard', 'users', 'providers', 'mappings', 'routing', 'multipliers', 'audit'];
+
 function switchTab(tabName) {
     // Update nav active state
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
@@ -56,6 +62,9 @@ function switchTab(tabName) {
         case 'multipliers': loadMultipliers(); break;
         case 'audit': loadAuditLogs(); break;
     }
+
+    // Persist current tab in URL hash for refresh resilience
+    location.hash = tabName;
 }
 
 // ===== API Helpers =====
@@ -432,6 +441,10 @@ async function loadUsers() {
             </tr>`;
         }).join('');
     } catch (err) { console.error('Failed to load users:', err); }
+}
+
+function refreshUsers() {
+    loadUsers();
 }
 
 async function createUser(e) {
