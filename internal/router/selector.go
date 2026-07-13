@@ -16,6 +16,7 @@ package router
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -227,11 +228,28 @@ func (r *Router) defaultProvider(table *provider.ProviderTable) (Provider, error
 // model name for the given provider. If there is no mapping for the external
 // name or for that provider, the original external name is returned unchanged
 // (passthrough) — it never errors.
+//
+// Matching is case-insensitive: exact match is tried first (hot path), and if
+// it fails, a case-insensitive scan across all mapping keys is performed as a
+// fallback. This handles clients such as Cursor that may send model names with
+// different casing (e.g. "GLM-5.2" vs the stored "glm-5.2").
 func (r *Router) RewriteModel(external, providerID string) string {
 	table := r.table.Load().(*provider.ProviderTable)
 	if m, ok := table.Mappings[external]; ok {
 		if real, ok2 := m[providerID]; ok2 && real != "" {
 			return real
+		}
+	}
+	// Case-insensitive fallback for clients that send model names with
+	// different casing (e.g. Cursor sends "GLM-5.2" but mapping is "glm-5.2").
+	for key, m := range table.Mappings {
+		if strings.EqualFold(key, external) {
+			if real, ok := m[providerID]; ok && real != "" {
+				return real
+			}
+			// Found a case-insensitive match for the external model name
+			// but no per-provider override — passthrough.
+			break
 		}
 	}
 	return external

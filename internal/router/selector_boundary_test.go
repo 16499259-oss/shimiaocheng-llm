@@ -118,15 +118,18 @@ func TestResolveProvider_NoFallbackWhenTargetHasNoKey(t *testing.T) {
 	}
 }
 
-// TestRewriteModel_CaseSensitivity verifies that external/provider lookups are
-// exact (case-sensitive); a differing case must passthrough unchanged.
+// TestRewriteModel_CaseSensitivity verifies that external model names are
+// matched case-insensitively (e.g. "GLM-5.2" matches stored "glm-5.2"), while
+// provider IDs remain case-sensitive.
 func TestRewriteModel_CaseSensitivity(t *testing.T) {
 	database := newRouterTestDB(t)
 	r := newRouterWithConfig(t, database, testConfig())
 
-	if got := r.RewriteModel("GLM-5.2", "openai"); got != "GLM-5.2" {
-		t.Fatalf("external case mismatch should passthrough, got %q", got)
+	// External model name case-insensitive: "GLM-5.2" -> "glm-5.2" -> openai -> "gpt-4o".
+	if got := r.RewriteModel("GLM-5.2", "openai"); got != "gpt-4o" {
+		t.Fatalf("external case-insensitive match should resolve to gpt-4o, got %q", got)
 	}
+	// Provider IDs remain case-sensitive: "OPENAI" != "openai".
 	if got := r.RewriteModel("glm-5.2", "OPENAI"); got != "glm-5.2" {
 		t.Fatalf("provider-id case mismatch should passthrough, got %q", got)
 	}
