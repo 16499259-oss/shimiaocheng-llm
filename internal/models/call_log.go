@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"llm_api_gateway/internal/timeutil"
 )
 
 // CallLog represents a single API call record.
@@ -149,6 +151,7 @@ type DashboardOverview struct {
 	TotalCallsToday  int `json:"total_calls_today"`
 	AvgLatencyMs     int `json:"avg_latency_ms"`
 	TotalTokensToday int `json:"total_tokens_today"`
+	ExpiringSoon     int `json:"expiring_soon"`
 }
 
 // GetDashboardOverview queries aggregated stats.
@@ -181,6 +184,17 @@ func GetDashboardOverview(db *sql.DB) (*DashboardOverview, error) {
 	if totalTokens.Valid {
 		o.TotalTokensToday = int(totalTokens.Int64)
 	}
+
+	// Expiring soon: active non-admin users whose expires_at is between now and now+7d.
+	nowShanghai := time.Now().In(timeutil.ShanghaiTZ)
+	nowStr := nowShanghai.Format(time.RFC3339)
+	sevenDaysStr := nowShanghai.AddDate(0, 0, 7).Format(time.RFC3339)
+	var expiringSoon int
+	db.QueryRow(
+		`SELECT COUNT(*) FROM users WHERE expires_at != '' AND expires_at >= ? AND expires_at < ? AND status = 'active'`,
+		nowStr, sevenDaysStr,
+	).Scan(&expiringSoon)
+	o.ExpiringSoon = expiringSoon
 
 	return o, nil
 }

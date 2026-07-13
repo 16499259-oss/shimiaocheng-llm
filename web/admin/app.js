@@ -19,6 +19,7 @@ function setupEventListeners() {
     document.getElementById('create-user-btn').addEventListener('click', () => showModal('create-user-modal'));
     document.getElementById('create-user-form').addEventListener('submit', createUser);
     document.getElementById('update-user-form').addEventListener('submit', updateUser);
+    document.getElementById('extend-user-form').addEventListener('submit', submitExtend);
     document.getElementById('close-calls-btn').addEventListener('click', () => {
         document.getElementById('calls-section').style.display = 'none';
     });
@@ -27,6 +28,10 @@ function setupEventListeners() {
     document.getElementById('provider-form').addEventListener('submit', saveProvider);
     document.getElementById('mapping-form').addEventListener('submit', saveMapping);
     document.getElementById('routing-form').addEventListener('submit', saveRoutingRule);
+    // Show/hide custom date picker in create user modal
+    document.getElementById('new-expiry-type').addEventListener('change', function() {
+        document.getElementById('new-expiry-date-group').style.display = this.value === 'custom' ? '' : 'none';
+    });
 }
 
 // ===== Tab Switching =====
@@ -82,6 +87,7 @@ async function loadOverview() {
         document.getElementById('stat-calls-today').textContent = data.total_calls_today;
         document.getElementById('stat-tokens-today').textContent = data.total_tokens_today.toLocaleString();
         document.getElementById('stat-avg-latency').textContent = data.avg_latency_ms + ' ms';
+        document.getElementById('stat-expiring-soon').textContent = data.expiring_soon || 0;
     } catch (err) { console.error('Failed to load overview:', err); }
 }
 
@@ -393,16 +399,31 @@ async function loadUsers() {
     try {
         const data = await apiFetch('api/users');
         const tbody = document.getElementById('users-tbody');
-        if (!data.data || data.data.length === 0) { tbody.innerHTML = '<tr><td colspan="9" class="text-center">暂无用户</td></tr>'; return; }
+        if (!data.data || data.data.length === 0) { tbody.innerHTML = '<tr><td colspan="10" class="text-center">暂无用户</td></tr>'; return; }
+        const now = new Date();
         tbody.innerHTML = data.data.map(u => {
             const quota5h = `${u.quota_5h_used} / ${u.quota_5h_limit}`;
             const quotaTotal = `${u.quota_total_used.toLocaleString()} / ${u.quota_total_limit.toLocaleString()}`;
             const tokens = (u.total_tokens || 0).toLocaleString();
-            const s = u.status === 'active' ? '<span class="badge badge-active">启用</span>' : '<span class="badge badge-disabled">禁用</span>';
-            return `<tr>
+            let s = u.status === 'active' ? '<span class="badge badge-active">启用</span>' : '<span class="badge badge-disabled">禁用</span>';
+            // Expiry cell
+            let expiryHtml = '永久';
+            let rowClass = '';
+            if (u.expires_at) {
+                const expDate = new Date(u.expires_at);
+                expiryHtml = expDate.toLocaleDateString('zh-CN');
+                if (expDate < now) {
+                    rowClass = ' class="row-expired"';
+                    s = '<span class="badge badge-error">已过期</span>';
+                } else if ((expDate - now) < 7 * 86400000) {
+                    expiryHtml = `<span class="text-warning">${expiryHtml}</span>`;
+                }
+            }
+            return `<tr${rowClass}>
                 <td>${u.id}</td><td>${escapeHtml(u.username)}</td><td><code>${escapeHtml(u.sub_key_preview)}</code></td>
-                <td>${quota5h}</td><td>${quotaTotal}</td><td>${tokens}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
+                <td>${quota5h}</td><td>${quotaTotal}</td><td>${tokens}</td><td>${expiryHtml}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
                 <td><div class="btn-group">
+                    <button class="btn btn-outline btn-sm" onclick="extendUser(${u.id},'${escapeAttr(u.username)}','${escapeAttr(u.expires_at || '')}')">🕐 延期</button>
                     <button class="btn btn-outline btn-sm" onclick="shareUser('${escapeAttr(u.username)}',${u.id})">📋 分享</button>
                     <button class="btn btn-outline btn-sm" onclick="editUser(${u.id},'${escapeAttr(u.status)}',${u.quota_5h_limit},${u.quota_total_limit})">编辑</button>
                     <button class="btn btn-outline btn-sm" onclick="viewCalls(${u.id},'${escapeAttr(u.username)}')">记录</button>
@@ -418,9 +439,21 @@ async function createUser(e) {
     const username = document.getElementById('new-username').value.trim();
     const q5 = parseInt(document.getElementById('new-quota-5h').value) || 100;
     const qt = parseInt(document.getElementById('new-quota-total').value) || 10000;
+    // Calculate expires_at
+    const expiryType = document.getElementById('new-expiry-type').value;
+    let expiresAt = '';
+    if (expiryType === '7' || expiryType === '30') {
+        const days = parseInt(expiryType);
+        expiresAt = new Date(Date.now() + days * 86400000).toISOString();
+    } else if (expiryType === 'custom') {
+        const dateVal = document.getElementById('new-expiry-date').value;
+        if (dateVal) {
+            expiresAt = new Date(dateVal + 'T00:00:00+08:00').toISOString();
+        }
+    }
     try {
         const data = await apiFetch('api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, quota_5h_limit: q5, quota_total_limit: qt }) });
+            body: JSON.stringify({ username, quota_5h_limit: q5, quota_total_limit: qt, expires_at: expiresAt }) });
         if (data.sub_key) {
             document.getElementById('subkey-value').textContent = data.sub_key;
             document.getElementById('share-all-text').value = buildShareText(data.sub_key);
@@ -473,6 +506,71 @@ async function deleteUser(id, username) {
     if (!confirm(`确定要删除用户「${username}」吗？`)) return;
     try { await apiFetch('api/users/' + id, { method: 'DELETE' }); loadUsers(); loadOverview(); }
     catch (err) { alert('删除失败: ' + err.message); }
+}
+
+// ===== Extend User Expiry =====
+function extendUser(id, username, currentExpiry) {
+    document.getElementById('extend-user-id').value = id;
+    document.getElementById('extend-username').textContent = username;
+    const expiryDisplay = currentExpiry ? formatDate(currentExpiry) : '永久';
+    document.getElementById('extend-current-expiry').textContent = expiryDisplay;
+    // Store current expiry for preview calculation (P1-2).
+    window._extendCurrentExpiry = currentExpiry || '';
+    // Reset to default: +30 days
+    const radio30 = document.querySelector('input[name="extend-type"][value="30"]');
+    if (radio30) radio30.checked = true;
+    document.getElementById('extend-custom-date').value = '';
+    document.getElementById('extend-custom-date-group').style.display = 'none';
+    updateExtendPreview();
+    showModal('extend-user-modal');
+}
+
+function updateExtendPreview() {
+    const typeEl = document.querySelector('input[name="extend-type"]:checked');
+    if (!typeEl) return;
+    const type = typeEl.value;
+    const customDateGroup = document.getElementById('extend-custom-date-group');
+    const preview = document.getElementById('extend-preview-text');
+
+    if (type === 'custom') {
+        customDateGroup.style.display = '';
+        const dateVal = document.getElementById('extend-custom-date').value;
+        preview.textContent = dateVal || '请选择日期';
+    } else {
+        customDateGroup.style.display = 'none';
+        const days = parseInt(type);
+        // P1-2: base on existing expires_at if available, otherwise NOW.
+        const currentExpiry = window._extendCurrentExpiry || '';
+        const baseDate = currentExpiry ? new Date(currentExpiry) : new Date();
+        const newDate = new Date(baseDate.getTime() + days * 86400000);
+        preview.textContent = newDate.toLocaleDateString('zh-CN');
+    }
+}
+
+async function submitExtend(e) {
+    e.preventDefault();
+    const id = document.getElementById('extend-user-id').value;
+    const typeEl = document.querySelector('input[name="extend-type"]:checked');
+    if (!typeEl) { showToast('请选择延期方式', 'error'); return; }
+    const type = typeEl.value;
+
+    let body = {};
+    if (type === 'custom') {
+        const dateVal = document.getElementById('extend-custom-date').value;
+        if (!dateVal) { showToast('请选择日期', 'error'); return; }
+        body.until = new Date(dateVal + 'T00:00:00+08:00').toISOString();
+    } else {
+        body.days = parseInt(type);
+    }
+
+    try {
+        const data = await apiFetch('api/users/' + id + '/extend', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        closeModal('extend-user-modal');
+        showToast(data.message || '延期成功', 'success');
+        loadUsers(); loadOverview();
+    } catch (err) { showToast('延期失败: ' + err.message, 'error'); }
 }
 
 async function viewCalls(userId, username) {

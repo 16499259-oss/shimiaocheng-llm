@@ -7,8 +7,10 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"llm_api_gateway/internal/models"
+	"llm_api_gateway/internal/timeutil"
 )
 
 // contextKey is a private type for context keys to avoid collisions.
@@ -69,6 +71,15 @@ func (m *Middleware) SubKeyAuth(next http.Handler) http.Handler {
 			}
 			writeAuthError(w, http.StatusForbidden, msg, "key_revoked")
 			return
+		}
+
+		// Check if user's API key has expired (admin users are exempt).
+		if user.Role != "admin" && user.ExpiresAt != "" {
+			expiresAt, err := time.Parse(time.RFC3339, user.ExpiresAt)
+			if err == nil && time.Now().In(timeutil.ShanghaiTZ).After(expiresAt) {
+				writeAuthError(w, http.StatusForbidden, "API key has expired", "key_expired")
+				return
+			}
 		}
 
 		// Set user info in context

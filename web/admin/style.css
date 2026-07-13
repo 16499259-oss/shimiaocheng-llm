@@ -383,3 +383,13 @@ body {
     .table { font-size: 0.78rem; }
     .table th, .table td { padding: 6px 8px; }
 }
+
+/* ── Expiry Row Styles ── */
+.row-expired td { color: #dc2626; }
+.row-expired td code { color: #dc2626; }
+
+.text-warning { color: #ea580c; font-weight: 500; }
+
+/* ── Radio Group ── */
+.radio-group { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 4px 0; }
+.radio-group label { font-weight: 400; cursor: pointer; }

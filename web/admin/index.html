@@ -39,6 +39,7 @@
                     <div class="stat-card"><div class="stat-label">今日调用</div><div class="stat-value" id="stat-calls-today">-</div></div>
                     <div class="stat-card"><div class="stat-label">今日 Token</div><div class="stat-value" id="stat-tokens-today">-</div></div>
                     <div class="stat-card"><div class="stat-label">平均延迟</div><div class="stat-value" id="stat-avg-latency">-</div></div>
+                    <div class="stat-card"><div class="stat-label">即将到期</div><div class="stat-value" id="stat-expiring-soon">-</div></div>
                 </div>
             </section>
 
@@ -49,8 +50,8 @@
                     <button id="create-user-btn" class="btn btn-primary">+ 创建用户</button>
                 </div>
                 <table class="table" id="users-table">
-                    <thead><tr><th>ID</th><th>用户名</th><th>Key</th><th>5h 配额</th><th>总配额</th><th>Token</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
-                    <tbody id="users-tbody"><tr><td colspan="9" class="text-center">加载中...</td></tr></tbody>
+                    <thead><tr><th>ID</th><th>用户名</th><th>Key</th><th>5h 配额</th><th>总配额</th><th>Token</th><th>有效期</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
+                    <tbody id="users-tbody"><tr><td colspan="10" class="text-center">加载中...</td></tr></tbody>
                 </table>
                 <!-- Calls sub-section -->
                 <div id="calls-section" style="display:none; margin-top:24px;">
@@ -231,6 +232,19 @@
                 <div class="form-group"><label for="new-username">用户名 *</label><input type="text" id="new-username" required placeholder="用户名"></div>
                 <div class="form-group"><label for="new-quota-5h">5h 配额上限 (默认 100)</label><input type="number" id="new-quota-5h" value="100" min="1"></div>
                 <div class="form-group"><label for="new-quota-total">总配额上限 (默认 10000)</label><input type="number" id="new-quota-total" value="10000" min="1"></div>
+                <div class="form-group">
+                    <label for="new-expiry-type">有效期</label>
+                    <select id="new-expiry-type">
+                        <option value="permanent">永久</option>
+                        <option value="7">7天</option>
+                        <option value="30">30天</option>
+                        <option value="custom">自定义日期</option>
+                    </select>
+                </div>
+                <div class="form-group" id="new-expiry-date-group" style="display:none">
+                    <label for="new-expiry-date">到期日期</label>
+                    <input type="date" id="new-expiry-date">
+                </div>
                 <div id="create-user-result" class="result-box hidden"></div>
                 <button type="submit" class="btn btn-primary btn-block">创建</button>
             </form>
@@ -267,6 +281,40 @@
                 <div class="form-group"><label><input type="checkbox" id="update-regenerate-key"> 重新生成 Key</label></div>
                 <div id="update-user-result" class="result-box hidden"></div>
                 <button type="submit" class="btn btn-primary btn-block">保存</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Extend User Modal -->
+    <div id="extend-user-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>延期有效期 — <span id="extend-username"></span></h3>
+                <button class="modal-close" onclick="closeModal('extend-user-modal')">&times;</button>
+            </div>
+            <form id="extend-user-form">
+                <input type="hidden" id="extend-user-id">
+                <div class="form-group">
+                    <label>当前有效期</label>
+                    <div id="extend-current-expiry" style="font-weight:500;padding:8px 0;"></div>
+                </div>
+                <div class="form-group">
+                    <label>延期方式</label>
+                    <div class="radio-group">
+                        <label style="margin-right:16px;"><input type="radio" name="extend-type" value="7" onchange="updateExtendPreview()"> +7天</label>
+                        <label style="margin-right:16px;"><input type="radio" name="extend-type" value="30" checked onchange="updateExtendPreview()"> +30天</label>
+                        <label><input type="radio" name="extend-type" value="custom" onchange="updateExtendPreview()"> 自定义日期</label>
+                    </div>
+                </div>
+                <div class="form-group" id="extend-custom-date-group" style="display:none">
+                    <label for="extend-custom-date">选择日期</label>
+                    <input type="date" id="extend-custom-date" onchange="updateExtendPreview()">
+                </div>
+                <div class="form-group" id="extend-preview-group">
+                    <label>新有效期</label>
+                    <div id="extend-preview-text" style="color:var(--color-primary);font-weight:600;padding:8px 0;"></div>
+                </div>
+                <button type="submit" class="btn btn-primary btn-block">确认延期</button>
             </form>
         </div>
     </div>

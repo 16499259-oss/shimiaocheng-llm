@@ -54,6 +54,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("PUT /api/users/{id}", h.UpdateUser)
 	adminMux.HandleFunc("DELETE /api/users/{id}", h.DeleteUser)
 	adminMux.HandleFunc("GET /api/users/{id}/calls", h.GetUserCalls)
+	adminMux.HandleFunc("POST /api/users/{id}/extend", h.ExtendUser)
 	adminMux.HandleFunc("GET /api/overview", h.GetOverview)
 	adminMux.HandleFunc("GET /api/multipliers", h.ListMultipliers)
 	adminMux.HandleFunc("POST /api/multipliers", h.CreateMultiplier)

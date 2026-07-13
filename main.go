@@ -254,7 +254,7 @@ func initAdminPassword(conn *sql.DB, password string, default5hLimit, defaultTot
 
 		_, err := models.CreateUser(
 			conn, "admin", string(hashedPassword), placeholderHash, placeholderPreview,
-			"admin", "active", 1000000, 100000000,
+			"admin", "active", "", 1000000, 100000000,
 		)
 		if err != nil {
 			log.Fatalf("Failed to create admin user: %v", err)

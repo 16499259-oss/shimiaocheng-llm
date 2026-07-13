@@ -2,12 +2,15 @@ package admin
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"llm_api_gateway/internal/auth"
 	"llm_api_gateway/internal/models"
+	"llm_api_gateway/internal/timeutil"
 )
 
 // createUserRequest is the JSON body for POST /admin/api/users.
@@ -15,6 +18,7 @@ type createUserRequest struct {
 	Username        string `json:"username"`
 	Quota5hLimit    int    `json:"quota_5h_limit"`
 	QuotaTotalLimit int    `json:"quota_total_limit"`
+	ExpiresAt       string `json:"expires_at"`
 }
 
 // updateUserRequest is the JSON body for PUT /admin/api/users/{id}.
@@ -23,6 +27,12 @@ type updateUserRequest struct {
 	QuotaTotalLimit *int    `json:"quota_total_limit"`
 	Status          *string `json:"status"`
 	RegenerateKey   *bool   `json:"regenerate_key"`
+}
+
+// extendUserRequest is the JSON body for POST /admin/api/users/{id}/extend.
+type extendUserRequest struct {
+	Days  int    `json:"days"`
+	Until string `json:"until"`
 }
 
 // CreateUser handles POST /admin/api/users.
@@ -57,7 +67,7 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 	user, err := models.CreateUser(
 		h.DB, req.Username, emptyPassHash, subKeyHash, subKeyPreview,
-		"user", "active", req.Quota5hLimit, req.QuotaTotalLimit,
+		"user", "active", req.ExpiresAt, req.Quota5hLimit, req.QuotaTotalLimit,
 	)
 	if err != nil {
 		log.Printf("ERROR: create user: %v", err)
@@ -205,6 +215,87 @@ func (h *Handler) GetUserCalls(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// ExtendUser handles POST /admin/api/users/{id}/extend.
+func (h *Handler) ExtendUser(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	userID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid user ID"})
+		return
+	}
+
+	// Verify user exists.
+	user, err := models.GetUserByID(h.DB, userID)
+	if err != nil || user == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "User not found"})
+		return
+	}
+
+	// Admin users never expire — refuse extension.
+	if user.Role == "admin" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Admin users do not expire"})
+		return
+	}
+
+	var req extendUserRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+		return
+	}
+
+	now := time.Now().In(timeutil.ShanghaiTZ)
+	var newExpiresAt string
+	oldExpiresAt := user.ExpiresAt
+
+	switch {
+	case req.Until != "":
+		// Use the explicit until date directly.
+		newExpiresAt = req.Until
+	case req.Days > 0:
+		// Calculate from current expiry (or NOW if permanent).
+		base := now
+		if oldExpiresAt != "" {
+			parsed, err := time.Parse(time.RFC3339, oldExpiresAt)
+			if err == nil {
+				base = parsed
+			}
+		}
+		newExpiresAt = base.AddDate(0, 0, req.Days).Format(time.RFC3339)
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Provide either 'days' or 'until'"})
+		return
+	}
+
+	if err := models.ExtendUserExpiry(h.DB, userID, newExpiresAt); err != nil {
+		log.Printf("ERROR: extend user expiry: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to extend user expiry"})
+		return
+	}
+
+	// Write audit log.
+	detail := fmt.Sprintf("expires_at: %s → %s", oldExpiresAt, newExpiresAt)
+	if oldExpiresAt == "" {
+		detail = fmt.Sprintf("expires_at: (permanent) → %s", newExpiresAt)
+	}
+	_, _ = h.DB.Exec(
+		`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"extend", "user", strconv.FormatInt(userID, 10), detail, now.Format(time.RFC3339),
+	)
+
+	// Format message for response.
+	parsedNew, _ := time.Parse(time.RFC3339, newExpiresAt)
+	dateDisplay := newExpiresAt
+	if parsedNew.Unix() > 0 {
+		dateDisplay = parsedNew.In(timeutil.ShanghaiTZ).Format("2006-01-02")
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"expires_at": newExpiresAt,
+		"message":    "有效期已更新至 " + dateDisplay,
+	})
 }
 
 // DeleteUser handles DELETE /admin/api/users/{id}.

@@ -18,6 +18,7 @@ type User struct {
 	Status        string `json:"status"`
 	CreatedAt     string `json:"created_at"`
 	UpdatedAt     string `json:"updated_at"`
+	ExpiresAt     string `json:"expires_at"`
 }
 
 // UserWithQuota combines user info with quota info for API responses.
@@ -32,8 +33,13 @@ type UserWithQuota struct {
 }
 
 // CreateUser inserts a new user and associated quota record.
-func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, role, status string, quota5hLimit, quotaTotalLimit int) (*UserWithQuota, error) {
+func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, role, status, expiresAt string, quota5hLimit, quotaTotalLimit int) (*UserWithQuota, error) {
 	now := time.Now().Format(time.RFC3339)
+
+	// Admin users never expire.
+	if role == "admin" {
+		expiresAt = ""
+	}
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -43,9 +49,9 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 
 	// Insert user
 	result, err := tx.Exec(
-		`INSERT INTO users (username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		username, passwordHash, subKeyHash, subKeyPreview, role, status, now, now,
+		`INSERT INTO users (username, password_hash, sub_key_hash, sub_key_preview, role, status, expires_at, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		username, passwordHash, subKeyHash, subKeyPreview, role, status, expiresAt, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert user: %w", err)
@@ -84,6 +90,7 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 			Status:        status,
 			CreatedAt:     now,
 			UpdatedAt:     now,
+			ExpiresAt:     expiresAt,
 		},
 		Quota5hLimit:    quota5hLimit,
 		Quota5hUsed:     0,
@@ -96,9 +103,9 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 func GetUserBySubKeyHash(db *sql.DB, subKeyHash string) (*User, error) {
 	u := &User{}
 	err := db.QueryRow(
-		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at
+		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at, expires_at
 		 FROM users WHERE sub_key_hash = ? AND status != 'deleted'`, subKeyHash,
-	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt, &u.ExpiresAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -113,9 +120,9 @@ func GetUserBySubKeyHash(db *sql.DB, subKeyHash string) (*User, error) {
 func GetUserByID(db *sql.DB, id int64) (*User, error) {
 	u := &User{}
 	err := db.QueryRow(
-		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at
+		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at, expires_at
 		 FROM users WHERE id = ?`, id,
-	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt, &u.ExpiresAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -130,9 +137,9 @@ func GetUserByID(db *sql.DB, id int64) (*User, error) {
 func GetUserByUsername(db *sql.DB, username string) (*User, error) {
 	u := &User{}
 	err := db.QueryRow(
-		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at
+		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at, expires_at
 		 FROM users WHERE username = ?`, username,
-	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt, &u.ExpiresAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -146,7 +153,7 @@ func GetUserByUsername(db *sql.DB, username string) (*User, error) {
 // ListUsers returns all users with their quota information (for admin).
 func ListUsers(db *sql.DB) ([]UserWithQuota, error) {
 	rows, err := db.Query(
-		`SELECT u.id, u.username, u.sub_key_preview, u.role, u.status, u.created_at, u.updated_at,
+		`SELECT u.id, u.username, u.sub_key_preview, u.role, u.status, u.created_at, u.updated_at, u.expires_at,
 		        q.quota_5h_limit, q.quota_5h_used, q.quota_total_limit, q.quota_total_used,
 		        COALESCE(t.total_tokens, 0) AS total_tokens
 		 FROM users u
@@ -165,7 +172,7 @@ func ListUsers(db *sql.DB) ([]UserWithQuota, error) {
 		var uwq UserWithQuota
 		err := rows.Scan(
 			&uwq.ID, &uwq.Username, &uwq.SubKeyPreview, &uwq.Role, &uwq.Status,
-			&uwq.CreatedAt, &uwq.UpdatedAt,
+			&uwq.CreatedAt, &uwq.UpdatedAt, &uwq.ExpiresAt,
 			&uwq.Quota5hLimit, &uwq.Quota5hUsed, &uwq.QuotaTotalLimit, &uwq.QuotaTotalUsed,
 			&uwq.TotalTokens,
 		)
@@ -197,6 +204,20 @@ func RegenerateUserKey(db *sql.DB, userID int64, newSubKeyHash, newSubKeyPreview
 	)
 	if err != nil {
 		return fmt.Errorf("regenerate user key: %w", err)
+	}
+	return nil
+}
+
+// ExtendUserExpiry updates a user's expires_at and sets status to active.
+// Returns an error if the user is an admin (admins never expire).
+func ExtendUserExpiry(db *sql.DB, userID int64, newExpiresAt string) error {
+	now := time.Now().Format(time.RFC3339)
+	_, err := db.Exec(
+		`UPDATE users SET expires_at = ?, status = 'active', updated_at = ? WHERE id = ?`,
+		newExpiresAt, now, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("extend user expiry: %w", err)
 	}
 	return nil
 }

@@ -163,6 +163,15 @@ func RunMigrations(conn *DB) error {
 		}
 	}
 
+	// Add expires_at column to users (idempotent).
+	if !columnExists(conn, "users", "expires_at") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE users ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("migration alter users.expires_at failed: %w", err)
+		}
+	}
+
 	log.Println("Database migrations completed successfully")
 	return nil
 }
