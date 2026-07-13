@@ -50,7 +50,7 @@ func TestGetUserBySubKeyHash_ExcludesDeleted(t *testing.T) {
 	_, err := models.CreateUser(
 		database.Conn,
 		"activeuser", "pw-hash", activeHash, "sk-activ...",
-		"user", "active",
+		"user", "active", "",
 		100, 1000,
 	)
 	if err != nil {
@@ -63,7 +63,7 @@ func TestGetUserBySubKeyHash_ExcludesDeleted(t *testing.T) {
 	deleted, err := models.CreateUser(
 		database.Conn,
 		"deluser", "pw-hash", deletedHash, "sk-delet...",
-		"user", "active",
+		"user", "active", "",
 		100, 1000,
 	)
 	if err != nil {
