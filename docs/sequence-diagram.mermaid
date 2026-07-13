@@ -1,51 +1,22 @@
 sequenceDiagram
-    actor Admin as 管理员
-    participant FE as Admin 前端
-    participant API as Admin Handler
-    participant Store as ProviderStore
-    participant Sec as security
+    participant C as Client
+    participant M as SubKeyAuth Middleware
     participant DB as SQLite
-    participant R as Router
-    participant Table as atomic.Value
+    participant H as ProxyHandler
 
-    Admin->>FE: 填写 Provider 表单
-    FE->>API: POST /admin/api/providers
-    API->>Store: CreateProvider(name, slug, endpoint, apiKey, isDefault)
+    C->>M: POST /v1/chat/completions<br/>Authorization: Bearer sk-xxx
+    M->>M: HashSubKey(subKey)
+    M->>DB: GetUserBySubKeyHash(hash)
+    DB-->>M: User{ID,Status,Role,ExpiresAt}
 
-    Note over Store: 1. 校验 slug 唯一性
-    Store->>DB: SELECT COUNT(*) FROM providers WHERE slug=?
-    DB-->>Store: 0
-
-    Note over Store: 2. 加密 API Key
-    Store->>Sec: Encrypt(apiKey, kek)
-    Sec-->>Store: ciphertext
-
-    Note over Store: 3. 若 isDefault=true，先取消旧默认
-    Store->>DB: UPDATE providers SET is_default=0
-
-    Note over Store: 4. INSERT
-    Store->>DB: INSERT INTO providers
-    DB-->>Store: OK
-
-    Note over Store: 5. 写审计日志
-    Store->>DB: INSERT INTO audit_logs
-    DB-->>Store: OK
-
-    Store-->>API: ProviderRecord
-
-    Note over API: 6. 触发热加载
-    API->>R: Reload()
-    R->>Store: BuildProviderTable()
-    Store->>DB: SELECT * FROM providers WHERE enabled=1
-    DB-->>Store: rows
-    loop 每个 provider
-        Store->>Sec: Decrypt(encrypted_key, kek)
-        Sec-->>Store: plaintext
+    alt user == nil
+        M-->>C: 401 invalid_api_key
+    else status == disabled/deleted
+        M-->>C: 403 key_revoked
+    else Role != "admin" AND ExpiresAt != "" AND ExpiresAt < NOW()
+        M-->>C: 403 key_expired
+    else OK
+        M->>M: ctx.WithValue(user_id, user_role)
+        M->>H: ServeHTTP(w, r.WithContext(ctx))
+        H-->>C: 200 stream
     end
-    Store->>DB: SELECT * FROM model_mappings
-    DB-->>Store: mappings
-    Store-->>R: ProviderTable
-    R->>Table: Store(新快照)
-
-    API-->>FE: 201 Created
-    FE-->>Admin: 创建成功

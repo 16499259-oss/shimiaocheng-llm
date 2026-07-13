@@ -1,0 +1,28 @@
+sequenceDiagram
+    participant A as Admin Browser
+    participant API as Admin API Handler
+    participant M as UserModel
+    participant DB as SQLite
+    participant AL as AuditLogs
+
+    Note over A: === 创建用户 (设置30天有效期) ===
+    A->>API: POST /admin/api/users<br/>{username, quota, expires_at}
+    API->>API: role="user" → expires_at 保留
+    API->>M: CreateUser(..., expires_at="2026-08-15T...")
+    M->>DB: BEGIN TX<br/>INSERT users (..., expires_at)<br/>INSERT quotas (...)<br/>COMMIT
+    DB-->>M: userID
+    M-->>API: UserWithQuota
+    API-->>A: {id, sub_key, ...}
+
+    Note over A: === 延期操作 ===
+    A->>API: POST /admin/api/users/2/extend<br/>{days: 30}
+    API->>M: GetUserByID(2)
+    M->>DB: SELECT ... FROM users WHERE id=2
+    DB-->>M: User{ExpiresAt:"2026-08-15T..."}
+    M-->>API: User
+    API->>API: 计算 newExpiresAt = old + 30d<br/>= "2026-09-14T..."
+    API->>M: ExtendUserExpiry(2, newExpiresAt)
+    M->>DB: UPDATE users SET expires_at=?, status='active', updated_at=? WHERE id=2
+    DB-->>M: OK
+    API->>DB: INSERT INTO audit_logs<br/>(action='extend', target_type='user', target_id='2',<br/>detail='expires_at: 2026-08-15 → 2026-09-14')
+    API-->>A: {expires_at:"2026-09-14T...", message:"有效期已更新至 2026-09-14"}

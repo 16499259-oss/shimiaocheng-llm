@@ -1,137 +1,85 @@
 classDiagram
-    direction TB
-
-    class ProviderRecord {
+    class User {
         +int64 ID
-        +string Name
-        +string Slug
-        +string Endpoint
-        +[]byte EncryptedKey
-        +bool IsDefault
-        +bool Enabled
+        +string Username
+        +string PasswordHash
+        +string SubKeyHash
+        +string SubKeyPreview
+        +string Role
+        +string Status
         +string CreatedAt
         +string UpdatedAt
+        +string ExpiresAt
     }
 
-    class ModelMappingRecord {
-        +int64 ID
-        +string External
-        +string ProviderID
-        +string RealModel
-        +string CreatedAt
+    class UserWithQuota {
+        +User User
+        +int Quota5hLimit
+        +int Quota5hUsed
+        +int QuotaTotalLimit
+        +int QuotaTotalUsed
+        +int64 TotalTokens
+        +string SubKey
     }
 
-    class AuditLogRecord {
-        +int64 ID
-        +string Action
-        +string TargetType
-        +string TargetID
-        +string Detail
-        +string CreatedAt
+    class DashboardOverview {
+        +int TotalUsers
+        +int ActiveUsers
+        +int TotalCalls
+        +int TotalCallsToday
+        +int AvgLatencyMs
+        +int TotalTokensToday
+        +int ExpiringSoon
     }
 
-    class RoutingRule {
-        +int64 ID
-        +string ProviderID
-        +string StartTime
-        +string EndTime
-        +string DaysOfWeek
-        +string Timezone
-        +bool Enabled
+    class createUserRequest {
+        +string Username
+        +int Quota5hLimit
+        +int QuotaTotalLimit
+        +string ExpiresAt
     }
 
-    class ProviderStore {
-        -*sql.DB db
-        -[]byte kek
-        +NewProviderStore(db, kek) *ProviderStore
-        +ListProviders() []ProviderRecord
-        +GetProvider(slug) ProviderRecord
-        +CreateProvider(name,slug,endpoint,apiKey,isDefault) ProviderRecord
-        +UpdateProvider(slug,updates) ProviderRecord
-        +DeleteProvider(slug) error
-        +SetDefaultProvider(slug) error
-        +ListMappings() []ModelMappingRecord
-        +CreateMapping(external,providerID,realModel) ModelMappingRecord
-        +UpdateMapping(id,updates) error
-        +DeleteMapping(id) error
-        +ListRoutingRules() []RoutingRule
-        +CreateRoutingRule(rule) error
-        +UpdateRoutingRule(id,updates) error
-        +DeleteRoutingRule(id) error
-        +ListAuditLogs(page,limit) []AuditLogRecord
-        +WriteAudit(action,targetType,targetID,detail)
-        +BuildProviderTable() ProviderTable
-        +SeedFromConfig(cfg) error
+    class extendUserRequest {
+        +int Days
+        +string Until
     }
 
-    class ProviderTable {
-        +map~string~ProviderEntry Providers
-        +map~string~map~string~string Mappings
-        +string Default
+    class extendUserResponse {
+        +string ExpiresAt
+        +string Message
     }
 
-    class ProviderEntry {
-        +string Slug
-        +string Endpoint
-        +string APIKey
+    class Middleware {
+        +SubKeyAuth(http.Handler) http.Handler
+        +AdminSessionAuth(http.Handler) http.Handler
+        +AdminSessionAuthAPI(http.Handler) http.Handler
     }
 
-    class Router {
-        -*sql.DB db
-        -ProviderStore store
-        -atomic.Value table
-        +NewRouter(db,store) *Router
-        +ResolveProvider(now) Provider
-        +RewriteModel(external,providerID) string
-        +Reload() error
+    class Handler {
+        +CreateUser(w, r)
+        +ListUsers(w, r)
+        +UpdateUser(w, r)
+        +ExtendUser(w, r)
+        +GetOverview(w, r)
+        +DeleteUser(w, r)
+        +GetUserCalls(w, r)
     }
 
-    class ProviderResult {
-        +string ID
-        +string Endpoint
-        +string APIKey
+    class UserModel {
+        +CreateUser(db, username, passwordHash, subKeyHash, subKeyPreview, role, status, expiresAt, quota5hLimit, quotaTotalLimit) *UserWithQuota
+        +GetUserBySubKeyHash(db, subKeyHash) *User
+        +GetUserByID(db, id) *User
+        +ListUsers(db) []UserWithQuota
+        +UpdateUserStatus(db, userID, status)
+        +ExtendUserExpiry(db, userID, newExpiresAt)
+        +GetDashboardOverview(db) *DashboardOverview
     }
 
-    class AdminHandler {
-        -*sql.DB DB
-        -ProviderStore Store
-        -Router Router
-        +HandleListProviders()
-        +HandleCreateProvider()
-        +HandleUpdateProvider()
-        +HandleDeleteProvider()
-        +HandleListMappings()
-        +HandleCreateMapping()
-        +HandleUpdateMapping()
-        +HandleDeleteMapping()
-        +HandleListRoutingRules()
-        +HandleCreateRoutingRule()
-        +HandleUpdateRoutingRule()
-        +HandleDeleteRoutingRule()
-        +HandleListAuditLogs()
-    }
-
-    class SecurityPackage {
-        +DeriveKEK() []byte
-        +Encrypt(plaintext,key) []byte
-        +Decrypt(ciphertext,key) string
-        +MaskKey(key) string
-    }
-
-    class Config {
-        +[]ProviderConfig Providers
-        +[]ModelMapping ModelMappings
-    }
-
-    ProviderStore ..> ProviderRecord : CRUD
-    ProviderStore ..> ModelMappingRecord : CRUD
-    ProviderStore ..> AuditLogRecord : writes
-    ProviderStore ..> RoutingRule : CRUD
-    ProviderStore ..> SecurityPackage : encrypt/decrypt
-    ProviderStore --> ProviderTable : BuildProviderTable()
-    ProviderStore ..> Config : SeedFromConfig()
-    Router --> ProviderStore : reads via
-    Router --> ProviderTable : atomic.Value
-    Router --> ProviderResult : returns
-    AdminHandler --> ProviderStore : CRUD via
-    AdminHandler --> Router : Reload()
+    Handler --> UserModel : uses
+    Handler --> Middleware : uses
+    Middleware --> UserModel : GetUserBySubKeyHash
+    UserWithQuota --|> User : embeds
+    Handler ..> createUserRequest : decodes
+    Handler ..> extendUserRequest : decodes
+    Handler ..> extendUserResponse : returns
+    Handler ..> DashboardOverview : returns
