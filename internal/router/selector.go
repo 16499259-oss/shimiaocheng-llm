@@ -224,6 +224,23 @@ func (r *Router) defaultProvider(table *provider.ProviderTable) (Provider, error
 	return Provider{}, fmt.Errorf("no upstream providers configured")
 }
 
+// GetProviderBySlug looks up a provider from the current atomic snapshot by slug.
+// Returns the Provider and true if found, or zero Provider and false if the slug
+// is not present (e.g. provider is disabled, deleted, or never existed).
+// This is used by the proxy hot path for fixed-route-mode users.
+func (r *Router) GetProviderBySlug(slug string) (Provider, bool) {
+	table := r.table.Load().(*provider.ProviderTable)
+	prov, ok := table.Providers[slug]
+	if !ok {
+		return Provider{}, false
+	}
+	return Provider{
+		ID:       prov.Slug,
+		Endpoint: prov.Endpoint,
+		APIKey:   prov.APIKey,
+	}, true
+}
+
 // RewriteModel translates an external (user-facing) model name into the real
 // model name for the given provider. If there is no mapping for the external
 // name or for that provider, the original external name is returned unchanged

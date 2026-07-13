@@ -1,22 +1,46 @@
 sequenceDiagram
     participant C as Client
-    participant M as SubKeyAuth Middleware
+    participant M as SubKeyAuth
     participant DB as SQLite
     participant H as ProxyHandler
+    participant R as Router
+    participant Q as QuotaChecker
+    participant U as Upstream
 
     C->>M: POST /v1/chat/completions<br/>Authorization: Bearer sk-xxx
-    M->>M: HashSubKey(subKey)
     M->>DB: GetUserBySubKeyHash(hash)
-    DB-->>M: User{ID,Status,Role,ExpiresAt}
+    DB-->>M: User{RouteMode, FixedProvider}
+    M->>M: ctx: user_id, route_mode, fixed_provider
+    M->>H: ServeHTTP
 
-    alt user == nil
-        M-->>C: 401 invalid_api_key
-    else status == disabled/deleted
-        M-->>C: 403 key_revoked
-    else Role != "admin" AND ExpiresAt != "" AND ExpiresAt < NOW()
-        M-->>C: 403 key_expired
+    Note over H: === 路由决策 ===
+    alt route_mode == "fixed" AND fixed_provider != ""
+        H->>R: GetProviderBySlug(fixed_provider)
+        alt not found (disabled/deleted)
+            H-->>C: 503 Provider not available
+        else found
+            R-->>H: Provider{ID, Endpoint, APIKey}
+        end
+    else route_mode == "auto" | empty
+        H->>R: ResolveProvider(now)
+        R-->>H: Provider{ID, Endpoint, APIKey}
+    end
+
+    Note over H: === 倍率决策 ===
+    H->>DB: GetFixedMultiplier(userID) FROM quotas
+    alt fixed_multiplier IS NOT NULL
+        DB-->>H: 2.5
+        H->>H: effectiveCalls = ceil(2.5) = 3
+    else fixed_multiplier IS NULL
+        H->>H: multiplier = MultiplierEng.GetEffectiveMultiplier(now)<br/>effectiveCalls = ceil(multiplier)
+    end
+
+    Note over H: === 配额扣减 ===
+    H->>Q: CheckAndDeduct(userID, effectiveCalls)
+    alt quota exceeded
+        H-->>C: 429 Quota exceeded
     else OK
-        M->>M: ctx.WithValue(user_id, user_role)
-        M->>H: ServeHTTP(w, r.WithContext(ctx))
-        H-->>C: 200 stream
+        H->>U: Forward request
+        U-->>H: Response
+        H-->>C: Stream / Sync response
     end

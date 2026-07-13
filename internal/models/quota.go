@@ -8,14 +8,15 @@ import (
 
 // Quota represents a user's quota record.
 type Quota struct {
-	ID              int64  `json:"id"`
-	UserID          int64  `json:"user_id"`
-	Quota5hLimit    int    `json:"quota_5h_limit"`
-	Quota5hUsed     int    `json:"quota_5h_used"`
-	QuotaTotalLimit int    `json:"quota_total_limit"`
-	QuotaTotalUsed  int    `json:"quota_total_used"`
-	WindowStart     string `json:"window_start"`
-	UpdatedAt       string `json:"updated_at"`
+	ID              int64           `json:"id"`
+	UserID          int64           `json:"user_id"`
+	Quota5hLimit    int             `json:"quota_5h_limit"`
+	Quota5hUsed     int             `json:"quota_5h_used"`
+	QuotaTotalLimit int             `json:"quota_total_limit"`
+	QuotaTotalUsed  int             `json:"quota_total_used"`
+	WindowStart     string          `json:"window_start"`
+	UpdatedAt       string          `json:"updated_at"`
+	FixedMultiplier sql.NullFloat64 `json:"fixed_multiplier"`
 }
 
 // QuotaStatus is returned by the /v1/quota endpoint.
@@ -36,9 +37,9 @@ type QuotaStatus struct {
 func GetQuota(db *sql.DB, userID int64) (*Quota, error) {
 	q := &Quota{}
 	err := db.QueryRow(
-		`SELECT id, user_id, quota_5h_limit, quota_5h_used, quota_total_limit, quota_total_used, window_start, updated_at
+		`SELECT id, user_id, quota_5h_limit, quota_5h_used, quota_total_limit, quota_total_used, window_start, updated_at, fixed_multiplier
 		 FROM quotas WHERE user_id = ?`, userID,
-	).Scan(&q.ID, &q.UserID, &q.Quota5hLimit, &q.Quota5hUsed, &q.QuotaTotalLimit, &q.QuotaTotalUsed, &q.WindowStart, &q.UpdatedAt)
+	).Scan(&q.ID, &q.UserID, &q.Quota5hLimit, &q.Quota5hUsed, &q.QuotaTotalLimit, &q.QuotaTotalUsed, &q.WindowStart, &q.UpdatedAt, &q.FixedMultiplier)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -133,4 +134,35 @@ func CompensateQuotaReset(db *sql.DB, resetIntervalHours int) error {
 		currentWindowStart.Format(time.RFC3339),
 	)
 	return err
+}
+
+// GetFixedMultiplier returns the fixed_multiplier for a user from the quotas table.
+// Returns sql.NullFloat64 where Valid=false means no per-user override is set
+// (caller should fall back to the global time-based multiplier).
+func GetFixedMultiplier(db *sql.DB, userID int64) (sql.NullFloat64, error) {
+	var result sql.NullFloat64
+	err := db.QueryRow(
+		`SELECT fixed_multiplier FROM quotas WHERE user_id = ?`, userID,
+	).Scan(&result)
+	if err == sql.ErrNoRows {
+		return sql.NullFloat64{}, nil
+	}
+	if err != nil {
+		return sql.NullFloat64{}, fmt.Errorf("get fixed multiplier: %w", err)
+	}
+	return result, nil
+}
+
+// UpdateFixedMultiplier updates a user's fixed_multiplier in the quotas table.
+// Pass nil to clear the override (reset to global).
+func UpdateFixedMultiplier(db *sql.DB, userID int64, multiplier *float64) error {
+	now := time.Now().Format(time.RFC3339)
+	_, err := db.Exec(
+		`UPDATE quotas SET fixed_multiplier = ?, updated_at = ? WHERE user_id = ?`,
+		multiplier, now, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("update fixed multiplier: %w", err)
+	}
+	return nil
 }

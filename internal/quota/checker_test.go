@@ -46,9 +46,10 @@ func TestCheckAndDeduct_Success(t *testing.T) {
 	created, err := models.CreateUser(
 		database.Conn,
 		"alice", "pw-hash", "subkey-hash-alice", "sk-alice...",
-		"user", "active", "",
+		"user", "active", "", "auto", "",
 		100,  // quota_5h_limit
 		1000, // quota_total_limit
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("CreateUser failed: %v", err)
@@ -89,9 +90,10 @@ func TestCheckAndDeduct_Exceeded(t *testing.T) {
 	created, err := models.CreateUser(
 		database.Conn,
 		"bob", "pw-hash", "subkey-hash-bob", "sk-bob...",
-		"user", "active", "",
+		"user", "active", "", "auto", "",
 		100, // quota_5h_limit
 		0,   // quota_total_limit -> immediately exhausted
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("CreateUser failed: %v", err)

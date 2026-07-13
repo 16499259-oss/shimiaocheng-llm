@@ -15,18 +15,25 @@ import (
 
 // createUserRequest is the JSON body for POST /admin/api/users.
 type createUserRequest struct {
-	Username        string `json:"username"`
-	Quota5hLimit    int    `json:"quota_5h_limit"`
-	QuotaTotalLimit int    `json:"quota_total_limit"`
-	ExpiresAt       string `json:"expires_at"`
+	Username        string   `json:"username"`
+	Quota5hLimit    int      `json:"quota_5h_limit"`
+	QuotaTotalLimit int      `json:"quota_total_limit"`
+	ExpiresAt       string   `json:"expires_at"`
+	RouteMode       string   `json:"route_mode"`
+	FixedProvider   string   `json:"fixed_provider"`
+	FixedMultiplier *float64 `json:"fixed_multiplier"`
 }
 
 // updateUserRequest is the JSON body for PUT /admin/api/users/{id}.
 type updateUserRequest struct {
-	Quota5hLimit    *int    `json:"quota_5h_limit"`
-	QuotaTotalLimit *int    `json:"quota_total_limit"`
-	Status          *string `json:"status"`
-	RegenerateKey   *bool   `json:"regenerate_key"`
+	Quota5hLimit         *int     `json:"quota_5h_limit"`
+	QuotaTotalLimit      *int     `json:"quota_total_limit"`
+	Status               *string  `json:"status"`
+	RegenerateKey        *bool    `json:"regenerate_key"`
+	RouteMode            *string  `json:"route_mode"`
+	FixedProvider        *string  `json:"fixed_provider"`
+	FixedMultiplier      *float64 `json:"fixed_multiplier"`
+	FixedMultiplierClear bool     `json:"fixed_multiplier_clear"`
 }
 
 // extendUserRequest is the JSON body for POST /admin/api/users/{id}/extend.
@@ -55,6 +62,9 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	if req.QuotaTotalLimit <= 0 {
 		req.QuotaTotalLimit = h.DefaultTotalLimit
 	}
+	if req.RouteMode == "" {
+		req.RouteMode = "auto"
+	}
 
 	// Generate sub-key
 	subKey := auth.GenerateSubKey(h.SubKeySalt, 0) // userID is not yet known, use 0 as placeholder
@@ -67,7 +77,8 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 	user, err := models.CreateUser(
 		h.DB, req.Username, emptyPassHash, subKeyHash, subKeyPreview,
-		"user", "active", req.ExpiresAt, req.Quota5hLimit, req.QuotaTotalLimit,
+		"user", "active", req.ExpiresAt, req.RouteMode, req.FixedProvider,
+		req.Quota5hLimit, req.QuotaTotalLimit, req.FixedMultiplier,
 	)
 	if err != nil {
 		log.Printf("ERROR: create user: %v", err)
@@ -86,6 +97,20 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Write audit log for user creation (including route/multiplier info).
+	auditDetail := fmt.Sprintf(`{"username":"%s","route_mode":"%s","fixed_provider":"%s"`, req.Username, req.RouteMode, req.FixedProvider)
+	if req.FixedMultiplier != nil {
+		auditDetail += fmt.Sprintf(`,"fixed_multiplier":%v`, *req.FixedMultiplier)
+	} else {
+		auditDetail += `,"fixed_multiplier":null`
+	}
+	auditDetail += "}"
+	_, _ = h.DB.Exec(
+		`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"user.create", "user", strconv.FormatInt(user.ID, 10), auditDetail, time.Now().Format(time.RFC3339),
+	)
+
 	// Return the sub-key in plaintext (only time)
 	user.SubKeyPreview = actualSubKeyPreview
 	response := map[string]any{
@@ -97,8 +122,13 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		"quota_5h_used":     user.Quota5hUsed,
 		"quota_total_limit": user.QuotaTotalLimit,
 		"quota_total_used":  user.QuotaTotalUsed,
+		"route_mode":        user.RouteMode,
+		"fixed_provider":    user.FixedProvider,
 		"status":            user.Status,
 		"created_at":        user.CreatedAt,
+	}
+	if req.FixedMultiplier != nil {
+		response["fixed_multiplier"] = *req.FixedMultiplier
 	}
 
 	writeJSON(w, http.StatusCreated, response)
@@ -139,6 +169,7 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]any{}
+	routeChanged := false
 
 	// Update quota limits
 	if req.Quota5hLimit != nil || req.QuotaTotalLimit != nil {
@@ -162,6 +193,83 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		response["status"] = *req.Status
+	}
+
+	// Update route_mode / fixed_provider (admin users are protected).
+	if req.RouteMode != nil || req.FixedProvider != nil {
+		if user.Role == "admin" {
+			log.Printf("WARNING: ignoring route_mode/fixed_provider update for admin user %d", userID)
+		} else {
+			rm := user.RouteMode
+			fp := user.FixedProvider
+			if req.RouteMode != nil {
+				rm = *req.RouteMode
+			}
+			if req.FixedProvider != nil {
+				fp = *req.FixedProvider
+			}
+			if err := models.UpdateUserRoute(h.DB, userID, rm, fp); err != nil {
+				log.Printf("ERROR: update user route: %v", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to update route"})
+				return
+			}
+			response["route_mode"] = rm
+			response["fixed_provider"] = fp
+			routeChanged = true
+		}
+	}
+
+	// Update fixed_multiplier. fixed_multiplier_clear takes priority —
+	// it distinguishes "clear to NULL" from "field not present in JSON".
+	if req.FixedMultiplierClear {
+		if err := models.UpdateFixedMultiplier(h.DB, userID, nil); err != nil {
+			log.Printf("ERROR: clear fixed multiplier: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to clear fixed multiplier"})
+			return
+		}
+		response["fixed_multiplier"] = nil
+		routeChanged = true
+	} else if req.FixedMultiplier != nil {
+		// Validate range 0.1–100.0 to match global multiplier semantics.
+		if *req.FixedMultiplier < 0.1 || *req.FixedMultiplier > 100.0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "fixed_multiplier must be between 0.1 and 100.0"})
+			return
+		}
+		if err := models.UpdateFixedMultiplier(h.DB, userID, req.FixedMultiplier); err != nil {
+			log.Printf("ERROR: update fixed multiplier: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to update fixed multiplier"})
+			return
+		}
+		response["fixed_multiplier"] = req.FixedMultiplier
+		routeChanged = true
+	}
+
+	// Write audit log for route/multiplier changes.
+	if routeChanged {
+		detailParts := []string{}
+		if req.RouteMode != nil && user.Role != "admin" {
+			detailParts = append(detailParts, fmt.Sprintf("route_mode: %s → %s", user.RouteMode, *req.RouteMode))
+		}
+		if req.FixedProvider != nil && user.Role != "admin" {
+			detailParts = append(detailParts, fmt.Sprintf("fixed_provider: %q → %q", user.FixedProvider, *req.FixedProvider))
+		}
+		if req.FixedMultiplierClear {
+			detailParts = append(detailParts, "fixed_multiplier → cleared (NULL)")
+		} else if req.FixedMultiplier != nil {
+			detailParts = append(detailParts, fmt.Sprintf("fixed_multiplier → %v", *req.FixedMultiplier))
+		}
+		detail := ""
+		for i, p := range detailParts {
+			if i > 0 {
+				detail += "; "
+			}
+			detail += p
+		}
+		_, _ = h.DB.Exec(
+			`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)
+			 VALUES (?, ?, ?, ?, ?)`,
+			"user.route_update", "user", strconv.FormatInt(userID, 10), detail, time.Now().Format(time.RFC3339),
+		)
 	}
 
 	// Regenerate key

@@ -172,6 +172,33 @@ func RunMigrations(conn *DB) error {
 		}
 	}
 
+	// Add route_mode column to users (idempotent).
+	if !columnExists(conn, "users", "route_mode") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE users ADD COLUMN route_mode TEXT NOT NULL DEFAULT 'auto'`,
+		); err != nil {
+			return fmt.Errorf("migration alter users.route_mode failed: %w", err)
+		}
+	}
+
+	// Add fixed_provider column to users (idempotent).
+	if !columnExists(conn, "users", "fixed_provider") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE users ADD COLUMN fixed_provider TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("migration alter users.fixed_provider failed: %w", err)
+		}
+	}
+
+	// Add fixed_multiplier column to quotas (idempotent).
+	if !columnExists(conn, "quotas", "fixed_multiplier") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE quotas ADD COLUMN fixed_multiplier REAL`,
+		); err != nil {
+			return fmt.Errorf("migration alter quotas.fixed_multiplier failed: %w", err)
+		}
+	}
+
 	log.Println("Database migrations completed successfully")
 	return nil
 }
