@@ -175,9 +175,18 @@ func AggregateCallStats(db *sql.DB, filter CallLogFilter) (*CallStats, error) {
 
 // DistinctModels returns the sorted, distinct (non-empty) model names that
 // appear in call_logs. It is used to populate the model filter dropdown.
+//
+// Model names are normalized via LOWER(model) so the dropdown options match
+// the case-insensitive filtering in buildCallLogWhere (LOWER(model) = LOWER(?))
+// and the case-insensitive aggregation in AggregateCallStats (GROUP BY
+// LOWER(model)). This guarantees the dropdown, the list/model filter, and the
+// by_model summary all use the exact same canonical (lowercased) key.
+//
 // The query has no user input, so it is inherently injection-safe.
 func DistinctModels(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT model FROM call_logs ORDER BY model`)
+	// Normalize to LOWER(model) and exclude empty strings directly in SQL so
+	// the returned set is already de-duplicated and canonicalized.
+	rows, err := db.Query(`SELECT DISTINCT LOWER(model) FROM call_logs WHERE model != '' ORDER BY LOWER(model)`)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +225,11 @@ func buildCallLogWhere(f CallLogFilter) (string, []any) {
 		args = append(args, f.ProviderID)
 	}
 	if f.Model != "" {
-		conds = append(conds, "model = ?")
+		// Case-insensitive model match so it agrees with DistinctModels
+		// (LOWER(model)) and AggregateCallStats (GROUP BY LOWER(model)).
+		// The value is passed as-is and normalized by the DB via LOWER(?),
+		// so "GLM-5.2" matches a stored "glm-5.2" row and vice versa.
+		conds = append(conds, "LOWER(model) = LOWER(?)")
 		args = append(args, f.Model)
 	}
 	if f.From != "" {

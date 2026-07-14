@@ -8,6 +8,7 @@ import (
 
 	"llm_api_gateway/internal/config"
 	"llm_api_gateway/internal/db"
+	"llm_api_gateway/internal/models"
 	"llm_api_gateway/internal/provider"
 	"llm_api_gateway/internal/security"
 	"llm_api_gateway/internal/timeutil"
@@ -171,6 +172,72 @@ func TestRewriteModel_Mapping(t *testing.T) {
 	}
 	if got := r.RewriteModel("glm-5.2", "zhipu"); got != "glm-5.2" {
 		t.Fatalf("RewriteModel(glm-5.2, zhipu) = %q, want %q", got, "glm-5.2")
+	}
+}
+
+// TestRoutingRule_WriteThenHit verifies the routing-rule write path end-to-end:
+// a rule created at runtime via ProviderStore is picked up by the router's hot
+// reload (atomic.Value swap) and correctly resolves a request inside its window.
+func TestRoutingRule_WriteThenHit(t *testing.T) {
+	database := newRouterTestDB(t)
+	r := newRouterWithConfig(t, database, testConfig())
+
+	// Create a brand-new routing rule 09:00-11:00 -> openai at runtime.
+	if err := r.store.CreateRoutingRule(&models.RoutingRule{
+		ProviderID: "openai",
+		StartTime:  "09:00",
+		EndTime:    "11:00",
+		DaysOfWeek: "*",
+		Timezone:   "Asia/Shanghai",
+		Enabled:    true,
+	}); err != nil {
+		t.Fatalf("CreateRoutingRule failed: %v", err)
+	}
+	// Hot-reload the router table so the new rule takes effect (mirrors what the
+	// admin handler does after a CRUD operation).
+	if err := r.Reload(); err != nil {
+		t.Fatalf("Reload after create failed: %v", err)
+	}
+
+	// 10:00 Asia/Shanghai is inside the new window -> must resolve to openai.
+	now := time.Date(2026, 1, 1, 10, 0, 0, 0, timeutil.ShanghaiTZ)
+	prov, err := r.ResolveProvider(now)
+	if err != nil {
+		t.Fatalf("ResolveProvider returned error: %v", err)
+	}
+	if prov.ID != "openai" {
+		t.Fatalf("expected new rule to hit openai at 10:00, got %q", prov.ID)
+	}
+}
+
+// TestRoutingRule_DisabledDoesNotHit verifies that a disabled rule is ignored by
+// the router (regardless of window), so the default provider is used instead.
+func TestRoutingRule_DisabledDoesNotHit(t *testing.T) {
+	database := newRouterTestDB(t)
+	r := newRouterWithConfig(t, database, testConfig())
+
+	if err := r.store.CreateRoutingRule(&models.RoutingRule{
+		ProviderID: "openai",
+		StartTime:  "09:00",
+		EndTime:    "11:00",
+		DaysOfWeek: "*",
+		Timezone:   "Asia/Shanghai",
+		Enabled:    false, // disabled on purpose
+	}); err != nil {
+		t.Fatalf("CreateRoutingRule failed: %v", err)
+	}
+	if err := r.Reload(); err != nil {
+		t.Fatalf("Reload after create failed: %v", err)
+	}
+
+	// Even inside the (disabled) window, the router must NOT hit it.
+	now := time.Date(2026, 1, 1, 10, 0, 0, 0, timeutil.ShanghaiTZ)
+	prov, err := r.ResolveProvider(now)
+	if err != nil {
+		t.Fatalf("ResolveProvider returned error: %v", err)
+	}
+	if prov.ID != "zhipu" {
+		t.Fatalf("disabled rule must be ignored -> default zhipu, got %q", prov.ID)
 	}
 }
 
