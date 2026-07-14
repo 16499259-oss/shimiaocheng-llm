@@ -26,12 +26,15 @@ type CallLog struct {
 }
 
 // CallLogFilter holds pagination and filter options for querying call logs.
+// Zero-valued fields are treated as "no filter" (see buildCallLogWhere).
 type CallLogFilter struct {
-	UserID int64
-	From   string
-	To     string
-	Page   int
-	Limit  int
+	UserID     int64
+	ProviderID string // upstream slug ("" = all providers)
+	Model      string // real model name ("" = all models)
+	From       string // created_at >= from (SH-normalized RFC3339)
+	To         string // created_at <= to (SH-normalized RFC3339)
+	Page       int
+	Limit      int
 }
 
 // CallLogPage holds paginated call log results.
@@ -49,7 +52,12 @@ type Pagination struct {
 
 // InsertCallLog inserts a new call log record.
 func InsertCallLog(db *sql.DB, log *CallLog) (int64, error) {
-	now := time.Now().Format(time.RFC3339)
+	// D10: store created_at in Asia/Shanghai (+08:00) RFC3339 so it can be
+	// compared directly (as text) against the SH-normalized query boundaries
+	// produced by NormalizeToShanghaiRFC3339. This is robust regardless of the
+	// server's local time zone (we never assume TZ). The call-stats panel and
+	// existing views only read the instant, so this does not regress display.
+	now := time.Now().In(timeutil.ShanghaiTZ).Format(time.RFC3339)
 	// Safety default: an empty provider_id would break analytics; fall back to
 	// "zhipu" (also the DB column default) so the row is always well-formed.
 	providerID := log.ProviderID

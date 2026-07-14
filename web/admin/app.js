@@ -44,10 +44,20 @@ function setupEventListeners() {
     document.getElementById('update-route-mode').addEventListener('change', function() {
         document.getElementById('update-fixed-provider-group').style.display = this.value === 'fixed' ? '' : 'none';
     });
+
+    // Call-stats panel filter bar (bound once; elements live in the DOM at load).
+    document.getElementById('cs-time').addEventListener('change', onCsTimeChange);
+    document.getElementById('cs-user').addEventListener('change', onCsFilterChange);
+    document.getElementById('cs-provider').addEventListener('change', onCsFilterChange);
+    document.getElementById('cs-model').addEventListener('change', onCsFilterChange);
+    document.getElementById('cs-from').addEventListener('change', onCsFilterChange);
+    document.getElementById('cs-to').addEventListener('change', onCsFilterChange);
+    document.getElementById('cs-query').addEventListener('click', () => { csPage = 1; reloadCs(); });
+    document.getElementById('cs-reset').addEventListener('click', onCsReset);
 }
 
 // ===== Tab Switching =====
-const VALID_TABS = ['dashboard', 'users', 'providers', 'mappings', 'routing', 'multipliers', 'audit'];
+const VALID_TABS = ['dashboard', 'users', 'providers', 'mappings', 'routing', 'multipliers', 'audit', 'callstats'];
 
 function switchTab(tabName) {
     // Update nav active state
@@ -69,6 +79,7 @@ function switchTab(tabName) {
         case 'routing': loadRoutingRules(); break;
         case 'multipliers': loadMultipliers(); break;
         case 'audit': loadAuditLogs(); break;
+        case 'callstats': initCallStatsTab(); break;
     }
 
     // Persist current tab in URL hash for refresh resilience
@@ -477,9 +488,6 @@ async function loadUsers() {
 
 function refreshUsers() {
     loadUsers();
-    if (currentCallsUserId && document.getElementById('calls-section').style.display !== 'none') {
-        loadCalls();
-    }
 }
 
 async function createUser(e) {
@@ -664,10 +672,12 @@ async function submitExtend(e) {
 }
 
 async function viewCalls(userId, username) {
-    currentCallsUserId = userId; currentCallsPage = 1;
-    document.getElementById('calls-username').textContent = username;
-    document.getElementById('calls-section').style.display = '';
-    await loadCalls();
+    // Jump to callstats tab with the user preselected.
+    // Store user info in sessionStorage so initCallStatsTab can pick it up.
+    try {
+        sessionStorage.setItem('cs_preselected_user', JSON.stringify({id: userId, name: username}));
+    } catch (_) {}
+    switchTab('callstats');
 }
 
 async function loadCalls() {
@@ -690,6 +700,262 @@ async function loadCalls() {
 }
 
 function goToCallsPage(page) { currentCallsPage = page; loadCalls(); }
+
+// ===== Call Stats Panel (调用记录汇总) =====
+// Pure read-only analytics over all call logs. Time boundaries are computed in
+// Asia/Shanghai and sent as RFC3339; the backend re-normalizes defensively.
+const CS_STORAGE_KEY = 'callstats_filter';
+let csPage = 1;
+let csFilter = { user_id: '', provider_id: '', model: '', time: '7d', customFrom: '', customTo: '' };
+
+// Render any Date instant as Asia/Shanghai wall-clock RFC3339 (+08:00).
+function toShanghaiRFC3339(date) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).formatToParts(date).reduce((m, p) => { m[p.type] = p.value; return m; }, {});
+    let hour = parts.hour === '24' ? '00' : parts.hour;
+    return `${parts.year}-${parts.month}-${parts.day}T${hour}:${parts.minute}:${parts.second}+08:00`;
+}
+// Calendar date (Asia/Shanghai) of a Date instant, e.g. "2026-07-14".
+function shDateString(date) {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+}
+// Midnight (00:00:00 SH) of a "YYYY-MM-DD" date, as RFC3339.
+function shMidnightRFC3339(yyyymmdd) {
+    return toShanghaiRFC3339(new Date(yyyymmdd + 'T00:00:00+08:00'));
+}
+// Current instant as RFC3339 in SH (rolling upper bound, includes in-progress day).
+function nowShRFC3339() {
+    return toShanghaiRFC3339(new Date());
+}
+
+function computeCsRange() {
+    const now = new Date();
+    const today = shDateString(now);
+    let from, to;
+    const t = csFilter.time;
+    if (t === 'today') {
+        from = shMidnightRFC3339(today);
+        to = nowShRFC3339();
+    } else if (t === '7d' || t === '30d') {
+        const days = t === '7d' ? 7 : 30;
+        const fromDate = new Date(today + 'T00:00:00+08:00');
+        fromDate.setDate(fromDate.getDate() - (days - 1)); // start-of-window in SH
+        from = toShanghaiRFC3339(fromDate);
+        to = nowShRFC3339();
+    } else { // custom
+        const start = csFilter.customFrom || today;
+        from = shMidnightRFC3339(start);
+        const end = csFilter.customTo || today;
+        // End day < today(SH): up to 23:59:59.999 SH. End day == today: now SH.
+        if (end >= today) {
+            to = nowShRFC3339();
+        } else {
+            to = toShanghaiRFC3339(new Date(end + 'T23:59:59.999+08:00'));
+        }
+    }
+    return { from, to };
+}
+
+function buildCsQuery(page) {
+    const { from, to } = computeCsRange();
+    const q = new URLSearchParams();
+    if (csFilter.user_id) q.set('user_id', csFilter.user_id);
+    if (csFilter.provider_id) q.set('provider_id', csFilter.provider_id);
+    if (csFilter.model) q.set('model', csFilter.model);
+    if (from) q.set('from', from);
+    if (to) q.set('to', to);
+    if (page) { q.set('page', page); q.set('limit', 20); }
+    return q.toString();
+}
+
+function saveCsFilter() {
+    try { sessionStorage.setItem(CS_STORAGE_KEY, JSON.stringify({ ...csFilter, page: csPage })); } catch (_) {}
+}
+function restoreCsFilter() {
+    try {
+        const raw = sessionStorage.getItem(CS_STORAGE_KEY);
+        if (raw) {
+            const o = JSON.parse(raw);
+            csFilter = { user_id: '', provider_id: '', model: '', time: '7d', customFrom: '', customTo: '', ...o };
+            csPage = o.page || 1;
+            return true;
+        }
+    } catch (_) {}
+    return false;
+}
+function applyCsFilterToDOM() {
+    document.getElementById('cs-time').value = csFilter.time;
+    document.getElementById('cs-user').value = csFilter.user_id;
+    document.getElementById('cs-provider').value = csFilter.provider_id;
+    document.getElementById('cs-model').value = csFilter.model;
+    document.getElementById('cs-from').value = csFilter.customFrom;
+    document.getElementById('cs-to').value = csFilter.customTo;
+    document.getElementById('cs-custom-range').style.display = csFilter.time === 'custom' ? '' : 'none';
+}
+function collectCsFilter() {
+    csFilter.user_id = document.getElementById('cs-user').value;
+    csFilter.provider_id = document.getElementById('cs-provider').value;
+    csFilter.model = document.getElementById('cs-model').value.trim();
+    csFilter.customFrom = document.getElementById('cs-from').value;
+    csFilter.customTo = document.getElementById('cs-to').value;
+}
+function onCsTimeChange() {
+    csFilter.time = document.getElementById('cs-time').value;
+    document.getElementById('cs-custom-range').style.display = csFilter.time === 'custom' ? '' : 'none';
+    csPage = 1;
+    reloadCs();
+}
+function onCsFilterChange() {
+    collectCsFilter();
+    csPage = 1;
+    reloadCs();
+}
+function onCsReset() {
+    csFilter = { user_id: '', provider_id: '', model: '', time: '7d', customFrom: '', customTo: '' };
+    csPage = 1;
+    applyCsFilterToDOM();
+    saveCsFilter();
+    loadCallStats(1).catch(e => console.error(e));
+}
+function reloadCs() {
+    collectCsFilter();
+    saveCsFilter();
+    loadCallStats(csPage).catch(e => console.error(e));
+}
+
+// Entry point for the call-stats tab: restore filter, fill dropdowns, load.
+async function initCallStatsTab() {
+    restoreCsFilter();
+    applyCsFilterToDOM();
+    // If arriving from user-management "记录" button, preselect that user
+    // and clear the flag so subsequent tab switches don't override the filter.
+    try {
+        const raw = sessionStorage.getItem('cs_preselected_user');
+        if (raw) {
+            const u = JSON.parse(raw);
+            if (u.id) {
+                csFilter.user_id = String(u.id);
+                document.getElementById('cs-user').value = csFilter.user_id;
+            }
+            sessionStorage.removeItem('cs_preselected_user');
+        }
+    } catch (_) {}
+    await Promise.all([loadCallStatsUsers(), loadCallModels()]);
+    await loadCallStats(csPage);
+}
+
+async function loadCallStatsUsers() {
+    try {
+        const data = await apiFetch('api/users');
+        const sel = document.getElementById('cs-user');
+        const cur = csFilter.user_id;
+        sel.innerHTML = '<option value="">全部用户</option>' + (data.data || []).map(u =>
+            `<option value="${u.id}">${escapeHtml(u.username)}</option>`).join('');
+        sel.value = cur;
+    } catch (e) { console.error('load users for callstats:', e); }
+}
+
+async function loadCallModels() {
+    try {
+        const data = await apiFetch('api/calls/models');
+        const list = document.getElementById('cs-model-list');
+        const models = (data.data || []);
+        list.innerHTML = '<option value=""></option>' + models.map(m =>
+            `<option value="${escapeHtml(m)}"></option>`).join('');
+    } catch (e) { console.error('load call models:', e); }
+}
+
+// Parallel fetch of stats + list; each resilient to the other failing.
+async function loadCallStats(page) {
+    csPage = page || 1;
+    const qs = buildCsQuery(csPage);
+    saveCsFilter();
+    const [sRes, cRes] = await Promise.allSettled([
+        apiFetch('api/calls/stats?' + qs),
+        apiFetch('api/calls?' + qs),
+    ]);
+    if (sRes.status === 'fulfilled') renderStatsCards(sRes.value);
+    else console.error('load call stats failed:', sRes.reason);
+    if (cRes.status === 'fulfilled') renderCsCalls(cRes.value);
+    else console.error('load calls failed:', cRes.reason);
+}
+
+function renderStatsCards(stats) {
+    stats = stats || {};
+    const tokens = stats.tokens || {};
+    const success = stats.success || {};
+    const total = stats.total_calls || 0;
+    document.getElementById('cs-total-calls').textContent = total.toLocaleString();
+    document.getElementById('cs-tok-prompt').textContent = (tokens.prompt || 0).toLocaleString();
+    document.getElementById('cs-tok-completion').textContent = (tokens.completion || 0).toLocaleString();
+    document.getElementById('cs-tok-total').textContent = (tokens.total || 0).toLocaleString();
+    document.getElementById('cs-effective-calls').textContent = (stats.effective_calls || 0).toLocaleString();
+    document.getElementById('cs-success-rate').textContent = total > 0
+        ? (success.success_rate || 0).toFixed(1) + '%' : '-';
+    document.getElementById('cs-success-count').textContent = (success.success_count || 0).toLocaleString();
+    document.getElementById('cs-error-count').textContent = (success.error_count || 0).toLocaleString();
+    document.getElementById('cs-note').textContent = '基于当前筛选 ' + total.toLocaleString() + ' 条';
+
+    // Render per-model breakdown table
+    const byModel = stats.by_model || [];
+    const bmTbody = document.getElementById('cs-by-model-tbody');
+    if (byModel.length === 0) {
+        bmTbody.innerHTML = '<tr><td colspan="5" class="text-center">暂无数据</td></tr>';
+    } else {
+        bmTbody.innerHTML = byModel.map(m => {
+            const mt = m.tokens || {};
+            return `<tr>
+                <td><code>${escapeHtml(m.model)}</code></td>
+                <td>${(m.calls || 0).toLocaleString()}</td>
+                <td>${(mt.prompt || 0).toLocaleString()}</td>
+                <td>${(mt.completion || 0).toLocaleString()}</td>
+                <td>${(mt.total || 0).toLocaleString()}</td>
+            </tr>`;
+        }).join('');
+    }
+}
+
+function renderCsCalls(calls) {
+    calls = calls || {};
+    const tbody = document.getElementById('cs-tbody');
+    const data = calls.data || [];
+    if (data.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center">暂无调用记录</td></tr>';
+        document.getElementById('cs-pagination').innerHTML = '';
+        return;
+    }
+    tbody.innerHTML = data.map(c => {
+        const prov = providerMap[c.provider_id] || c.provider_id || '-';
+        const mult = (c.multiplier_used != null) ? c.multiplier_used.toFixed(1) + 'x' : '-';
+        return `<tr>
+            <td>${c.id}</td>
+            <td>${escapeHtml(c.model)}</td>
+            <td>${(c.total_tokens || 0).toLocaleString()}</td>
+            <td>${c.effective_calls}</td>
+            <td>${mult}</td>
+            <td>${c.status_code}</td>
+            <td>${c.latency_ms}</td>
+            <td>${formatDateSH(c.created_at)}</td>
+            <td>${escapeHtml(prov)}</td>
+        </tr>`;
+    }).join('');
+    const pag = calls.pagination || {};
+    const tp = Math.ceil((pag.total || 0) / (pag.limit || 20));
+    document.getElementById('cs-pagination').innerHTML =
+        `<button ${pag.page <= 1 ? 'disabled' : ''} onclick="loadCallStats(${pag.page - 1})">上一页</button>
+         <span>第 ${pag.page} / ${tp} 页 (共 ${(pag.total || 0).toLocaleString()} 条)</span>
+         <button ${pag.page >= tp ? 'disabled' : ''} onclick="loadCallStats(${pag.page + 1})">下一页</button>`;
+}
+
+// Show created_at in Asia/Shanghai specifically for this panel (PRD D6: SH only here).
+function formatDateSH(s) {
+    if (!s) return '-';
+    try {
+        return new Date(s).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+    } catch (_) { return s; }
+}
 
 // ===== Multipliers =====
 async function loadMultipliers() {

@@ -1,0 +1,28 @@
+sequenceDiagram
+    actor Admin as 管理员
+    participant UI as 调用记录 Tab (app.js)
+    participant API as Handler (admin)
+    participant M as models 层
+    participant DB as SQLite (call_logs)
+
+    Admin->>UI: 切换/修改筛选条件 (用户/时间/上游/模型)
+    UI->>UI: 计算 SH 边界 from/to (RFC3339) + 读持久化状态
+    par 汇总请求（卡片）
+        UI->>API: GET /api/calls/stats?user_id&provider_id&model&from&to
+        API->>API: normalizeToShanghaiRFC3339(from,to)
+        API->>M: AggregateCallStats(filter)
+        M->>DB: SELECT COUNT/SUM + CASE WHEN ... WHERE (命中复合索引)
+        DB-->>M: 聚合单行
+        M-->>API: CallStats
+        API-->>UI: JSON stats
+        UI->>UI: renderStatsCards() + 注「基于当前筛选 N 条」
+    and 列表请求（表格）
+        UI->>API: GET /api/calls?...&page=1&limit=20
+        API->>M: QueryCallLogsGlobal(filter)
+        M->>DB: SELECT ... WHERE ... ORDER BY id DESC LIMIT/OFFSET
+        DB-->>M: 行 + COUNT
+        M-->>API: CallLogPage
+        API-->>UI: JSON {data, pagination}
+        UI->>UI: 渲染列表 + 分页（时间按 SH 展示）
+    end
+    Note over UI,DB: 卡片与列表同口径（均基于同一筛选集；stats 忽略分页）

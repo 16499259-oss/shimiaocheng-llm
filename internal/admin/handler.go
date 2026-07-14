@@ -59,6 +59,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("PUT /api/users/{id}", h.UpdateUser)
 	adminMux.HandleFunc("DELETE /api/users/{id}", h.DeleteUser)
 	adminMux.HandleFunc("GET /api/users/{id}/calls", h.GetUserCalls)
+
+	// Call-stats panel (read-only analytics, auto auth via /api/ prefix).
+	adminMux.HandleFunc("GET /api/calls", h.ListCalls)
+	adminMux.HandleFunc("GET /api/calls/stats", h.CallsStats)
+	adminMux.HandleFunc("GET /api/calls/models", h.ListCallModels)
 	adminMux.HandleFunc("POST /api/users/{id}/extend", h.ExtendUser)
 	adminMux.HandleFunc("GET /api/overview", h.GetOverview)
 	adminMux.HandleFunc("GET /api/multipliers", h.ListMultipliers)

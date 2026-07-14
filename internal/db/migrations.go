@@ -59,6 +59,11 @@ func RunMigrations(conn *DB) error {
 
 		`CREATE INDEX IF NOT EXISTS idx_call_logs_user_id ON call_logs(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_call_logs_created_at ON call_logs(created_at)`,
+		// Composite index (user_id, created_at) for the global call-stats panel.
+		// user_id exists in the call_logs CREATE TABLE above, so this is safe here.
+		// The provider_id-based composite index is created further below, after
+		// the provider_id column is added (it is not part of the CREATE TABLE).
+		`CREATE INDEX IF NOT EXISTS idx_call_logs_user_created ON call_logs(user_id, created_at)`,
 
 		// admin_sessions table
 		`CREATE TABLE IF NOT EXISTS admin_sessions (
@@ -161,6 +166,14 @@ func RunMigrations(conn *DB) error {
 		); err != nil {
 			return fmt.Errorf("migration alter call_logs.provider_id failed: %w", err)
 		}
+	}
+	// Composite index (provider_id, created_at) for the global call-stats panel.
+	// Must run AFTER the provider_id column exists (it is added above, not in the
+	// CREATE TABLE). Idempotent so re-runs are safe.
+	if _, err := conn.Conn.Exec(
+		`CREATE INDEX IF NOT EXISTS idx_call_logs_provider_created ON call_logs(provider_id, created_at)`,
+	); err != nil {
+		return fmt.Errorf("migration create idx_call_logs_provider_created failed: %w", err)
 	}
 
 	// Add expires_at column to users (idempotent).

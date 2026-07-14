@@ -5,6 +5,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LLM API Gateway — 管理面板</title>
     <link rel="stylesheet" href="static/style.css">
+    <style>
+        /* Call-stats panel (调用记录汇总) — localized styles, no global changes. */
+        .filter-bar {
+            display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end;
+            margin-bottom: 20px; background: #fff; padding: 16px;
+            border-radius: var(--radius); border: 1px solid var(--border);
+        }
+        .filter-group { display: flex; flex-direction: column; gap: 6px; }
+        .filter-group label { font-size: 0.8rem; color: #6b7280; font-weight: 500; }
+        .filter-group select, .filter-group input { min-width: 150px; }
+        .filter-actions { display: flex; gap: 8px; margin-left: auto; }
+        .stat-value-sm { font-size: 0.9rem; color: #374151; margin-top: 4px; }
+        .stat-value-sm span { font-weight: 600; color: #111827; }
+        .cs-note { font-size: 0.8rem; color: #6b7280; margin: 12px 0; }
+        @media (max-width: 720px) {
+            .filter-actions { margin-left: 0; }
+            .filter-group select, .filter-group input { min-width: 120px; }
+        }
+    </style>
 </head>
 <body>
     <div class="app-layout">
@@ -19,6 +38,7 @@
                 <a class="nav-item" data-tab="routing" onclick="switchTab('routing')">🕐 路由规则</a>
                 <a class="nav-item" data-tab="multipliers" onclick="switchTab('multipliers')">⚡ 倍率规则</a>
                 <a class="nav-item" data-tab="audit" onclick="switchTab('audit')">📋 审计日志</a>
+                <a class="nav-item" data-tab="callstats" onclick="switchTab('callstats')">📈 调用记录</a>
                 <!-- 旧设置入口过渡期隐藏 (Q7) -->
             </nav>
             <div class="sidebar-footer">
@@ -124,6 +144,86 @@
                     <tbody id="audit-tbody"><tr><td colspan="6" class="text-center">加载中...</td></tr></tbody>
                 </table>
                 <div class="pagination" id="audit-pagination"></div>
+            </section>
+
+            <!-- Call Stats Tab (调用记录汇总面板) -->
+            <section class="tab-content" id="tab-callstats">
+                <h2 class="tab-title">📈 调用记录汇总</h2>
+
+                <div class="filter-bar">
+                    <div class="filter-group">
+                        <label for="cs-user">用户</label>
+                        <select id="cs-user"><option value="">全部用户</option></select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="cs-time">时间</label>
+                        <select id="cs-time">
+                            <option value="today">今天</option>
+                            <option value="7d" selected>近 7 天</option>
+                            <option value="30d">近 30 天</option>
+                            <option value="custom">自定义</option>
+                        </select>
+                    </div>
+                    <div class="filter-group" id="cs-custom-range" style="display:none">
+                        <label>自定义区间（SH）</label>
+                        <div style="display:flex; gap:8px;">
+                            <input type="date" id="cs-from" title="起始日 00:00:00 SH">
+                            <input type="date" id="cs-to" title="结束日（<今天 23:59:59.999 SH；=今天 现在 SH）">
+                        </div>
+                    </div>
+                    <div class="filter-group">
+                        <label for="cs-provider">上游</label>
+                        <select id="cs-provider"><option value="">全部上游</option></select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="cs-model">模型</label>
+                        <input list="cs-model-list" id="cs-model" placeholder="全部 / 可手输" autocomplete="off">
+                        <datalist id="cs-model-list"><option value=""></option></datalist>
+                    </div>
+                    <div class="filter-actions">
+                        <button id="cs-query" class="btn btn-primary btn-sm">查询</button>
+                        <button id="cs-reset" class="btn btn-outline btn-sm">重置</button>
+                    </div>
+                </div>
+
+                <div class="stats-grid" id="cs-stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-label">调用次数</div>
+                        <div class="stat-value" id="cs-total-calls">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Token 用量</div>
+                        <div class="stat-value-sm">输入 <span id="cs-tok-prompt">0</span></div>
+                        <div class="stat-value-sm">输出 <span id="cs-tok-completion">0</span></div>
+                        <div class="stat-value-sm">总计 <span id="cs-tok-total">0</span></div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">折合调用次数</div>
+                        <div class="stat-value" id="cs-effective-calls">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">成功率</div>
+                        <div class="stat-value" id="cs-success-rate">-</div>
+                        <div class="stat-value-sm">成功 <span id="cs-success-count">0</span></div>
+                        <div class="stat-value-sm">错误 <span id="cs-error-count">0</span></div>
+                    </div>
+                </div>
+                <div class="cs-note" id="cs-note">基于当前筛选 0 条</div>
+
+                <!-- By-model breakdown table -->
+                <div id="cs-by-model-section" style="margin-bottom:20px;">
+                    <h3 style="margin:0 0 12px; font-size:1rem; color:#374151;">按模型明细</h3>
+                    <table class="table" id="cs-by-model-table">
+                        <thead><tr><th>模型名</th><th>调用次数</th><th>输入 Token</th><th>输出 Token</th><th>总 Token</th></tr></thead>
+                        <tbody id="cs-by-model-tbody"><tr><td colspan="5" class="text-center">暂无数据</td></tr></tbody>
+                    </table>
+                </div>
+
+                <table class="table" id="cs-table">
+                    <thead><tr><th>ID</th><th>模型</th><th>Token</th><th>消耗次数</th><th>倍率</th><th>状态码</th><th>延迟(ms)</th><th>时间(SH)</th><th>上游</th></tr></thead>
+                    <tbody id="cs-tbody"><tr><td colspan="9" class="text-center">加载中...</td></tr></tbody>
+                </table>
+                <div class="pagination" id="cs-pagination"></div>
             </section>
         </main>
     </div>

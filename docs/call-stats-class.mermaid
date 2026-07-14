@@ -1,0 +1,62 @@
+classDiagram
+    class CallLog {
+        +int64 ID
+        +int64 UserID
+        +string Model
+        +string ProviderID
+        +int PromptTokens
+        +int CompletionTokens
+        +int TotalTokens
+        +int EffectiveCalls
+        +float64 MultiplierUsed
+        +int StatusCode
+        +int LatencyMs
+        +string ErrorMsg
+        +string CreatedAt
+    }
+    class CallLogFilter {
+        +int64 UserID
+        +string ProviderID
+        +string Model
+        +string From
+        +string To
+        +int Page
+        +int Limit
+    }
+    class CallLogPage {
+        +CallLog[] Data
+        +Pagination Pagination
+    }
+    class Pagination {
+        +int Page
+        +int Limit
+        +int Total
+    }
+    class CallStats {
+        +int TotalCalls
+        +TokenBreakdown Tokens
+        +int EffectiveCalls
+        +SuccessStats Success
+    }
+    class TokenBreakdown {
+        +int Prompt
+        +int Completion
+        +int Total
+    }
+    class SuccessStats {
+        +int SuccessCount
+        +int ErrorCount
+        +float64 SuccessRate
+    }
+    class Handler {
+        +ListCalls(w, r)
+        +CallsStats(w, r)
+        +ListCallModels(w, r)
+    }
+    CallLogPage "1" *-- "0..*" CallLog : data
+    CallLogPage "1" *-- "1" Pagination : pagination
+    CallStats "1" *-- "1" TokenBreakdown : tokens
+    CallStats "1" *-- "1" SuccessStats : success
+    Handler ..> CallLogPage : QueryCallLogsGlobal()
+    Handler ..> CallStats : AggregateCallStats()
+    Handler ..> "[]string" : DistinctModels()
