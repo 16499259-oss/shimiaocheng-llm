@@ -1010,7 +1010,7 @@ function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
 // ===== Utilities =====
 function escapeHtml(str) { const div = document.createElement('div'); div.textContent = str; return div.innerHTML; }
 function escapeAttr(str) { return str.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
-function formatDate(s) { if (!s) return '-'; try { return new Date(s).toLocaleString('zh-CN'); } catch (_) { return s; } }
+function formatDate(s) { return formatDateSH(s); }
 function formatDaysOfWeek(d) {
     if (d === '*') return '每天';
     const m = {'0':'日','1':'一','2':'二','3':'三','4':'四','5':'五','6':'六'};
