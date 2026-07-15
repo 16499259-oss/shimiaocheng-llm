@@ -48,6 +48,18 @@
         .error-box { background: #fef2f2; border: 1px solid var(--error); color: var(--error); padding: 12px; border-radius: var(--radius); margin-bottom: 16px; }
         .hidden { display: none; }
         .notice-banner { background: #fffbeb; border: 1px solid #f59e0b; border-left: 4px solid #f59e0b; border-radius: var(--radius); padding: 12px 16px; margin-bottom: 20px; font-size: 0.88rem; color: #92400e; line-height: 1.5; }
+        .tab-bar { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+        .tab-btn { background: none; border: none; padding: 12px 16px; cursor: pointer; font-size: 0.95rem; color: var(--text-secondary); border-bottom: 2px solid transparent; border-radius: 0; }
+        .tab-btn:hover { opacity: 1; color: var(--primary); }
+        .tab-btn.active { color: var(--primary); border-bottom: 2px solid var(--primary); font-weight: 600; }
+        details { border: 1px solid var(--border); border-radius: var(--radius); padding: 4px 14px; margin-bottom: 10px; background: var(--bg); }
+        details summary { cursor: pointer; font-weight: 600; padding: 10px 0; font-size: 0.95rem; list-style: none; }
+        details summary::-webkit-details-marker { display: none; }
+        details summary::before { content: '▸ '; color: var(--text-secondary); }
+        details[open] summary::before { content: '▾ '; }
+        details .detail-body { padding: 0 0 12px; font-size: 0.88rem; color: var(--text); line-height: 1.7; }
+        details .detail-body code { background: #e5e7eb; padding: 1px 5px; border-radius: 4px; font-family: monospace; font-size: 0.82rem; }
+        details .detail-body .warn-note { color: var(--warning); font-size: 0.82rem; margin-top: 6px; display: block; }
     </style>
 </head>
 <body>
@@ -79,50 +91,58 @@
             <div id="quota-stats"></div>
         </div>
 
-        <!-- API Key Card -->
-        <div class="card">
-            <div class="card-header">🔐 你的 Key</div>
-            <div class="key-box">
-                <span id="display-key"></span>
-                <button class="copy-btn" onclick="copyKey()">📋 复制</button>
-            </div>
-            <p style="font-size: 0.8rem; color: var(--text-secondary);">⚠️ 请妥善保管，Key 仅在此页展示</p>
+        <!-- Tab bar (always visible, logout stays outside) -->
+        <div class="tab-bar">
+            <button class="tab-btn active" id="tab-btn-overview" onclick="showTab('overview')">📊 概览</button>
+            <button class="tab-btn" id="tab-btn-clients" onclick="showTab('clients')">🔌 客户端配置</button>
         </div>
 
-        <!-- Config Info Card -->
-        <div class="card">
-            <div class="card-header">⚙️ 配置信息</div>
-            <div class="stat-row">
-                <span class="stat-label">Base URL</span>
-                <span class="stat-value" style="font-family:monospace;font-size:0.85rem;">https://ai.shimiaocheng.top/v1</span>
+        <!-- Overview Tab -->
+        <div id="tab-overview">
+            <!-- API Key Card -->
+            <div class="card">
+                <div class="card-header">🔐 你的 Key</div>
+                <div class="key-box">
+                    <span id="display-key"></span>
+                    <button class="copy-btn" id="copy-key-btn" onclick="copyKey()">📋 复制</button>
+                </div>
+                <p style="font-size: 0.8rem; color: var(--text-secondary);">⚠️ 请妥善保管，Key 仅在此页展示</p>
             </div>
-            <div class="stat-row">
-                <span class="stat-label">模型名称</span>
-                <span class="stat-value">GLM-5.2</span>
-            </div>
-            <p style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 8px;">💡 Cursor / ChatBox 等工具填入 Base URL + Key + 模型名称即可使用</p>
-        </div>
 
-        <!-- API Usage Card -->
-        <div class="card">
-            <div class="card-header">📖 API 使用方式</div>
-            <div class="form-group">
-                <label>API 端点（同步调用）</label>
-                <pre>curl https://ai.shimiaocheng.top/v1/chat/completions \
+            <!-- Config Info Card -->
+            <div class="card">
+                <div class="card-header">⚙️ 配置信息</div>
+                <div class="stat-row">
+                    <span class="stat-label">Base URL</span>
+                    <span class="stat-value" style="font-family:monospace;font-size:0.85rem;">https://ai.shimiaocheng.top/v1</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">模型名称</span>
+                    <span class="stat-value">GLM-5.2</span>
+                </div>
+                <p style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 8px;">💡 Cursor / ChatBox 等工具填入 Base URL + Key + 模型名称即可使用</p>
+            </div>
+
+            <!-- API Usage Card -->
+            <div class="card">
+                <div class="card-header">📖 API 使用方式</div>
+                <div class="form-group">
+                    <label>API 端点（同步调用）</label>
+                    <pre>curl https://ai.shimiaocheng.top/v1/chat/completions \
   -H "Authorization: Bearer <span id="key-in-curl">YOUR_KEY</span>" \
   -H "Content-Type: application/json" \
   -d '{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}]}'</pre>
-            </div>
-            <div class="form-group">
-                <label>API 端点（SSE 流式调用）</label>
-                <pre>curl https://ai.shimiaocheng.top/v1/chat/completions \
+                </div>
+                <div class="form-group">
+                    <label>API 端点（SSE 流式调用）</label>
+                    <pre>curl https://ai.shimiaocheng.top/v1/chat/completions \
   -H "Authorization: Bearer <span id="key-in-curl2">YOUR_KEY</span>" \
   -H "Content-Type: application/json" \
   -d '{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}],"stream":true}'</pre>
-            </div>
-            <div class="form-group">
-                <label>Python 示例</label>
-                <pre>import requests
+                </div>
+                <div class="form-group">
+                    <label>Python 示例</label>
+                    <pre>import requests
 
 response = requests.post(
     "https://ai.shimiaocheng.top/v1/chat/completions",
@@ -130,6 +150,95 @@ response = requests.post(
     json={"model":"glm-5.2", "messages":[{"role":"user","content":"你好"}]}
 )
 print(response.json())</pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- Clients Tab -->
+        <div id="tab-clients" class="hidden">
+            <div class="card">
+                <div class="card-header">🔌 客户端配置</div>
+                <p style="font-size: 0.88rem; color: var(--text-secondary); margin-bottom: 16px; line-height: 1.6;">所有客户端通用：填入 Base URL + 你的 Key + 模型名称 <code>GLM-5.2</code> 即可使用。</p>
+
+                <div class="key-box">
+                    <span>https://ai.shimiaocheng.top/v1</span>
+                    <button class="copy-btn" id="copy-base-btn" onclick="copyBaseUrl()">📋 复制</button>
+                </div>
+                <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 16px;">💡 这是所有客户端的 Base URL，先复制备用。</p>
+
+                <details>
+                    <summary>Cursor</summary>
+                    <div class="detail-body">
+                        Cursor 是 OpenAI 兼容客户端，可直接自定义 Base URL。<br>
+                        1. 打开 <code>Settings</code>（设置） → <code>Models</code>（模型）。<br>
+                        2. 勾选 <code>Override OpenAI Base URL</code>，填入 <code>https://ai.shimiaocheng.top/v1</code>。<br>
+                        3. <code>API Key</code> 填页面顶部「你的 Key」框里的 <code>sk-...</code> 值。<br>
+                        4. <code>Model</code> 填 <code>GLM-5.2</code>。<br>
+                        5. 点击 <code>Verify</code> 验证通过后即可对话。
+                    </div>
+                </details>
+
+                <details>
+                    <summary>Claude Code</summary>
+                    <div class="detail-body">
+                        ⚠️ <strong>注意兼容性</strong>：Claude Code（Anthropic 官方 CLI）的原生协议是 <strong>Anthropic Messages API</strong>，<strong>不是</strong> OpenAI 兼容协议。本网关仅提供 OpenAI 兼容接口，因此无法在 Claude Code 中「直接」填 Base URL 使用。<br><br>
+                        可行方案（二选一）：<br>
+                        方案 A — 若你的 Claude Code 版本支持自定义 OpenAI 兼容 Provider：按该 Provider 配置填入 Base URL <code>https://ai.shimiaocheng.top/v1</code>、API Key 填 <code>sk-...</code>、模型填 <code>GLM-5.2</code>。<br>
+                        方案 B（推荐）— 经 OpenAI↔Anthropic 转换代理中转：用 <code>litellm</code> 等代理把本网关的 OpenAI 接口转成 Anthropic 协议，然后把 Claude Code 的 <code>ANTHROPIC_BASE_URL</code> 指向该代理、<code>ANTHROPIC_API_KEY</code> 填你的 <code>sk-...</code> 值。<br>
+                        <span class="warn-note">请先确认你的 Claude Code 版本是否支持 OpenAI 兼容 Provider，否则必须使用方案 B 中转。</span>
+                    </div>
+                </details>
+
+                <details>
+                    <summary>Trae</summary>
+                    <div class="detail-body">
+                        Trae 支持 OpenAI 兼容的自定义模型Provider。<br>
+                        1. 打开 <code>Settings</code>（设置） → <code>Model Provider</code>（模型供应商）。<br>
+                        2. 选择 <code>Custom</code> / <code>OpenAI Compatible</code> 自定义 Provider。<br>
+                        3. <code>Base URL</code> 填 <code>https://ai.shimiaocheng.top/v1</code>。<br>
+                        4. <code>API Key</code> 填页面顶部「你的 Key」框里的 <code>sk-...</code> 值。<br>
+                        5. <code>Model</code> 填 <code>GLM-5.2</code>，保存后即可选用。
+                    </div>
+                </details>
+
+                <details>
+                    <summary>OpenCode</summary>
+                    <div class="detail-body">
+                        OpenCode 是开源 AI 编码 agent，通过配置文件接入 OpenAI 兼容 Provider。<br>
+                        1. 编辑配置文件 <code>~/.config/opencode/opencode.json</code>（不存在则新建）。<br>
+                        2. 在 <code>providers</code> 中新增一个 <code>openai-compatible</code> 类型的 Provider：<br>
+                        <code>baseUrl</code> 填 <code>https://ai.shimiaocheng.top/v1</code>；<br>
+                        <code>apiKey</code> 填页面顶部「你的 Key」框里的 <code>sk-...</code> 值；<br>
+                        在 <code>models</code> 里添加一项名称为 <code>GLM-5.2</code>。<br>
+                        3. 重启 OpenCode，选择该 Provider 与 <code>GLM-5.2</code> 模型即可。
+                    </div>
+                </details>
+
+                <details>
+                    <summary>Hermes</summary>
+                    <div class="detail-body">
+                        Hermes 作为通用 OpenAI 兼容客户端，按以下步骤接入（具体菜单名称以实际界面为准）：<br>
+                        1. 打开客户端的 <code>Settings</code> / <code>Preferences</code>。<br>
+                        2. 找到 <code>API</code> / <code>Provider</code> 配置项，选择 <code>OpenAI Compatible</code> 或自定义 Provider。<br>
+                        3. <code>Base URL</code> 填 <code>https://ai.shimiaocheng.top/v1</code>。<br>
+                        4. <code>API Key</code> 填页面顶部「你的 Key」框里的 <code>sk-...</code> 值。<br>
+                        5. <code>Model</code> 填 <code>GLM-5.2</code>。<br>
+                        <span class="warn-note">以上为通用步骤，具体路径以实际客户端界面为准。</span>
+                    </div>
+                </details>
+
+                <details>
+                    <summary>OpenClaw</summary>
+                    <div class="detail-body">
+                        OpenClaw 作为通用 OpenAI 兼容客户端，按以下步骤接入（具体菜单名称以实际界面为准）：<br>
+                        1. 打开客户端的 <code>Settings</code> / <code>Preferences</code>。<br>
+                        2. 找到 <code>API</code> / <code>Provider</code> 配置项，选择 <code>OpenAI Compatible</code> 或自定义 Provider。<br>
+                        3. <code>Base URL</code> 填 <code>https://ai.shimiaocheng.top/v1</code>。<br>
+                        4. <code>API Key</code> 填页面顶部「你的 Key」框里的 <code>sk-...</code> 值。<br>
+                        5. <code>Model</code> 填 <code>GLM-5.2</code>。<br>
+                        <span class="warn-note">以上为通用步骤，具体路径以实际客户端界面为准。</span>
+                    </div>
+                </details>
             </div>
         </div>
 
@@ -259,7 +368,7 @@ function renderDashboard(data) {
 
 function copyKey() {
     navigator.clipboard.writeText(currentKey).then(() => {
-        const btn = document.querySelector('.copy-btn');
+        const btn = $('copy-key-btn');
         btn.textContent = '✅ 已复制';
         setTimeout(() => btn.textContent = '📋 复制', 2000);
     });
@@ -268,6 +377,34 @@ function copyKey() {
 function showError(msg) {
     $('error-msg').textContent = msg;
     $('error-msg').classList.remove('hidden');
+}
+
+const BASE_URL = 'https://ai.shimiaocheng.top/v1';
+
+function showTab(name) {
+    const overview = $('tab-overview');
+    const clients = $('tab-clients');
+    const btnOverview = $('tab-btn-overview');
+    const btnClients = $('tab-btn-clients');
+    if (name === 'clients') {
+        overview.classList.add('hidden');
+        clients.classList.remove('hidden');
+        btnOverview.classList.remove('active');
+        btnClients.classList.add('active');
+    } else {
+        clients.classList.add('hidden');
+        overview.classList.remove('hidden');
+        btnClients.classList.remove('active');
+        btnOverview.classList.add('active');
+    }
+}
+
+function copyBaseUrl() {
+    navigator.clipboard.writeText(BASE_URL).then(() => {
+        const btn = $('copy-base-btn');
+        btn.textContent = '✅ 已复制';
+        setTimeout(() => btn.textContent = '📋 复制', 2000);
+    });
 }
 
 function logout() {
