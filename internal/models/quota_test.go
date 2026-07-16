@@ -15,7 +15,7 @@ func newQuotaUser(t *testing.T, database *db.DB, limit5h, limitTotal int) int64 
 		database.Conn,
 		"quota-user", "pw-hash", "sub-hash-quota", "sk-quota...",
 		"user", "active", "", "auto", "",
-		limit5h, limitTotal, nil,
+		limit5h, limitTotal, nil, 0,
 	)
 	if err != nil {
 		t.Fatalf("CreateUser failed: %v", err)

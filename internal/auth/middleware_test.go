@@ -37,7 +37,7 @@ func createUser(t *testing.T, database *db.DB, role, status, expiresAt, routeMod
 		database.Conn,
 		"user_"+subKey[:8], "phash", subKeyHash, subKeyPreview,
 		role, status, expiresAt, routeMode, fixedProvider,
-		100, 10000, nil,
+		100, 10000, nil, 0,
 	); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}

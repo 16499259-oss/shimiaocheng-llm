@@ -25,6 +25,8 @@ const (
 	CtxKeyRouteMode contextKey = "route_mode"
 	// CtxKeyFixedProvider is the context key for the user's fixed provider slug.
 	CtxKeyFixedProvider contextKey = "fixed_provider"
+	// CtxKeyMaxBodySize is the context key for the user's per-request body cap (bytes).
+	CtxKeyMaxBodySize contextKey = "max_body_size"
 )
 
 // Middleware provides authentication middleware functions.
@@ -91,6 +93,7 @@ func (m *Middleware) SubKeyAuth(next http.Handler) http.Handler {
 		ctx = context.WithValue(ctx, CtxKeyUserRole, user.Role)
 		ctx = context.WithValue(ctx, CtxKeyRouteMode, user.RouteMode)
 		ctx = context.WithValue(ctx, CtxKeyFixedProvider, user.FixedProvider)
+		ctx = context.WithValue(ctx, CtxKeyMaxBodySize, int64(user.MaxBodySize))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -179,6 +182,17 @@ func GetFixedProvider(r *http.Request) string {
 	v, ok := r.Context().Value(CtxKeyFixedProvider).(string)
 	if !ok {
 		return ""
+	}
+	return v
+}
+
+// GetMaxBodySize extracts the user's per-request body cap (bytes) from the
+// request context. Returns 0 if unset, so callers must fall back to
+// models.DefaultMaxBodySize.
+func GetMaxBodySize(r *http.Request) int64 {
+	v, ok := r.Context().Value(CtxKeyMaxBodySize).(int64)
+	if !ok {
+		return 0
 	}
 	return v
 }

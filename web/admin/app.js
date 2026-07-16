@@ -431,8 +431,8 @@ async function shareUser(username, id) {
 }
 
 function buildShareText(subKey) {
-    return ['你的 LLM API 账户已开通！', '', 'Key：' + subKey, '',
-        'Base URL：https://ai.shimiaocheng.top/v1', '   （Cursor / ChatBox / 所有 OpenAI 客户端均填此项）', '',
+    return ['你的 GLM API 账户已开通！', '', 'Key：' + subKey, '',
+        'Base URL：https://ai.shimiaocheng.top/v1', '',
         '模型名称：GLM-5.2', '', '自助面板（查余量、看用法）：', '   https://ai.shimiaocheng.top/user/'].join('\n');
 }
 
@@ -473,11 +473,11 @@ async function loadUsers() {
             }
             return `<tr${rowClass}>
                 <td>${u.id}</td><td>${escapeHtml(u.username)}</td><td><code>${escapeHtml(u.sub_key_preview)}</code></td>
-                <td>${quota5h}</td><td>${quotaTotal}</td><td>${tokens}</td><td>${routeHtml}</td><td>${expiryHtml}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
+                <td>${quota5h}</td><td>${quotaTotal}</td><td>${tokens}</td><td>${routeHtml}</td><td>${(u.max_body_size ? u.max_body_size / 1048576 : 1)} MB</td><td>${expiryHtml}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
                 <td><div class="btn-group">
                     <button class="btn btn-outline btn-sm" onclick="extendUser(${u.id},'${escapeAttr(u.username)}','${escapeAttr(u.expires_at || '')}')">🕐 延期</button>
                     <button class="btn btn-outline btn-sm" onclick="shareUser('${escapeAttr(u.username)}',${u.id})">📋 分享</button>
-                    <button class="btn btn-outline btn-sm" onclick="editUser(${u.id},'${escapeAttr(u.status)}',${u.quota_5h_limit},${u.quota_total_limit},'${escapeAttr(u.route_mode || 'auto')}','${escapeAttr(u.fixed_provider || '')}',${u.fixed_multiplier != null ? u.fixed_multiplier : 'null'})">编辑</button>
+                    <button class="btn btn-outline btn-sm" onclick="editUser(${u.id},'${escapeAttr(u.status)}',${u.quota_5h_limit},${u.quota_total_limit},'${escapeAttr(u.route_mode || 'auto')}','${escapeAttr(u.fixed_provider || '')}',${u.fixed_multiplier != null ? u.fixed_multiplier : 'null'},${u.max_body_size ? u.max_body_size : 1048576})">编辑</button>
                     <button class="btn btn-outline btn-sm" onclick="viewCalls(${u.id},'${escapeAttr(u.username)}')">记录</button>
                     <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id},'${escapeAttr(u.username)}')">删除</button>
                 </div></td>
@@ -512,9 +512,11 @@ async function createUser(e) {
     const fixedProvider = routeMode === 'fixed' ? document.getElementById('new-fixed-provider').value : '';
     const fmRaw = document.getElementById('new-fixed-multiplier').value;
     const fixedMultiplier = fmRaw ? parseFloat(fmRaw) : null;
+    const mbs = parseInt(document.getElementById('new-max-body-size').value) || 1;
 
     const body = { username, quota_5h_limit: q5, quota_total_limit: qt, expires_at: expiresAt, route_mode: routeMode, fixed_provider: fixedProvider };
     if (fixedMultiplier != null) body.fixed_multiplier = fixedMultiplier;
+    body.max_body_size = mbs * 1048576;
 
     try {
         const data = await apiFetch('api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -535,7 +537,7 @@ async function createUser(e) {
     } catch (err) { document.getElementById('create-user-result').textContent = '创建失败: ' + err.message; document.getElementById('create-user-result').classList.remove('hidden'); }
 }
 
-function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier) {
+function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier, maxBodySize) {
     document.getElementById('update-user-id').value = id;
     document.getElementById('update-quota-5h').value = q5;
     document.getElementById('update-quota-total').value = qt;
@@ -545,6 +547,7 @@ function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier)
     document.getElementById('update-fixed-provider').value = '';
     document.getElementById('update-fixed-provider-group').style.display = 'none';
     document.getElementById('update-fixed-multiplier').value = '';
+    document.getElementById('update-max-body-size').value = String(Math.round((maxBodySize || 1048576) / 1048576));
     document.getElementById('update-user-result').classList.add('hidden');
     // Pre-fill existing route mode info (display only, user can change)
     if (routeMode && routeMode !== 'null') {
@@ -588,6 +591,8 @@ async function updateUser(e) {
         // Input cleared but user previously had a value → send explicit clear signal
         body.fixed_multiplier_clear = true;
     }
+    const umbs = document.getElementById('update-max-body-size').value;
+    if (umbs) body.max_body_size = parseInt(umbs) * 1048576;
     if (body.regenerate_key && !confirm('确定要重新生成 Key 吗？旧 Key 将立即失效。')) return;
     try {
         const data = await apiFetch('api/users/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

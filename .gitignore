@@ -1,5 +1,6 @@
 # Binaries
 llm_api_gateway
+llm_api_gateway_linux
 *.exe
 
 # IDE

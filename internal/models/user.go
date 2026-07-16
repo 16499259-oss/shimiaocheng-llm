@@ -7,6 +7,15 @@ import (
 	"time"
 )
 
+// DefaultMaxBodySize is the per-user request body cap (1MB) applied when a
+// user has no explicit max_body_size set.
+const DefaultMaxBodySize = 1 << 20
+
+// MaxBodySizeCeiling is the hard ceiling for any per-user cap. It MUST match the
+// nginx /v1/ client_max_body_size (currently 32MB): a per-user cap above this is
+// unreachable because nginx rejects larger bodies before Go sees them.
+const MaxBodySizeCeiling = 32 << 20
+
 // User represents a user in the system.
 type User struct {
 	ID            int64  `json:"id"`
@@ -21,6 +30,7 @@ type User struct {
 	ExpiresAt     string `json:"expires_at"`
 	RouteMode     string `json:"route_mode"`     // "auto" | "fixed"
 	FixedProvider string `json:"fixed_provider"` // provider slug when route_mode=fixed
+	MaxBodySize   int    `json:"max_body_size"`  // per-request body cap in bytes (default 1MB)
 }
 
 // UserWithQuota combines user info with quota info for API responses.
@@ -36,7 +46,8 @@ type UserWithQuota struct {
 }
 
 // CreateUser inserts a new user and associated quota record.
-func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, role, status, expiresAt, routeMode, fixedProvider string, quota5hLimit, quotaTotalLimit int, fixedMultiplier *float64) (*UserWithQuota, error) {
+// maxBodySize is the per-request body cap in bytes; <=0 falls back to DefaultMaxBodySize.
+func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, role, status, expiresAt, routeMode, fixedProvider string, quota5hLimit, quotaTotalLimit int, fixedMultiplier *float64, maxBodySize int) (*UserWithQuota, error) {
 	now := time.Now().Format(time.RFC3339)
 
 	// Admin users never expire and always use auto route mode.
@@ -51,6 +62,11 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 		routeMode = "auto"
 	}
 
+	// Default per-request body cap to 1MB when unset or invalid.
+	if maxBodySize <= 0 {
+		maxBodySize = DefaultMaxBodySize
+	}
+
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -59,9 +75,9 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 
 	// Insert user
 	result, err := tx.Exec(
-		`INSERT INTO users (username, password_hash, sub_key_hash, sub_key_preview, role, status, expires_at, route_mode, fixed_provider, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		username, passwordHash, subKeyHash, subKeyPreview, role, status, expiresAt, routeMode, fixedProvider, now, now,
+		`INSERT INTO users (username, password_hash, sub_key_hash, sub_key_preview, role, status, expires_at, route_mode, fixed_provider, max_body_size, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		username, passwordHash, subKeyHash, subKeyPreview, role, status, expiresAt, routeMode, fixedProvider, maxBodySize, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert user: %w", err)
@@ -103,6 +119,7 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 			ExpiresAt:     expiresAt,
 			RouteMode:     routeMode,
 			FixedProvider: fixedProvider,
+			MaxBodySize:   maxBodySize,
 		},
 		Quota5hLimit:    quota5hLimit,
 		Quota5hUsed:     0,
@@ -115,9 +132,9 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 func GetUserBySubKeyHash(db *sql.DB, subKeyHash string) (*User, error) {
 	u := &User{}
 	err := db.QueryRow(
-		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at, expires_at, route_mode, fixed_provider
+		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at, expires_at, route_mode, fixed_provider, max_body_size
 		 FROM users WHERE sub_key_hash = ? AND status != 'deleted'`, subKeyHash,
-	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt, &u.ExpiresAt, &u.RouteMode, &u.FixedProvider)
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt, &u.ExpiresAt, &u.RouteMode, &u.FixedProvider, &u.MaxBodySize)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -132,9 +149,9 @@ func GetUserBySubKeyHash(db *sql.DB, subKeyHash string) (*User, error) {
 func GetUserByID(db *sql.DB, id int64) (*User, error) {
 	u := &User{}
 	err := db.QueryRow(
-		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at, expires_at, route_mode, fixed_provider
+		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at, expires_at, route_mode, fixed_provider, max_body_size
 		 FROM users WHERE id = ?`, id,
-	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt, &u.ExpiresAt, &u.RouteMode, &u.FixedProvider)
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt, &u.ExpiresAt, &u.RouteMode, &u.FixedProvider, &u.MaxBodySize)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -149,9 +166,9 @@ func GetUserByID(db *sql.DB, id int64) (*User, error) {
 func GetUserByUsername(db *sql.DB, username string) (*User, error) {
 	u := &User{}
 	err := db.QueryRow(
-		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at, expires_at, route_mode, fixed_provider
+		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at, expires_at, route_mode, fixed_provider, max_body_size
 		 FROM users WHERE username = ?`, username,
-	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt, &u.ExpiresAt, &u.RouteMode, &u.FixedProvider)
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt, &u.ExpiresAt, &u.RouteMode, &u.FixedProvider, &u.MaxBodySize)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -165,7 +182,7 @@ func GetUserByUsername(db *sql.DB, username string) (*User, error) {
 // ListUsers returns all users with their quota information (for admin).
 func ListUsers(db *sql.DB) ([]UserWithQuota, error) {
 	rows, err := db.Query(
-		`SELECT u.id, u.username, u.sub_key_preview, u.role, u.status, u.created_at, u.updated_at, u.expires_at, u.route_mode, u.fixed_provider,
+		`SELECT u.id, u.username, u.sub_key_preview, u.role, u.status, u.created_at, u.updated_at, u.expires_at, u.route_mode, u.fixed_provider, u.max_body_size,
 		        q.quota_5h_limit, q.quota_5h_used, q.quota_total_limit, q.quota_total_used, q.fixed_multiplier,
 		        COALESCE(t.total_tokens, 0) AS total_tokens
 		 FROM users u
@@ -185,7 +202,7 @@ func ListUsers(db *sql.DB) ([]UserWithQuota, error) {
 		var fixedMult sql.NullFloat64
 		err := rows.Scan(
 			&uwq.ID, &uwq.Username, &uwq.SubKeyPreview, &uwq.Role, &uwq.Status,
-			&uwq.CreatedAt, &uwq.UpdatedAt, &uwq.ExpiresAt, &uwq.RouteMode, &uwq.FixedProvider,
+			&uwq.CreatedAt, &uwq.UpdatedAt, &uwq.ExpiresAt, &uwq.RouteMode, &uwq.FixedProvider, &uwq.MaxBodySize,
 			&uwq.Quota5hLimit, &uwq.Quota5hUsed, &uwq.QuotaTotalLimit, &uwq.QuotaTotalUsed,
 			&fixedMult, &uwq.TotalTokens,
 		)
@@ -247,6 +264,19 @@ func UpdateUserRoute(db *sql.DB, userID int64, routeMode, fixedProvider string) 
 	)
 	if err != nil {
 		return fmt.Errorf("update user route: %w", err)
+	}
+	return nil
+}
+
+// UpdateUserMaxBodySize updates a user's per-request body cap (bytes).
+func UpdateUserMaxBodySize(db *sql.DB, userID int64, maxBodySize int) error {
+	now := time.Now().Format(time.RFC3339)
+	_, err := db.Exec(
+		`UPDATE users SET max_body_size = ?, updated_at = ? WHERE id = ?`,
+		maxBodySize, now, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("update user max body size: %w", err)
 	}
 	return nil
 }

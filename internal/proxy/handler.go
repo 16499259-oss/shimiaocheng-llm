@@ -4,6 +4,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"math"
@@ -176,14 +177,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Limit request body to 32MB (mirrors nginx /v1/ client_max_body_size).
-	// Coding clients (e.g. ZCode) send large code-context payloads; 1MB was too tight.
-	// Admin/UI paths remain capped at 1MB by the nginx server-level config.
-	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
+	// Enforce the user's per-request body cap. nginx already passes bodies up to
+	// models.MaxBodySizeCeiling (32MB); Go applies the tighter per-user limit here.
+	// Falls back to models.DefaultMaxBodySize (1MB) when unset, and is capped at the
+	// ceiling so it can never exceed what nginx will forward.
+	maxBody := auth.GetMaxBodySize(r)
+	if maxBody <= 0 {
+		maxBody = models.DefaultMaxBodySize
+	}
+	if maxBody > models.MaxBodySizeCeiling {
+		maxBody = models.MaxBodySizeCeiling
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 
 	// Parse request body
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
+		// MaxBytesReader returns *http.MaxBytesError when the per-user cap is
+		// exceeded. Surface it as 413 (not a generic 400) with a generic message
+		// (no numeric limit exposed) so clients recognise "request too large".
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			// Per-user cap exceeded. Do NOT reveal the account's numeric limit;
+			// surface a generic message so clients recognise "request too large".
+			writeProxyError(w, http.StatusRequestEntityTooLarge,
+				"请求操作已超过模型最大请求限制",
+				"request_entity_too_large")
+			return
+		}
 		writeProxyError(w, http.StatusBadRequest, "Failed to read request body", "bad_request")
 		return
 	}

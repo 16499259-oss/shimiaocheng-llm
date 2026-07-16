@@ -204,6 +204,17 @@ func RunMigrations(conn *DB) error {
 		}
 	}
 
+	// Add max_body_size column to users (idempotent). Per-user request body cap
+	// in bytes; default 1MB. Enforced by Go after auth (nginx only provides a
+	// high global ceiling so per-user caps can be applied downstream).
+	if !columnExists(conn, "users", "max_body_size") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE users ADD COLUMN max_body_size INTEGER NOT NULL DEFAULT 1048576`,
+		); err != nil {
+			return fmt.Errorf("migration alter users.max_body_size failed: %w", err)
+		}
+	}
+
 	// Add fixed_multiplier column to quotas (idempotent).
 	if !columnExists(conn, "quotas", "fixed_multiplier") {
 		if _, err := conn.Conn.Exec(
