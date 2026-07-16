@@ -21,8 +21,8 @@ Go 网关（`llm_api_gateway`）本身以 `127.0.0.1:8080` 仅监听本地，不
 
 1. **隐蔽管理路径**：对外暴露名 `/m-7xa2/`，nginx 内部 `proxy_pass` 映射到 Go 的 `/admin/`。真实 `/admin/` 路径不直接对外暴露，降低管理面板被扫描/爆破的暴露面（`AGENTS.md` 第 6 节明确为关键不变量）。
 2. **登录限速 `login_limit`**：`limit_req_zone $binary_remote_addr zone=login_limit:10m rate=5r/m;`（定义在 http 块，burst 5，nodelay），套在 `/m-7xa2/`。
-3. **API 限速 `api_limit`**：`limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;`（定义在 http 块，burst 20，nodelay），套在 `/v1/`。
-4. **请求体上限 1MB**：`client_max_body_size 1m`；Go 侧再以 `http.MaxBytesReader` 做双保险（见 `AGENTS.md` 第 6 节）。
+3. **API 限速 `api_limit`（已移除）**：原 `limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s`（http 块，burst 20，nodelay）套在 `/v1/`；2026-07-13 起因纯中转定位（上游自带限速）已**移除**，`/v1/` 不再有 nginx 层限速。仅保留 `login_limit` 套在 `/m-7xa2/`。
+4. **请求体上限**：server 默认 `client_max_body_size 1m`（admin/UI 路径）；`/v1/` 覆盖为 `32m` 通道天花板（与 Go `MaxBodySizeCeiling` 一致），Go 侧再以 `http.MaxBytesReader` 按用户 `max_body_size` 双保险（见 `AGENTS.md` 第 6 节）。
 5. **安全响应头**（各 location 统一添加）：
    - `Strict-Transport-Security "max-age=31536000; includeSubDomains"`（HSTS）
    - `X-Content-Type-Options: nosniff`

@@ -135,13 +135,13 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 /tmp/go/bin/go test ./...
 
 ## 8. 安全加固现状（2026-07-11，分支 security-hardening）
 
-- **nginx 限速**：`login_limit`(5r/m) / `api_limit`(10r/s)，zone 定义在
-  `/etc/nginx/conf.d/rate-limit.conf`（http 块 include）；`/m-7xa2/` 套 login_limit，`/v1/` 套 api_limit
+- **nginx 限速**：`login_limit`(5r/m)，zone 定义在
+  `/etc/nginx/conf.d/rate-limit.conf`（http 块 include）；`/m-7xa2/` 套 login_limit 防护后台爆破。`/v1/` **无 nginx 限速**（纯中转，上游自带限速；2026-07-13 决策移除 `api_limit`）
 - **API Key**：内存态 + systemd 环境变量持久化（不落盘明文）
 - **请求体**：per-user `max_body_size`（默认 1MB，后台可调 500KB/1/4/8/16/32MB）；nginx `/v1/` 维持 32m 通道天花板（Go 读取上限），Go 按用户执行。`compaction: "trim"`（默认）下，请求超过用户上限时**自动裁剪历史对话**（保留 system + 最近轮次）后转发，**不再 413**；`compaction: "off"` 恢复旧行为（超限即 413）。无论哪种，超过 32MB 绝对天花板仍 413（滥用防护）。管理后台/UI 路径仍 1MB（nginx server 级 + Go `MaxBytesReader` 双保险）。
 - **流式**：10 分钟整体超时
 - **前端**：`escapeAttr` 反斜杠转义（防 self-XSS）
-- **部署模板**：`deploy/nginx.conf` 已同步为脱敏真实配置（含限速 zone 注释）
+- **部署模板**：`deploy/nginx.conf` 已同步为脱敏真实配置（`/v1/` 无 api_limit 限速，login_limit 注释保留）
 
 ---
 
