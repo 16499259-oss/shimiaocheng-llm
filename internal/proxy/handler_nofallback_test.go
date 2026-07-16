@@ -73,7 +73,7 @@ func TestHandler_ServeHTTP_StrictNoFallbackReturns502(t *testing.T) {
 	subHash := auth.HashSubKey(subKey)
 	subPreview := auth.SubKeyPreview(subKey)
 	if _, err := models.CreateUser(database.Conn, "qa", "pw", subHash, subPreview,
-		"user", "active", "", "auto", "", 1_000_000, 1_000_000, nil); err != nil {
+		"user", "active", "", "auto", "", 1_000_000, 1_000_000, nil, 0); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 
@@ -156,7 +156,7 @@ func TestHandler_ServeHTTP_QuotaExceededReturns429(t *testing.T) {
 	subHash := auth.HashSubKey(subKey)
 	subPreview := auth.SubKeyPreview(subKey)
 	if _, err := models.CreateUser(database.Conn, "qa2", "pw", subHash, subPreview,
-		"user", "active", "", "auto", "", 1_000_000, 0, nil); err != nil { // total quota 0 -> always exceeded
+		"user", "active", "", "auto", "", 1_000_000, 0, nil, 0); err != nil { // total quota 0 -> always exceeded
 		t.Fatalf("create user: %v", err)
 	}
 

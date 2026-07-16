@@ -26,6 +26,7 @@ type createUserRequest struct {
 	RouteMode       string   `json:"route_mode"`
 	FixedProvider   string   `json:"fixed_provider"`
 	FixedMultiplier *float64 `json:"fixed_multiplier"`
+	MaxBodySize     int      `json:"max_body_size"`
 }
 
 // updateUserRequest is the JSON body for PUT /admin/api/users/{id}.
@@ -38,6 +39,7 @@ type updateUserRequest struct {
 	FixedProvider        *string  `json:"fixed_provider"`
 	FixedMultiplier      *float64 `json:"fixed_multiplier"`
 	FixedMultiplierClear bool     `json:"fixed_multiplier_clear"`
+	MaxBodySize          *int     `json:"max_body_size"`
 }
 
 // extendUserRequest is the JSON body for POST /admin/api/users/{id}/extend.
@@ -70,6 +72,15 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		req.RouteMode = "auto"
 	}
 
+	// Per-request body cap. <=0 falls back to 1MB; cap at the nginx ceiling.
+	maxBodySize := req.MaxBodySize
+	if maxBodySize <= 0 {
+		maxBodySize = models.DefaultMaxBodySize
+	}
+	if maxBodySize > models.MaxBodySizeCeiling {
+		maxBodySize = models.MaxBodySizeCeiling
+	}
+
 	// Generate sub-key
 	subKey := auth.GenerateSubKey(h.SubKeySalt, 0) // userID is not yet known, use 0 as placeholder
 	// Regenerate with a proper approach: generate, then we'll store
@@ -82,7 +93,7 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	user, err := models.CreateUser(
 		h.DB, req.Username, emptyPassHash, subKeyHash, subKeyPreview,
 		"user", "active", req.ExpiresAt, req.RouteMode, req.FixedProvider,
-		req.Quota5hLimit, req.QuotaTotalLimit, req.FixedMultiplier,
+		req.Quota5hLimit, req.QuotaTotalLimit, req.FixedMultiplier, maxBodySize,
 	)
 	if err != nil {
 		log.Printf("ERROR: create user: %v", err)
@@ -136,6 +147,7 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		"route_mode":        user.RouteMode,
 		"fixed_provider":    user.FixedProvider,
 		"status":            user.Status,
+		"max_body_size":     user.MaxBodySize,
 		"created_at":        user.CreatedAt,
 	}
 	if req.FixedMultiplier != nil {
@@ -228,6 +240,23 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 			response["fixed_provider"] = fp
 			routeChanged = true
 		}
+	}
+
+	// Update per-request body cap.
+	if req.MaxBodySize != nil {
+		v := *req.MaxBodySize
+		if v <= 0 {
+			v = models.DefaultMaxBodySize
+		}
+		if v > models.MaxBodySizeCeiling {
+			v = models.MaxBodySizeCeiling
+		}
+		if err := models.UpdateUserMaxBodySize(h.DB, userID, v); err != nil {
+			log.Printf("ERROR: update max body size: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to update max body size"})
+			return
+		}
+		response["max_body_size"] = v
 	}
 
 	// Update fixed_multiplier. fixed_multiplier_clear takes priority —

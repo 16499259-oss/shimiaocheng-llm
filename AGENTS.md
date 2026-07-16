@@ -107,7 +107,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 /tmp/go/bin/go test ./...
   （**不是**完整 `/v1/chat/completions`，否则 Cursor 拼接成
   `/v1/chat/completions/chat/completions` 导致 404）。
 - **禁用/删除用户三重拦截**：SQL 过滤（`status != 'deleted'`）+ 中间件（`disabled`/`deleted` 返回 403）+ 列表排除。
-- **请求体限制**：API 路径(`/v1/`)nginx `client_max_body_size 32m` + Go `http.MaxBytesReader`(`32<<20`)，以兼容 ZCode 等编码客户端的大请求体；管理后台/UI 路径仍保留 1MB server 级守卫。限制仍在，仅放宽 API 天花板。
+- **请求体限制（per-user）**：用户表 `max_body_size` 列（字节，默认 1MB）控制每个用户的单次请求体上限；鉴权后由 Go `http.MaxBytesReader` 按该值执行，未设置回落 1MB、超过 32MB 自动封顶。nginx `/v1/` 维持 `client_max_body_size 32m` 作为**全局通道天花板**（go 无法超过此值），管理后台/UI 路径仍保留 1MB server 级守卫。滥用量由「每用户调用配额 + 每用户请求体上限」共同控制，非全局一刀切。
 - **时段路由：命中即走，绝不回退**（见 ADR-0006）：按 `provider_routing_rules` 的「时间段 + 星期」
   判定，窗口命中某 provider（如 openai）即转发该上游；**若其故障返回 502，绝不静默回退默认
   provider（如 zhipu）**。路由规则表空 / DB 错时回退默认 provider，但不 panic。
@@ -125,7 +125,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 /tmp/go/bin/go test ./...
 - 不要暴露 `/admin/` 真实路径，或去掉隐蔽路径
 - 不要把明文 Key 落盘（见第 5 节）
 - 不要破坏 `/v1/models` 端点
-- 不要移除请求体限制（API 路径可放宽至 32MB，但管理后台/UI 路径须保留 1MB 守卫，勿整体取消）
+- 不要移除请求体限制（per-user `max_body_size` 仍须保留默认 1MB 守卫；nginx `/v1/` 的 32m 是通道天花板，勿降到低于你想分配给任何用户的最大值，也勿整体取消后台/UI 的 1MB）
 - 不要改变子 Key 的 SHA256+salt 哈希方式
 - 不要做时段路由回退（窗口命中 B 故障即 502，绝不可静默重试默认 A）
 - 不要用裸本地时区（`time.Now()`）做时段/倍率窗口比较，必须 `.In(timeutil.ShanghaiTZ)`
@@ -138,7 +138,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 /tmp/go/bin/go test ./...
 - **nginx 限速**：`login_limit`(5r/m) / `api_limit`(10r/s)，zone 定义在
   `/etc/nginx/conf.d/rate-limit.conf`（http 块 include）；`/m-7xa2/` 套 login_limit，`/v1/` 套 api_limit
 - **API Key**：内存态 + systemd 环境变量持久化（不落盘明文）
-- **请求体**：API 路径(`/v1/`)放宽至 32MB 以兼容编码客户端大请求体；管理后台/UI 路径仍 1MB（nginx server 级 + Go `MaxBytesReader` 双保险）
+- **请求体**：per-user `max_body_size`（默认 1MB，后台可调 1/4/8/16/32MB）；nginx `/v1/` 维持 32m 通道天花板，Go 按用户执行；管理后台/UI 路径仍 1MB（nginx server 级 + Go `MaxBytesReader` 双保险）
 - **流式**：10 分钟整体超时
 - **前端**：`escapeAttr` 反斜杠转义（防 self-XSS）
 - **部署模板**：`deploy/nginx.conf` 已同步为脱敏真实配置（含限速 zone 注释）
