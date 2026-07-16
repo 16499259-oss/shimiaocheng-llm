@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"time"
 )
 
 // RunMigrations creates all tables if they do not exist.
@@ -210,6 +211,17 @@ func RunMigrations(conn *DB) error {
 		); err != nil {
 			return fmt.Errorf("migration alter quotas.fixed_multiplier failed: %w", err)
 		}
+	}
+
+	// ── One-time data fix (2026-08-16) ──
+	// User "大仙撸车" (id=39) was mistakenly set to permanent (expires_at='').
+	// Correct to 2026-08-15 (Beijing time, end of day). Guarded so it only
+	// applies while still permanent; idempotent and safe across restarts.
+	if _, err := conn.Conn.Exec(
+		`UPDATE users SET expires_at = ?, updated_at = ? WHERE username = ? AND (expires_at IS NULL OR expires_at = '')`,
+		"2026-08-15T23:59:59+08:00", time.Now().Format(time.RFC3339), "大仙撸车",
+	); err != nil {
+		return fmt.Errorf("data fix daxian expiry: %w", err)
 	}
 
 	log.Println("Database migrations completed successfully")
