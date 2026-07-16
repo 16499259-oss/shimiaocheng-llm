@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"math"
@@ -195,16 +194,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		// MaxBytesReader returns *http.MaxBytesError when the per-user cap is
-		// exceeded. Surface it as 413 (not a generic 400) with a clear,
-		// account-specific message so clients recognise "request too large".
+		// exceeded. Surface it as 413 (not a generic 400) with a generic message
+		// (no numeric limit exposed) so clients recognise "request too large".
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			limitStr := fmt.Sprintf("%d MB", maxBody/(1024*1024))
-			if maxBody < 1024*1024 {
-				limitStr = fmt.Sprintf("%d bytes", maxBody)
-			}
+			// Per-user cap exceeded. Do NOT reveal the account's numeric limit;
+			// surface a generic message so clients recognise "request too large".
 			writeProxyError(w, http.StatusRequestEntityTooLarge,
-				fmt.Sprintf("Request body too large: your account limit is %s per request", limitStr),
+				"请求操作已超过模型最大请求限制",
 				"request_entity_too_large")
 			return
 		}
