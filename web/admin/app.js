@@ -548,7 +548,7 @@ function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier,
     document.getElementById('update-fixed-provider-group').style.display = 'none';
     document.getElementById('update-fixed-multiplier').value = '';
     // Reflect the stored value on the matching dropdown option (supports the
-    // 500 KB / 0.5 MB step, not just whole MB).
+    // 512 KB / 0.5 MB step, not just whole MB).
     const mbVal = (maxBodySize || 1048576) / 1048576;
     document.getElementById('update-max-body-size').value = String(Math.round(mbVal * 10) / 10);
     document.getElementById('update-user-result').classList.add('hidden');
@@ -1021,7 +1021,7 @@ function escapeAttr(str) { return str.replace(/\\/g, "\\\\").replace(/'/g, "\\'"
 function formatDate(s) { return formatDateSH(s); }
 
 // formatBodySize renders a per-user body cap (bytes) as a human label,
-// e.g. 524288 -> "500 KB", 1048576 -> "1 MB", 4194304 -> "4 MB".
+// e.g. 524288 -> "512 KB", 1048576 -> "1 MB", 4194304 -> "4 MB".
 function formatBodySize(bytes) {
     bytes = bytes || 1048576;
     if (bytes < 1048576) {

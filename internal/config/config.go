@@ -26,6 +26,9 @@ type Config struct {
 	// "trim" (default) auto-compacts chat history to fit each user's per-request
 	// body budget and forwards; "off" restores the legacy hard-413 behaviour.
 	Compaction string `yaml:"compaction"`
+	// Debug enables verbose request logging (e.g. raw body dump on JSON parse
+	// failure). OFF by default to avoid leaking user content into logs.
+	Debug bool `yaml:"debug"`
 }
 
 // ProviderConfig describes a single upstream LLM provider.

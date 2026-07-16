@@ -33,6 +33,10 @@ type Handler struct {
 	// per-request body budget and forwards; CompactionOff restores the legacy
 	// hard-413 behaviour when a request exceeds the per-user budget.
 	Compaction CompactionMode
+	// Debug, when true, dumps the raw request body to logs on JSON parse
+	// failure — useful for troubleshooting malformed clients. OFF by default
+	// to avoid leaking user conversation content into logs in production.
+	Debug bool
 }
 
 // ChatCompletionRequest mirrors the upstream request structure.
@@ -224,10 +228,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var chatReq ChatCompletionRequest
 	if err := json.Unmarshal(bodyBytes, &chatReq); err != nil {
 		log.Printf("ERROR: Failed to parse JSON request body (len=%d): %v", len(bodyBytes), err)
-		if len(bodyBytes) > 500 {
-			log.Printf("DEBUG: Raw body (first 500 bytes): %s", string(bodyBytes[:500]))
-		} else {
-			log.Printf("DEBUG: Raw body: %s", string(bodyBytes))
+		if h.Debug {
+			// Only dump the body when debug mode is explicitly enabled, so we
+			// never leak user conversation content into logs in production.
+			if len(bodyBytes) > 500 {
+				log.Printf("DEBUG: Raw body (first 500 bytes): %s", string(bodyBytes[:500]))
+			} else {
+				log.Printf("DEBUG: Raw body: %s", string(bodyBytes))
+			}
 		}
 		writeProxyError(w, http.StatusBadRequest, "Invalid JSON request body", "bad_request")
 		return

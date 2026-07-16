@@ -139,6 +139,7 @@ func main() {
 		MultiplierEng:  multiplierEng,
 		Router:         routerInst,
 		Compaction:     compaction,
+		Debug:          cfg.Debug,
 	}
 
 	// Quota query handler
