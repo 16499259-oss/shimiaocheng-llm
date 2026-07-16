@@ -29,14 +29,14 @@ func TestAggregateCallStats_ByModelMergeCaseInsensitive(t *testing.T) {
 	// Two case-variant logs of the same model (glm-5.2 / GLM-5.2).
 	insert := func(model string, p, c, tot, status int) {
 		if _, err := models.InsertCallLog(database.Conn, &models.CallLog{
-			UserID:         owner.ID,
-			Model:          model,
-			ProviderID:     "zhipu",
-			PromptTokens:   p,
+			UserID:           owner.ID,
+			Model:            model,
+			ProviderID:       "zhipu",
+			PromptTokens:     p,
 			CompletionTokens: c,
-			TotalTokens:    tot,
-			EffectiveCalls: 1,
-			StatusCode:     status,
+			TotalTokens:      tot,
+			EffectiveCalls:   1,
+			StatusCode:       status,
 		}); err != nil {
 			t.Fatalf("InsertCallLog(%q) failed: %v", model, err)
 		}
@@ -117,14 +117,14 @@ func TestDistinctModels_NormalizedLower(t *testing.T) {
 	}
 	for _, r := range inserts {
 		if _, err := models.InsertCallLog(database.Conn, &models.CallLog{
-			UserID:         owner.ID,
-			Model:          r.model,
-			ProviderID:     "zhipu",
-			PromptTokens:   1,
+			UserID:           owner.ID,
+			Model:            r.model,
+			ProviderID:       "zhipu",
+			PromptTokens:     1,
 			CompletionTokens: 1,
-			TotalTokens:    2,
-			EffectiveCalls: 1,
-			StatusCode:     200,
+			TotalTokens:      2,
+			EffectiveCalls:   1,
+			StatusCode:       200,
 		}); err != nil {
 			t.Fatalf("InsertCallLog(%q) failed: %v", r.model, err)
 		}
@@ -172,14 +172,14 @@ func TestQueryCallLogsGlobal_ModelFilterCaseInsensitive(t *testing.T) {
 
 	// A stored row uses the lower-case model name.
 	if _, err := models.InsertCallLog(database.Conn, &models.CallLog{
-		UserID:         owner.ID,
-		Model:          "glm-5.2",
-		ProviderID:     "zhipu",
-		PromptTokens:   10,
+		UserID:           owner.ID,
+		Model:            "glm-5.2",
+		ProviderID:       "zhipu",
+		PromptTokens:     10,
 		CompletionTokens: 20,
-		TotalTokens:    30,
-		EffectiveCalls: 1,
-		StatusCode:     200,
+		TotalTokens:      30,
+		EffectiveCalls:   1,
+		StatusCode:       200,
 	}); err != nil {
 		t.Fatalf("InsertCallLog(glm-5.2) failed: %v", err)
 	}

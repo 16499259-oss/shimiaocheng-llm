@@ -54,9 +54,9 @@ func okHandler() http.Handler {
 
 // ctxHandler captures auth context values set by the middleware.
 type capturedCtx struct {
-	userID       int64
-	role         string
-	routeMode    string
+	userID        int64
+	role          string
+	routeMode     string
 	fixedProvider string
 }
 
