@@ -128,12 +128,17 @@ func main() {
 
 	// Proxy handler — resolves the upstream provider via the Router.
 	// Legacy getters remain as a fallback when Router is nil (gradual rollout safety).
+	compaction := proxy.CompactionTrim
+	if cfg.Compaction != "" {
+		compaction = proxy.CompactionMode(cfg.Compaction)
+	}
 	proxyHandler := &proxy.Handler{
 		APIKeyGetter:   func() string { return creds.Get("zhipu") },
 		EndpointGetter: func() string { return defaultEndpoint },
 		QuotaChecker:   quotaChecker,
 		MultiplierEng:  multiplierEng,
 		Router:         routerInst,
+		Compaction:     compaction,
 	}
 
 	// Quota query handler

@@ -22,6 +22,10 @@ type Config struct {
 	// per-provider real model name. A missing mapping means the external name
 	// is passed through unchanged (passthrough).
 	ModelMappings []ModelMapping `yaml:"model_mappings"`
+	// Compaction selects the over-budget behaviour for request bodies.
+	// "trim" (default) auto-compacts chat history to fit each user's per-request
+	// body budget and forwards; "off" restores the legacy hard-413 behaviour.
+	Compaction string `yaml:"compaction"`
 }
 
 // ProviderConfig describes a single upstream LLM provider.
@@ -87,6 +91,7 @@ func Load(path string) (*Config, error) {
 	cfg.Quota.Default5hLimit = 100
 	cfg.Quota.DefaultTotalLimit = 10000
 	cfg.Quota.ResetIntervalHours = 5
+	cfg.Compaction = "trim" // auto-compact over-budget requests; "off" = legacy hard 413
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, err
