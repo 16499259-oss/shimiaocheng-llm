@@ -239,6 +239,20 @@ print(response.json())</pre>
                         <span class="warn-note">以上为通用步骤，具体路径以实际客户端界面为准。</span>
                     </div>
                 </details>
+                <details>
+                    <summary>ZCode</summary>
+                    <div class="detail-body">
+                        ZCode 是 Z.ai（智谱）官方的 AI 编码开发工具，支持添加「自定义供应商」走 OpenAI 兼容协议接入本网关：<br>
+                        1. 打开 ZCode，点击左下角 <code>模型选择器</code> → <code>管理模型</code> → <code>模型设置</code>。<br>
+                        2. 点击 <code>添加自定义供应商</code>，协议类型选择 <code>OpenAI 兼容</code>。<br>
+                        3. <code>API 基础 URL</code> 填 <code>https://ai.shimiaocheng.top/v1</code>。<br>
+                        4. <code>API Key</code> 填页面顶部「你的 Key」框里的 <code>sk-...</code> 值。<br>
+                        5. <code>模型名称</code> 填 <code>GLM-5.2</code>。<br>
+                        6. 打开该供应商的启用开关并保存。<br>
+                        7. 回到对话框，选中 <code>GLM-5.2</code> 发一句话测试连通性。<br>
+                        <span class="warn-note">ZCode 自定义供应商仅支持 OpenAI 兼容 / Anthropic 两类协议，本网关请选「OpenAI 兼容」。</span>
+                    </div>
+                </details>
             </div>
         </div>
 

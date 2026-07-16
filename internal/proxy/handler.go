@@ -176,8 +176,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Limit request body to 1MB to prevent OOM attacks
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	// Limit request body to 32MB (mirrors nginx /v1/ client_max_body_size).
+	// Coding clients (e.g. ZCode) send large code-context payloads; 1MB was too tight.
+	// Admin/UI paths remain capped at 1MB by the nginx server-level config.
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
 
 	// Parse request body
 	bodyBytes, err := io.ReadAll(r.Body)
