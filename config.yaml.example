@@ -44,3 +44,9 @@ quota:
   default_5h_limit: 100           # 默认 5h 窗口调用次数上限
   default_total_limit: 10000      # 默认账户总调用次数上限
   reset_interval_hours: 5         # 5h 窗口重置间隔
+
+# 请求体超限策略：
+#   trim（默认）— 超过用户「单次请求上限」时自动裁剪历史对话（保留 system + 最近轮次）后转发，不再 413；
+#   off         — 恢复旧行为：超过用户上限直接返回 413。
+# 注意：无论哪种，超过 nginx 32MB 绝对天花板仍会被拒（413）。
+compaction: "trim"

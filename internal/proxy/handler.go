@@ -28,6 +28,11 @@ type Handler struct {
 	// the model name. When nil, the handler falls back to APIKeyGetter /
 	// EndpointGetter (gradual rollout safety).
 	Router *router.Router
+	// Compaction selects the over-budget behaviour for request bodies.
+	// CompactionTrim (default) auto-compacts chat history to fit the user's
+	// per-request body budget and forwards; CompactionOff restores the legacy
+	// hard-413 behaviour when a request exceeds the per-user budget.
+	Compaction CompactionMode
 }
 
 // ChatCompletionRequest mirrors the upstream request structure.
@@ -177,29 +182,36 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce the user's per-request body cap. nginx already passes bodies up to
-	// models.MaxBodySizeCeiling (32MB); Go applies the tighter per-user limit here.
-	// Falls back to models.DefaultMaxBodySize (1MB) when unset, and is capped at the
-	// ceiling so it can never exceed what nginx will forward.
-	maxBody := auth.GetMaxBodySize(r)
-	if maxBody <= 0 {
-		maxBody = models.DefaultMaxBodySize
+	// Determine the user's per-request body budget. The gateway always reads
+	// the full request up to the absolute 32MB ceiling so it can inspect and,
+	// when compaction is enabled, auto-trim oversized requests. Only requests
+	// above the ceiling are rejected with 413 (abuse protection). When
+	// compaction is disabled we fall back to reading at the per-user budget and
+	// failing with 413 on overflow (legacy behaviour).
+	budget := auth.GetMaxBodySize(r)
+	if budget <= 0 {
+		budget = models.DefaultMaxBodySize
 	}
-	if maxBody > models.MaxBodySizeCeiling {
-		maxBody = models.MaxBodySizeCeiling
+	if budget > models.MaxBodySizeCeiling {
+		budget = models.MaxBodySizeCeiling
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+
+	var readLimit int64 = models.MaxBodySizeCeiling
+	if h.Compaction == CompactionOff {
+		readLimit = budget
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, readLimit)
 
 	// Parse request body
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		// MaxBytesReader returns *http.MaxBytesError when the per-user cap is
-		// exceeded. Surface it as 413 (not a generic 400) with a generic message
-		// (no numeric limit exposed) so clients recognise "request too large".
+		// MaxBytesReader returns *http.MaxBytesError when the read limit is
+		// exceeded. With compaction on this only happens above the 32MB ceiling;
+		// with compaction off it happens above the per-user budget. Either way,
+		// surface a generic 413 message (no numeric limit exposed) so clients
+		// recognise "request too large".
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			// Per-user cap exceeded. Do NOT reveal the account's numeric limit;
-			// surface a generic message so clients recognise "request too large".
 			writeProxyError(w, http.StatusRequestEntityTooLarge,
 				"请求操作已超过模型最大请求限制",
 				"request_entity_too_large")
@@ -227,6 +239,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Normalize content arrays → strings (Cursor sends content as array-of-parts)
 	bodyBytes = normalizeContentArrays(bodyBytes)
+
+	// ── Per-user body budget: auto-compact history instead of failing ──
+	// When the (normalized) request exceeds the user's budget, trim the chat
+	// history down to fit and forward it, so large-context clients (e.g. ZCode)
+	// keep working without a 413. Disabled only when compaction == "off".
+	if h.Compaction != CompactionOff && int64(len(bodyBytes)) > budget {
+		bodyBytes = compactMessagesToBudget(bodyBytes, budget)
+		// compactMessagesToBudget guarantees the result fits the budget whenever
+		// possible; if a single message alone exceeds it, the body is forwarded
+		// best-effort and the upstream enforces its own context window.
+	}
 
 	// ── Route resolution ──
 	// Read routing mode from context (injected by auth middleware — zero extra DB query).
@@ -455,4 +478,104 @@ func writeProxyError(w http.ResponseWriter, statusCode int, message, errType str
 			"code":    errType,
 		},
 	})
+}
+
+// CompactionMode selects the over-budget behaviour for request bodies.
+type CompactionMode string
+
+const (
+	// CompactionTrim auto-compacts chat history so the request fits the user's
+	// per-request body budget, then forwards it (no 413 for normal users).
+	CompactionTrim CompactionMode = "trim"
+	// CompactionOff restores the legacy hard 413 when a request exceeds the
+	// user's per-request body budget (rollback / strict mode).
+	CompactionOff CompactionMode = "off"
+)
+
+// compactMessagesToBudget trims the chat history in a request body so the
+// serialized request fits within maxBody bytes. It always preserves all system
+// messages and keeps as many of the most recent (newest) turns as fit; older
+// messages are dropped from the front. If the body cannot be parsed, or is
+// already within budget, it is returned unchanged.
+func compactMessagesToBudget(body []byte, maxBody int64) []byte {
+	if maxBody <= 0 || int64(len(body)) <= maxBody {
+		return body
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return body
+	}
+	msgsRaw, ok := raw["messages"]
+	if !ok {
+		return body
+	}
+	var msgs []json.RawMessage
+	if err := json.Unmarshal(msgsRaw, &msgs); err != nil {
+		return body
+	}
+	if len(msgs) == 0 {
+		return body
+	}
+
+	// Partition: system messages are always kept; everything else (the chat
+	// history) is trimmed from the oldest end until the whole request fits.
+	var system, others []json.RawMessage
+	for _, m := range msgs {
+		var probe struct {
+			Role string `json:"role"`
+		}
+		if json.Unmarshal(m, &probe) == nil && probe.Role == "system" {
+			system = append(system, m)
+		} else {
+			others = append(others, m)
+		}
+	}
+
+	// tryBuild re-marshals the full request keeping the newest keepN non-system
+	// messages (plus all system messages) and reports whether it fits maxBody.
+	// Re-marshalling the whole body avoids fragile envelope/comma arithmetic —
+	// the size check is always against the real serialized bytes.
+	tryBuild := func(keepN int) ([]byte, bool) {
+		var kept []json.RawMessage
+		if keepN > 0 && len(others) > 0 {
+			start := len(others) - keepN
+			if start < 0 {
+				start = 0
+			}
+			kept = others[start:]
+		}
+		compacted := make([]json.RawMessage, 0, len(system)+len(kept))
+		compacted = append(compacted, system...)
+		compacted = append(compacted, kept...)
+		newMsgs, err := json.Marshal(compacted)
+		if err != nil {
+			return nil, false
+		}
+		raw["messages"] = newMsgs
+		out, err := json.Marshal(raw)
+		if err != nil {
+			return nil, false
+		}
+		return out, int64(len(out)) <= maxBody
+	}
+
+	// Always keep at least the single newest non-system message. Drop the oldest
+	// turns first: try the most messages that fit, walking down to the minimum.
+	minKeep := 0
+	if len(others) > 0 {
+		minKeep = 1
+	}
+	for keepN := len(others); keepN >= minKeep; keepN-- {
+		if out, ok := tryBuild(keepN); ok {
+			return out
+		}
+	}
+	// Even the minimal set (system + newest message) exceeds the budget — a
+	// single message is larger than maxBody. Forward best-effort with that
+	// minimal set; the upstream enforces its own context window if needed.
+	if out, _ := tryBuild(minKeep); out != nil {
+		return out
+	}
+	return body
 }

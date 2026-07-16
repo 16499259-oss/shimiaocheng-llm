@@ -473,7 +473,7 @@ async function loadUsers() {
             }
             return `<tr${rowClass}>
                 <td>${u.id}</td><td>${escapeHtml(u.username)}</td><td><code>${escapeHtml(u.sub_key_preview)}</code></td>
-                <td>${quota5h}</td><td>${quotaTotal}</td><td>${tokens}</td><td>${routeHtml}</td><td>${(u.max_body_size ? u.max_body_size / 1048576 : 1)} MB</td><td>${expiryHtml}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
+                <td>${quota5h}</td><td>${quotaTotal}</td><td>${tokens}</td><td>${routeHtml}</td><td>${formatBodySize(u.max_body_size)}</td><td>${expiryHtml}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
                 <td><div class="btn-group">
                     <button class="btn btn-outline btn-sm" onclick="extendUser(${u.id},'${escapeAttr(u.username)}','${escapeAttr(u.expires_at || '')}')">🕐 延期</button>
                     <button class="btn btn-outline btn-sm" onclick="shareUser('${escapeAttr(u.username)}',${u.id})">📋 分享</button>
@@ -512,7 +512,7 @@ async function createUser(e) {
     const fixedProvider = routeMode === 'fixed' ? document.getElementById('new-fixed-provider').value : '';
     const fmRaw = document.getElementById('new-fixed-multiplier').value;
     const fixedMultiplier = fmRaw ? parseFloat(fmRaw) : null;
-    const mbs = parseInt(document.getElementById('new-max-body-size').value) || 1;
+    const mbs = parseFloat(document.getElementById('new-max-body-size').value) || 1;
 
     const body = { username, quota_5h_limit: q5, quota_total_limit: qt, expires_at: expiresAt, route_mode: routeMode, fixed_provider: fixedProvider };
     if (fixedMultiplier != null) body.fixed_multiplier = fixedMultiplier;
@@ -547,7 +547,10 @@ function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier,
     document.getElementById('update-fixed-provider').value = '';
     document.getElementById('update-fixed-provider-group').style.display = 'none';
     document.getElementById('update-fixed-multiplier').value = '';
-    document.getElementById('update-max-body-size').value = String(Math.round((maxBodySize || 1048576) / 1048576));
+    // Reflect the stored value on the matching dropdown option (supports the
+    // 500 KB / 0.5 MB step, not just whole MB).
+    const mbVal = (maxBodySize || 1048576) / 1048576;
+    document.getElementById('update-max-body-size').value = String(Math.round(mbVal * 10) / 10);
     document.getElementById('update-user-result').classList.add('hidden');
     // Pre-fill existing route mode info (display only, user can change)
     if (routeMode && routeMode !== 'null') {
@@ -592,7 +595,7 @@ async function updateUser(e) {
         body.fixed_multiplier_clear = true;
     }
     const umbs = document.getElementById('update-max-body-size').value;
-    if (umbs) body.max_body_size = parseInt(umbs) * 1048576;
+    if (umbs) body.max_body_size = parseFloat(umbs) * 1048576;
     if (body.regenerate_key && !confirm('确定要重新生成 Key 吗？旧 Key 将立即失效。')) return;
     try {
         const data = await apiFetch('api/users/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -1016,6 +1019,17 @@ function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
 function escapeHtml(str) { const div = document.createElement('div'); div.textContent = str; return div.innerHTML; }
 function escapeAttr(str) { return str.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
 function formatDate(s) { return formatDateSH(s); }
+
+// formatBodySize renders a per-user body cap (bytes) as a human label,
+// e.g. 524288 -> "500 KB", 1048576 -> "1 MB", 4194304 -> "4 MB".
+function formatBodySize(bytes) {
+    bytes = bytes || 1048576;
+    if (bytes < 1048576) {
+        return Math.round(bytes / 1024) + ' KB';
+    }
+    const mb = bytes / 1048576;
+    return (Math.round(mb * 100) / 100) + ' MB';
+}
 function formatDaysOfWeek(d) {
     if (d === '*') return '每天';
     const m = {'0':'日','1':'一','2':'二','3':'三','4':'四','5':'五','6':'六'};
