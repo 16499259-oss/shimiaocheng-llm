@@ -435,8 +435,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !allowed {
-		// Log the rejected call (unified 429; the specific type is reported to
-		// the client below after classifying the cause).
+		// Classify the cause so the client (and the user panel) can tell a
+		// Token-cap hit apart from a count-quota hit. The atomic deduction
+		// (CheckAndDeduct) already decided to block; here we only read back the
+		// quota to label the rejection. When both dimensions are simultaneously
+		// exhausted we report the Token cause — an acceptable boundary, since
+		// the block itself is always correct (race-free, decided by the DB).
+		errType, errMsg := "quota_exceeded", "Quota exceeded"
+		if q, gerr := models.GetQuota(h.QuotaChecker.DB(), userID); gerr == nil {
+			if q.QuotaTokenTotalLimit != 0 && q.QuotaTokenTotalUsed >= q.QuotaTokenTotalLimit {
+				errType, errMsg = "token_quota_exceeded", "Token 额度已用尽"
+			}
+		}
+
 		callLog := &models.CallLog{
 			UserID:         userID,
 			Model:          rewrittenModel,
@@ -445,11 +456,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			MultiplierUsed: multiplier,
 			StatusCode:     429,
 			LatencyMs:      int(time.Since(startTime).Milliseconds()),
-			ErrorMsg:       "Quota exceeded",
+			ErrorMsg:       errMsg,
 		}
 		models.InsertCallLog(h.QuotaChecker.DB(), callLog)
 
-		writeProxyError(w, http.StatusTooManyRequests, "Quota exceeded", "quota_exceeded")
+		writeProxyError(w, http.StatusTooManyRequests, errMsg, errType)
 		return
 	}
 

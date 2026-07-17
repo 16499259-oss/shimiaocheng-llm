@@ -1,0 +1,84 @@
+classDiagram
+    class Quota {
+        +int64 UserID
+        +int Quota5hLimit
+        +int Quota5hUsed
+        +int QuotaTotalLimit
+        +int QuotaTotalUsed
+        +string WindowStart
+        +string UpdatedAt
+        +sql.NullFloat64 FixedMultiplier
+        +int QuotaTokenTotalLimit  %% 新增 默认0=不限制
+        +int QuotaTokenTotalUsed   %% 新增 默认0
+    }
+
+    class QuotaStatus {
+        +int Quota5hLimit
+        +int Quota5hUsed
+        +int Quota5hRemaining
+        +int QuotaTotalLimit
+        +int QuotaTotalUsed
+        +int QuotaTotalRemaining
+        +int64 TotalTokens
+        +int64 TotalTokensToday
+        +string WindowResetAt
+        +string Status
+        +int QuotaTokenTotalLimit   %% 新增
+        +int QuotaTokenTotalUsed    %% 新增
+        +int QuotaTokenTotalRemaining %% 新增
+    }
+
+    class UserWithQuota {
+        +User
+        +int Quota5hLimit
+        +int Quota5hUsed
+        +int QuotaTotalLimit
+        +int QuotaTotalUsed
+        +int64 TotalTokens
+        +int QuotaTokenTotalLimit   %% 新增
+        +int QuotaTokenTotalUsed    %% 新增
+        +float64 FixedMultiplier
+    }
+
+    class Models {
+        +GetQuota(db, userID) Quota
+        +AtomicDeductQuota(db, userID, eff) bool  %% WHERE 增补 token 维度
+        +AddTokenUsage(db, userID, delta) error   %% 新增 后记账
+        +UpdateQuotaTokenTotalLimit(db, userID, limit) error %% 新增
+        +ListUsers(db) UserWithQuota             %% SELECT 增补两列
+        +CreateUser(...) UserWithQuota           %% 签名不变
+    }
+
+    class Checker {
+        +CheckAndDeduct(userID, eff) bool
+    }
+
+    class ProxyHandler {
+        +ServeHTTP()  %% 429 分支按维度分类
+        +handleSync() %% 结尾 AddTokenUsage
+    }
+
+    class StreamHandler {
+        +handleStream() %% 结尾 AddTokenUsage
+    }
+
+    class AdminUsers {
+        +createUserRequest  %% 新增 QuotaTokenTotalLimit *int
+        +updateUserRequest  %% 新增 QuotaTokenTotalLimit *int
+        +CreateUser()   %% 创建后按需 UpdateQuotaTokenTotalLimit
+        +UpdateUser()   %% 按需 UpdateQuotaTokenTotalLimit
+        +ListUsers()    %% 经模型自动带新字段
+    }
+
+    class QuotaHandler {
+        +ServeHTTP()  %% 组装 QuotaStatus 新字段
+    }
+
+    Checker ..> Models : AtomicDeductQuota
+    ProxyHandler ..> Models : AddTokenUsage / GetQuota
+    StreamHandler ..> Models : AddTokenUsage
+    AdminUsers ..> Models : UpdateQuotaTokenTotalLimit
+    QuotaHandler ..> Models : GetQuota
+    Quota <.. Models : scan
+    QuotaStatus <.. QuotaHandler : build
+    UserWithQuota <.. Models : ListUsers returns

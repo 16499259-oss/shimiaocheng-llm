@@ -1,0 +1,31 @@
+sequenceDiagram
+    actor C as Client
+    participant H as ProxyHandler.ServeHTTP
+    participant Q as models.AtomicDeductQuota
+    participant DB as quotas 表
+    participant S as handleSync / handleStream
+    participant U as models.AddTokenUsage
+
+    C->>H: POST /v1/chat/completions (userID 由 auth 解析, 含子Key)
+    H->>Q: CheckAndDeduct(userID, effectiveCalls)
+    Q->>DB: UPDATE quotas SET 5h_used+=?, total_used+=? <br/>WHERE user_id=? <br/>AND 5h_used+?<=5h_limit <br/>AND total_used+?<=total_limit <br/>AND (token_limit=0 OR token_used<token_limit)
+    alt 任一维度达上限 (rowsAffected=0)
+        DB-->>Q: false
+        Q-->>H: allowed=false
+        H->>DB: GetQuota(userID) 读回分类
+        alt token_limit!=0 且 token_used>=token_limit
+            H-->>C: 429 type=token_quota_exceeded 「Token 额度已用尽」
+        else 否则（次数维度）
+            H-->>C: 429 type=quota_exceeded 「Quota exceeded」
+        end
+    else 放行 (rowsAffected=1)
+        DB-->>Q: true
+        Q-->>H: allowed=true
+        H->>S: handleSync 或 handleStream
+        S->>S: 转发上游，解析 usage(prompt_tokens, completion_tokens)
+        S->>DB: InsertCallLog(prompt, completion, total)
+        S->>U: AddTokenUsage(userID, prompt+completion)
+        U->>DB: UPDATE quotas SET token_total_used = token_total_used + ? WHERE user_id=?
+        U-->>S: ok (失败仅 log，不中断响应)
+        S-->>C: 响应体 / SSE 流
+    end
