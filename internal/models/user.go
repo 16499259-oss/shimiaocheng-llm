@@ -20,6 +20,12 @@ const MaxBodySizeCeiling = 32 << 20
 // user has no explicit max_concurrency set. 0 means unlimited.
 const DefaultMaxConcurrency = 10
 
+// MaxConcurrencyHardLimit is the absolute ceiling for any per-user concurrency
+// cap configured via the admin panel (create or edit). It bounds the in-process
+// atomic counter map so a single user cannot register an arbitrarily large cap
+// that would defeat the protective intent of the limit.
+const MaxConcurrencyHardLimit = 200
+
 // User represents a user in the system.
 type User struct {
 	ID             int64  `json:"id"`
@@ -54,7 +60,9 @@ type UserWithQuota struct {
 
 // CreateUser inserts a new user and associated quota record.
 // maxBodySize is the per-request body cap in bytes; <=0 falls back to DefaultMaxBodySize.
-func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, role, status, expiresAt, routeMode, fixedProvider string, quota5hLimit, quotaTotalLimit int, fixedMultiplier *float64, maxBodySize int) (*UserWithQuota, error) {
+// maxConcurrency is the per-user concurrent request cap written at creation: 0 means
+// unlimited (no cap); a positive N caps simultaneous in-flight requests.
+func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, role, status, expiresAt, routeMode, fixedProvider string, quota5hLimit, quotaTotalLimit int, fixedMultiplier *float64, maxBodySize, maxConcurrency int) (*UserWithQuota, error) {
 	now := time.Now().Format(time.RFC3339)
 
 	// Admin users never expire and always use auto route mode.
@@ -82,9 +90,9 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 
 	// Insert user
 	result, err := tx.Exec(
-		`INSERT INTO users (username, password_hash, sub_key_hash, sub_key_preview, role, status, expires_at, route_mode, fixed_provider, max_body_size, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		username, passwordHash, subKeyHash, subKeyPreview, role, status, expiresAt, routeMode, fixedProvider, maxBodySize, now, now,
+		`INSERT INTO users (username, password_hash, sub_key_hash, sub_key_preview, role, status, expires_at, route_mode, fixed_provider, max_body_size, max_concurrency, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		username, passwordHash, subKeyHash, subKeyPreview, role, status, expiresAt, routeMode, fixedProvider, maxBodySize, maxConcurrency, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert user: %w", err)
@@ -127,7 +135,7 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 			RouteMode:      routeMode,
 			FixedProvider:  fixedProvider,
 			MaxBodySize:    maxBodySize,
-			MaxConcurrency: DefaultMaxConcurrency,
+			MaxConcurrency: maxConcurrency,
 		},
 		Quota5hLimit:         quota5hLimit,
 		Quota5hUsed:          0,
@@ -295,6 +303,11 @@ func UpdateUserMaxBodySize(db *sql.DB, userID int64, maxBodySize int) error {
 // UpdateUserMaxConcurrency updates a user's per-user concurrent request cap.
 // 0 means unlimited (no cap); a positive N caps simultaneous in-flight requests.
 func UpdateUserMaxConcurrency(db *sql.DB, userID int64, maxConcurrency int) error {
+	// Guard at the data layer: a negative cap is invalid. The admin handlers
+	// also validate this, but rejecting here makes models the single gatekeeper.
+	if maxConcurrency < 0 {
+		return fmt.Errorf("max_concurrency must be >= 0, got %d", maxConcurrency)
+	}
 	now := time.Now().Format(time.RFC3339)
 	_, err := db.Exec(
 		`UPDATE users SET max_concurrency = ?, updated_at = ? WHERE id = ?`,

@@ -12,6 +12,7 @@ import (
 
 	"llm_api_gateway/internal/auth"
 	"llm_api_gateway/internal/models"
+	"llm_api_gateway/internal/proxy"
 	"llm_api_gateway/internal/timeutil"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -28,7 +29,7 @@ type createUserRequest struct {
 	FixedProvider        string   `json:"fixed_provider"`
 	FixedMultiplier      *float64 `json:"fixed_multiplier"`
 	MaxBodySize          int      `json:"max_body_size"`
-	MaxConcurrency       int      `json:"max_concurrency"`
+	MaxConcurrency       *int     `json:"max_concurrency"` // nil = apply default (10); 0 = unlimited; >0 = cap
 }
 
 // updateUserRequest is the JSON body for PUT /admin/api/users/{id}.
@@ -85,6 +86,23 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		maxBodySize = models.MaxBodySizeCeiling
 	}
 
+	// Per-user concurrency cap. Unified contract with the edit endpoint:
+	//   nil (field absent) -> apply default cap (10); 0 -> unlimited; positive N -> cap.
+	//   negative -> 400; above the hard ceiling -> 400 ("并发上限不能超过 200").
+	maxConc := models.DefaultMaxConcurrency
+	if req.MaxConcurrency != nil {
+		v := *req.MaxConcurrency
+		if v < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "max_concurrency must be >= 0"})
+			return
+		}
+		if v > models.MaxConcurrencyHardLimit {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "并发上限不能超过 200"})
+			return
+		}
+		maxConc = v
+	}
+
 	// Generate sub-key
 	subKey := auth.GenerateSubKey(h.SubKeySalt, 0) // userID is not yet known, use 0 as placeholder
 	// Regenerate with a proper approach: generate, then we'll store
@@ -97,7 +115,7 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	user, err := models.CreateUser(
 		h.DB, req.Username, emptyPassHash, subKeyHash, subKeyPreview,
 		"user", "active", req.ExpiresAt, req.RouteMode, req.FixedProvider,
-		req.Quota5hLimit, req.QuotaTotalLimit, req.FixedMultiplier, maxBodySize,
+		req.Quota5hLimit, req.QuotaTotalLimit, req.FixedMultiplier, maxBodySize, maxConc,
 	)
 	if err != nil {
 		log.Printf("ERROR: create user: %v", err)
@@ -120,18 +138,6 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to set token limit: " + err.Error()})
 			return
 		}
-	}
-
-	// Apply a per-user concurrency cap if the admin supplied one (>0). A value
-	// of 0 (or absent) leaves the DB default (10); unlimited is set via the edit
-	// form (PUT max_concurrency=0).
-	if req.MaxConcurrency > 0 {
-		if err := models.UpdateUserMaxConcurrency(h.DB, user.ID, req.MaxConcurrency); err != nil {
-			log.Printf("ERROR: update max concurrency on create: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to set concurrency limit: " + err.Error()})
-			return
-		}
-		user.MaxConcurrency = req.MaxConcurrency
 	}
 
 	// Now regenerate the sub-key with the actual user ID as input
@@ -315,6 +321,10 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		v := *req.MaxConcurrency
 		if v < 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "max_concurrency must be >= 0"})
+			return
+		}
+		if v > models.MaxConcurrencyHardLimit {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "并发上限不能超过 200"})
 			return
 		}
 		if err := models.UpdateUserMaxConcurrency(h.DB, userID, v); err != nil {
@@ -550,6 +560,11 @@ func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to delete user"})
 		return
 	}
+
+	// Best-effort: drop the in-process in-flight counter so it does not linger
+	// (the gateway's concurrency map is otherwise append-only). In-flight
+	// requests hold the old pointer and still decrement it on completion.
+	proxy.ForgetConcurrency(userID)
 
 	log.Printf("User %d (%s) deleted", userID, user.Username)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "User deleted"})

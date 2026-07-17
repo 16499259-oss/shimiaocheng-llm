@@ -51,7 +51,7 @@ func TestGetUserBySubKeyHash_ExcludesDeleted(t *testing.T) {
 		database.Conn,
 		"activeuser", "pw-hash", activeHash, "sk-activ...",
 		"user", "active", "", "auto", "",
-		100, 1000, nil, 0,
+		100, 1000, nil, 0, models.DefaultMaxConcurrency,
 	)
 	if err != nil {
 		t.Fatalf("CreateUser(active) failed: %v", err)
@@ -64,7 +64,7 @@ func TestGetUserBySubKeyHash_ExcludesDeleted(t *testing.T) {
 		database.Conn,
 		"deluser", "pw-hash", deletedHash, "sk-delet...",
 		"user", "active", "", "auto", "",
-		100, 1000, nil, 0,
+		100, 1000, nil, 0, models.DefaultMaxConcurrency,
 	)
 	if err != nil {
 		t.Fatalf("CreateUser(deleted) failed: %v", err)

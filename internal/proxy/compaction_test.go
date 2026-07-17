@@ -88,7 +88,7 @@ func TestHandler_ServeHTTP_CompactsOverBudgetRequest(t *testing.T) {
 	subPreview := auth.SubKeyPreview(subKey)
 	// Small per-user budget (1000 bytes) forces compaction of an oversized request.
 	if _, err := models.CreateUser(database.Conn, "qc", "pw", subHash, subPreview,
-		"user", "active", "", "auto", "", 1_000_000, 1_000_000, nil, 1000); err != nil {
+		"user", "active", "", "auto", "", 1_000_000, 1_000_000, nil, 1000, models.DefaultMaxConcurrency); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 
@@ -182,7 +182,7 @@ func TestHandler_ServeHTTP_OverCeilingStill413(t *testing.T) {
 	subHash := auth.HashSubKey(subKey)
 	subPreview := auth.SubKeyPreview(subKey)
 	if _, err := models.CreateUser(database.Conn, "qc3", "pw", subHash, subPreview,
-		"user", "active", "", "auto", "", 1_000_000, 1_000_000, nil, 1<<20); err != nil {
+		"user", "active", "", "auto", "", 1_000_000, 1_000_000, nil, 1<<20, models.DefaultMaxConcurrency); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 

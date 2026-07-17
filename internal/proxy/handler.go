@@ -44,9 +44,26 @@ type Handler struct {
 // userConcurrency tracks the number of in-flight (concurrent) requests per
 // user, so the gateway can enforce a per-user concurrent-request cap configured
 // in the admin panel. A sync.Map of userID -> *int64 atomic counters. A cap of
-// 0 means unlimited and is always allowed. The map is append-only (counters
-// linger after a user is deleted) which is harmless for this use.
+// 0 means unlimited and is always allowed.
+//
+// IMPORTANT — single-instance only: the counter lives in this process's memory,
+// so the per-user cap is enforced independently on EACH gateway instance. Under
+// a multi-instance (load-balanced) deployment the cap is NOT a global limit — a
+// user could exceed N in-flight requests across instances. For multi-instance
+// correctness, use a shared counter (e.g. Redis) or enforce the cap upstream at
+// the nginx / LB layer. The map is otherwise append-only: counters linger after
+// a user is deleted (harmless), though admin.DeleteUser best-effort forgets them
+// via ForgetConcurrency.
 var userConcurrency sync.Map
+
+// ForgetConcurrency removes a user's in-flight counter from the process-wide
+// map. Called when a user is deleted so the entry does not linger forever (the
+// map is otherwise append-only). In-flight requests still hold the old *int64
+// pointer and decrement it on completion, so removing the key here is safe; a
+// re-created user with the same ID simply gets a fresh counter.
+func ForgetConcurrency(userID int64) {
+	userConcurrency.Delete(userID)
+}
 
 // tryAcquireConcurrency increments the user's in-flight counter and returns
 // false if doing so would exceed max (max <= 0 means unlimited, always
@@ -227,7 +244,30 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// resources (per-request body reads can be up to 32MB). 0 = unlimited.
 	// Released on every subsequent return path via the deferred call below.
 	maxConc := auth.GetMaxConcurrency(r)
+	// Snapshot the in-flight count for observability BEFORE the attempt:
+	// tryAcquireConcurrency rolls back on failure, so reading v now is the
+	// closest we can get to the count at the moment of rejection.
+	var curInFlight int64
+	if v, ok := userConcurrency.Load(userID); ok {
+		curInFlight = atomic.LoadInt64(v.(*int64))
+	}
 	if !tryAcquireConcurrency(userID, int(maxConc)) {
+		// Align observability with the quota-429 path: log a WARN and, when the
+		// quota engine is wired, write a minimal call_log row (user_id, status,
+		// err_type, timestamp) so the rejection is auditable. The JSON error body
+		// and the deferred releaseConcurrency stay unchanged.
+		log.Printf("WARN: concurrency limit exceeded user=%d cur=%d max=%d", userID, curInFlight, maxConc)
+		if h.QuotaChecker != nil {
+			_, _ = models.InsertCallLog(h.QuotaChecker.DB(), &models.CallLog{
+				UserID:     userID,
+				ProviderID: "zhipu",
+				StatusCode: 429,
+				LatencyMs:  int(time.Since(startTime).Milliseconds()),
+				ErrorMsg:   "concurrency_limit_exceeded",
+			})
+		}
+		// Hint how long the client might wait before retrying (seconds).
+		w.Header().Set("Retry-After", "1")
 		writeProxyError(w, http.StatusTooManyRequests,
 			"并发请求数超过上限", "concurrency_limit_exceeded")
 		return
