@@ -8,38 +8,45 @@ import (
 
 // Quota represents a user's quota record.
 type Quota struct {
-	ID              int64           `json:"id"`
-	UserID          int64           `json:"user_id"`
-	Quota5hLimit    int             `json:"quota_5h_limit"`
-	Quota5hUsed     int             `json:"quota_5h_used"`
-	QuotaTotalLimit int             `json:"quota_total_limit"`
-	QuotaTotalUsed  int             `json:"quota_total_used"`
-	WindowStart     string          `json:"window_start"`
-	UpdatedAt       string          `json:"updated_at"`
-	FixedMultiplier sql.NullFloat64 `json:"fixed_multiplier"`
+	ID                   int64           `json:"id"`
+	UserID               int64           `json:"user_id"`
+	Quota5hLimit         int             `json:"quota_5h_limit"`
+	Quota5hUsed          int             `json:"quota_5h_used"`
+	QuotaTotalLimit      int             `json:"quota_total_limit"`
+	QuotaTotalUsed       int             `json:"quota_total_used"`
+	QuotaTokenTotalLimit int             `json:"quota_token_total_limit"` // 0 = unlimited (no Token cap)
+	QuotaTokenTotalUsed  int             `json:"quota_token_total_used"`  // cumulative Token usage (prompt+completion)
+	WindowStart          string          `json:"window_start"`
+	UpdatedAt            string          `json:"updated_at"`
+	FixedMultiplier      sql.NullFloat64 `json:"fixed_multiplier"`
 }
 
 // QuotaStatus is returned by the /v1/quota endpoint.
 type QuotaStatus struct {
-	Quota5hLimit        int    `json:"quota_5h_limit"`
-	Quota5hUsed         int    `json:"quota_5h_used"`
-	Quota5hRemaining    int    `json:"quota_5h_remaining"`
-	QuotaTotalLimit     int    `json:"quota_total_limit"`
-	QuotaTotalUsed      int    `json:"quota_total_used"`
-	QuotaTotalRemaining int    `json:"quota_total_remaining"`
-	TotalTokens         int64  `json:"total_tokens"`
-	TotalTokensToday    int64  `json:"total_tokens_today"`
-	WindowResetAt       string `json:"window_reset_at"`
-	Status              string `json:"status"`
+	Quota5hLimit             int    `json:"quota_5h_limit"`
+	Quota5hUsed              int    `json:"quota_5h_used"`
+	Quota5hRemaining         int    `json:"quota_5h_remaining"`
+	QuotaTotalLimit          int    `json:"quota_total_limit"`
+	QuotaTotalUsed           int    `json:"quota_total_used"`
+	QuotaTotalRemaining      int    `json:"quota_total_remaining"`
+	QuotaTokenTotalLimit     int    `json:"quota_token_total_limit"`     // 0 = unlimited
+	QuotaTokenTotalUsed      int    `json:"quota_token_total_used"`      // cumulative used
+	QuotaTokenTotalRemaining int    `json:"quota_token_total_remaining"` // 0 when unlimited (frontend treats as infinite)
+	TotalTokens              int64  `json:"total_tokens"`
+	TotalTokensToday         int64  `json:"total_tokens_today"`
+	WindowResetAt            string `json:"window_reset_at"`
+	Status                   string `json:"status"`
 }
 
 // GetQuota retrieves the quota record for a user.
 func GetQuota(db *sql.DB, userID int64) (*Quota, error) {
 	q := &Quota{}
 	err := db.QueryRow(
-		`SELECT id, user_id, quota_5h_limit, quota_5h_used, quota_total_limit, quota_total_used, window_start, updated_at, fixed_multiplier
+		`SELECT id, user_id, quota_5h_limit, quota_5h_used, quota_total_limit, quota_total_used,
+		        quota_token_total_limit, quota_token_total_used, window_start, updated_at, fixed_multiplier
 		 FROM quotas WHERE user_id = ?`, userID,
-	).Scan(&q.ID, &q.UserID, &q.Quota5hLimit, &q.Quota5hUsed, &q.QuotaTotalLimit, &q.QuotaTotalUsed, &q.WindowStart, &q.UpdatedAt, &q.FixedMultiplier)
+	).Scan(&q.ID, &q.UserID, &q.Quota5hLimit, &q.Quota5hUsed, &q.QuotaTotalLimit, &q.QuotaTotalUsed,
+		&q.QuotaTokenTotalLimit, &q.QuotaTokenTotalUsed, &q.WindowStart, &q.UpdatedAt, &q.FixedMultiplier)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -50,7 +57,11 @@ func GetQuota(db *sql.DB, userID int64) (*Quota, error) {
 	return q, nil
 }
 
-// AtomicDeductQuota atomically deducts effective_calls from both 5h and total quotas.
+// AtomicDeductQuota atomically deducts effective_calls from both 5h and total
+// quotas, and also gates on the cumulative Token limit. The Token dimension uses
+// a pure column comparison (no extra bind parameters) so the call signature and
+// parameter order are unchanged: a request is blocked when the optional Token
+// cap is set (quota_token_total_limit > 0) and already reached.
 // Returns true if the deduction succeeded, false if quota was insufficient.
 func AtomicDeductQuota(db *sql.DB, userID int64, effectiveCalls int) (bool, error) {
 	now := time.Now().Format(time.RFC3339)
@@ -61,7 +72,8 @@ func AtomicDeductQuota(db *sql.DB, userID int64, effectiveCalls int) (bool, erro
 		     updated_at = ?
 		 WHERE user_id = ?
 		   AND quota_5h_used + ? <= quota_5h_limit
-		   AND quota_total_used + ? <= quota_total_limit`,
+		   AND quota_total_used + ? <= quota_total_limit
+		   AND (quota_token_total_limit = 0 OR quota_token_total_used < quota_token_total_limit)`,
 		effectiveCalls, effectiveCalls, now,
 		userID,
 		effectiveCalls, effectiveCalls,
@@ -102,6 +114,41 @@ func UpdateQuotaLimits(db *sql.DB, userID int64, quota5hLimit, quotaTotalLimit *
 			*quotaTotalLimit, now, userID,
 		)
 		return err
+	}
+	return nil
+}
+
+// AddTokenUsage accumulates Token usage (prompt_tokens + completion_tokens) for
+// a user AFTER a successful response is sent. It is a fire-and-forget accounting
+// step: a delta <= 0 is a no-op, and a non-nil error is the caller's
+// responsibility to log (never fatal to the request). The 5h/total deduction is
+// handled separately by AtomicDeductQuota.
+func AddTokenUsage(db *sql.DB, userID int64, delta int) error {
+	if delta <= 0 {
+		return nil
+	}
+	_, err := db.Exec(
+		`UPDATE quotas SET quota_token_total_used = quota_token_total_used + ? WHERE user_id = ?`,
+		delta, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("add token usage: %w", err)
+	}
+	return nil
+}
+
+// UpdateQuotaTokenTotalLimit sets the user's cumulative Token cap. A limit of 0
+// (the default) means unlimited. This does not reset the already-accumulated
+// usage, so lowering the limit below current usage takes effect on the next
+// request (self-consistent: the next request is blocked until usage decreases).
+func UpdateQuotaTokenTotalLimit(db *sql.DB, userID int64, limit int) error {
+	now := time.Now().Format(time.RFC3339)
+	_, err := db.Exec(
+		`UPDATE quotas SET quota_token_total_limit = ?, updated_at = ? WHERE user_id = ?`,
+		limit, now, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("update quota token total limit: %w", err)
 	}
 	return nil
 }

@@ -23,6 +23,7 @@ type createUserRequest struct {
 	Username             string   `json:"username"`
 	Quota5hLimit         int      `json:"quota_5h_limit"`
 	QuotaTotalLimit      int      `json:"quota_total_limit"`
+	QuotaTokenTotalLimit int      `json:"quota_token_total_limit"` // 0 = 不限制（默认）
 	ExpiresAt            string   `json:"expires_at"`
 	RouteMode            string   `json:"route_mode"`
 	FixedProvider        string   `json:"fixed_provider"`
@@ -35,6 +36,7 @@ type createUserRequest struct {
 type updateUserRequest struct {
 	Quota5hLimit         *int     `json:"quota_5h_limit"`
 	QuotaTotalLimit      *int     `json:"quota_total_limit"`
+	QuotaTokenTotalLimit *int     `json:"quota_token_total_limit"` // nil = 不改；0 = 不限制
 	Status               *string  `json:"status"`
 	RegenerateKey        *bool    `json:"regenerate_key"`
 	RouteMode            *string  `json:"route_mode"`
@@ -128,6 +130,16 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Apply the cumulative Token cap if the admin specified a non-zero value
+	// (0 = unlimited, which is also the column default, so a no-op either way).
+	if req.QuotaTokenTotalLimit != 0 {
+		if err := models.UpdateQuotaTokenTotalLimit(h.DB, user.ID, req.QuotaTokenTotalLimit); err != nil {
+			log.Printf("ERROR: set token limit: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to set token limit: " + err.Error()})
+			return
+		}
+	}
+
 	// Now regenerate the sub-key with the actual user ID as input
 	actualSubKey := auth.GenerateSubKey(h.SubKeySalt, user.ID)
 	actualSubKeyHash := auth.HashSubKey(actualSubKey)
@@ -156,20 +168,22 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	// Return the sub-key in plaintext (only time)
 	user.SubKeyPreview = actualSubKeyPreview
 	response := map[string]any{
-		"id":                user.ID,
-		"username":          user.Username,
-		"sub_key":           actualSubKey,
-		"sub_key_preview":   actualSubKeyPreview,
-		"quota_5h_limit":    user.Quota5hLimit,
-		"quota_5h_used":     user.Quota5hUsed,
-		"quota_total_limit": user.QuotaTotalLimit,
-		"quota_total_used":  user.QuotaTotalUsed,
-		"route_mode":        user.RouteMode,
-		"fixed_provider":    user.FixedProvider,
-		"status":            user.Status,
-		"max_body_size":     user.MaxBodySize,
-		"max_concurrency":   user.MaxConcurrency,
-		"created_at":        user.CreatedAt,
+		"id":                      user.ID,
+		"username":                user.Username,
+		"sub_key":                 actualSubKey,
+		"sub_key_preview":         actualSubKeyPreview,
+		"quota_5h_limit":          user.Quota5hLimit,
+		"quota_5h_used":           user.Quota5hUsed,
+		"quota_total_limit":       user.QuotaTotalLimit,
+		"quota_total_used":        user.QuotaTotalUsed,
+		"quota_token_total_limit": req.QuotaTokenTotalLimit,
+		"quota_token_total_used":  0,
+		"route_mode":              user.RouteMode,
+		"fixed_provider":          user.FixedProvider,
+		"status":                  user.Status,
+		"max_body_size":           user.MaxBodySize,
+		"max_concurrency":         user.MaxConcurrency,
+		"created_at":              user.CreatedAt,
 	}
 	if req.FixedMultiplier != nil {
 		response["fixed_multiplier"] = *req.FixedMultiplier
@@ -223,6 +237,19 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		response["quota_updated"] = true
+	}
+
+	// Update cumulative Token cap (nil = unchanged; 0 = unlimited).
+	if req.QuotaTokenTotalLimit != nil {
+		if err := models.UpdateQuotaTokenTotalLimit(h.DB, userID, *req.QuotaTokenTotalLimit); err != nil {
+			log.Printf("ERROR: update token limit: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to update token limit"})
+			return
+		}
+		if q, gerr := models.GetQuota(h.DB, userID); gerr == nil {
+			response["quota_token_total_limit"] = q.QuotaTokenTotalLimit
+			response["quota_token_total_used"] = q.QuotaTokenTotalUsed
+		}
 	}
 
 	// Update status

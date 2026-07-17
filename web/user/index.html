@@ -344,6 +344,26 @@ function renderDashboard(data) {
     let cls5h = pct5h > 80 ? 'bad' : (pct5h > 50 ? 'warn' : 'good');
     let clsTotal = pctTotal > 80 ? 'bad' : (pctTotal > 50 ? 'warn' : 'good');
 
+    // Cumulative Token quota row. A limit of 0 means unlimited: show 「无限」
+    // and hide the progress bar; otherwise show used/limit with a colored bar.
+    let tokenRowHtml;
+    const tokenLimit = data.quota_token_total_limit || 0;
+    const tokenUsed = data.quota_token_total_used || 0;
+    if (tokenLimit === 0) {
+        tokenRowHtml = `<div class="stat-row">
+            <span class="stat-label">Token 总量</span>
+            <span class="stat-value">无限</span>
+        </div>`;
+    } else {
+        const pctToken = Math.round((tokenUsed / tokenLimit) * 100);
+        const clsToken = pctToken > 80 ? 'bad' : (pctToken > 50 ? 'warn' : 'good');
+        tokenRowHtml = `<div class="stat-row">
+            <span class="stat-label">Token 总量</span>
+            <span class="stat-value ${clsToken}">${tokenUsed.toLocaleString()} / ${tokenLimit.toLocaleString()}</span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill ${clsToken}" style="width:${pctToken}%"></div></div>`;
+    }
+
     $('quota-stats').innerHTML = `
         <div class="stat-row">
             <span class="stat-label">5小时配额</span>
@@ -355,6 +375,7 @@ function renderDashboard(data) {
             <span class="stat-value ${clsTotal}">${data.quota_total_used.toLocaleString()} / ${data.quota_total_limit.toLocaleString()} 次</span>
         </div>
         <div class="progress-bar"><div class="progress-fill ${clsTotal}" style="width:${pctTotal}%"></div></div>
+        ${tokenRowHtml}
         <div class="stat-row">
             <span class="stat-label">累计 Token</span>
             <span class="stat-value">${(data.total_tokens || 0).toLocaleString()}</span>

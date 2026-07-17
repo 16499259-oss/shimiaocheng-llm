@@ -184,4 +184,11 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, bodyBytes
 	if _, err := models.InsertCallLog(h.QuotaChecker.DB(), callLog); err != nil {
 		log.Printf("ERROR: logging stream call: %v", err)
 	}
+
+	// Account the Token usage toward the user's cumulative Token quota
+	// (fire-and-forget: a failure is logged only and must not break the
+	// already-flushed SSE response).
+	if err := models.AddTokenUsage(h.QuotaChecker.DB(), userID, promptTokens+completionTokens); err != nil {
+		log.Printf("ERROR: add token usage (stream) for user %d: %v", userID, err)
+	}
 }

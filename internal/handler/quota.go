@@ -69,8 +69,17 @@ func (h *QuotaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		QuotaTotalLimit:     quotaRecord.QuotaTotalLimit,
 		QuotaTotalUsed:      quotaRecord.QuotaTotalUsed,
 		QuotaTotalRemaining: quotaRecord.QuotaTotalLimit - quotaRecord.QuotaTotalUsed,
-		WindowResetAt:       windowStart.Format(time.RFC3339),
-		Status:              user.Status,
+		// Cumulative Token quota. When the cap is 0 (unlimited) the remaining
+		// field is forced to 0 so the frontend treats it as "infinite" and hides
+		// the progress bar; otherwise it is limit - used.
+		QuotaTokenTotalLimit:     quotaRecord.QuotaTokenTotalLimit,
+		QuotaTokenTotalUsed:      quotaRecord.QuotaTokenTotalUsed,
+		QuotaTokenTotalRemaining: 0,
+		WindowResetAt:            windowStart.Format(time.RFC3339),
+		Status:                   user.Status,
+	}
+	if quotaRecord.QuotaTokenTotalLimit > 0 {
+		status.QuotaTokenTotalRemaining = quotaRecord.QuotaTokenTotalLimit - quotaRecord.QuotaTokenTotalUsed
 	}
 
 	// Query token stats for this user
