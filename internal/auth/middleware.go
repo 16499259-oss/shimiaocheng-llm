@@ -83,9 +83,11 @@ func (m *Middleware) SubKeyAuth(next http.Handler) http.Handler {
 		}
 
 		// Check if user's API key has expired (admin users are exempt).
+		// A non-empty but malformed expiry is treated as already expired
+		// (fail-closed): a typo'd value can never silently grant a permanent key.
 		if user.Role != "admin" && user.ExpiresAt != "" {
-			expiresAt, err := time.Parse(time.RFC3339, user.ExpiresAt)
-			if err == nil && time.Now().In(timeutil.ShanghaiTZ).After(expiresAt) {
+			expiresAt, ok := models.ParseExpiry(user.ExpiresAt)
+			if !ok || time.Now().In(timeutil.ShanghaiTZ).After(expiresAt) {
 				writeAuthError(w, http.StatusForbidden, "API key has expired", "key_expired")
 				return
 			}

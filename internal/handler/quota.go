@@ -4,6 +4,7 @@ package handler
 import (
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
@@ -65,13 +66,16 @@ func (h *QuotaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	status := models.QuotaStatus{
 		Quota5hLimit:        quotaRecord.Quota5hLimit,
 		Quota5hUsed:         quotaRecord.Quota5hUsed,
-		Quota5hRemaining:    quotaRecord.Quota5hLimit - quotaRecord.Quota5hUsed,
+		Quota5hRemaining:    max(0, quotaRecord.Quota5hLimit-quotaRecord.Quota5hUsed),
 		QuotaTotalLimit:     quotaRecord.QuotaTotalLimit,
 		QuotaTotalUsed:      quotaRecord.QuotaTotalUsed,
-		QuotaTotalRemaining: quotaRecord.QuotaTotalLimit - quotaRecord.QuotaTotalUsed,
+		QuotaTotalRemaining: max(0, quotaRecord.QuotaTotalLimit-quotaRecord.QuotaTotalUsed),
 		// Cumulative Token quota. When the cap is 0 (unlimited) the remaining
 		// field is forced to 0 so the frontend treats it as "infinite" and hides
-		// the progress bar; otherwise it is limit - used.
+		// the progress bar. Otherwise it is clamped to >= 0: Token accounting
+		// happens after the response is sent, so used may transiently exceed the
+		// cap (a soft gate, accepted by design) and must never surface a negative
+		// remaining (audit F2).
 		QuotaTokenTotalLimit:     quotaRecord.QuotaTokenTotalLimit,
 		QuotaTokenTotalUsed:      quotaRecord.QuotaTokenTotalUsed,
 		QuotaTokenTotalRemaining: 0,
@@ -79,14 +83,20 @@ func (h *QuotaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Status:                   user.Status,
 	}
 	if quotaRecord.QuotaTokenTotalLimit > 0 {
-		status.QuotaTokenTotalRemaining = quotaRecord.QuotaTokenTotalLimit - quotaRecord.QuotaTokenTotalUsed
+		status.QuotaTokenTotalRemaining = max(0, quotaRecord.QuotaTokenTotalLimit-quotaRecord.QuotaTokenTotalUsed)
 	}
 
-	// Query token stats for this user
+	// Query token stats for this user. Scan errors are logged but not fatal: on
+	// failure the counters stay 0 and the quota decision above is unaffected
+	// (audit F6).
 	var totalTokens, totalTokensToday int64
 	today := time.Now().Format("2006-01-02")
-	h.DB.QueryRow(`SELECT COALESCE(SUM(total_tokens), 0) FROM call_logs WHERE user_id = ?`, userID).Scan(&totalTokens)
-	h.DB.QueryRow(`SELECT COALESCE(SUM(total_tokens), 0) FROM call_logs WHERE user_id = ? AND created_at >= ?`, userID, today).Scan(&totalTokensToday)
+	if err := h.DB.QueryRow(`SELECT COALESCE(SUM(total_tokens), 0) FROM call_logs WHERE user_id = ?`, userID).Scan(&totalTokens); err != nil {
+		log.Printf("WARN: /v1/quota total tokens: %v", err)
+	}
+	if err := h.DB.QueryRow(`SELECT COALESCE(SUM(total_tokens), 0) FROM call_logs WHERE user_id = ? AND created_at >= ?`, userID, today).Scan(&totalTokensToday); err != nil {
+		log.Printf("WARN: /v1/quota total tokens today: %v", err)
+	}
 	status.TotalTokens = totalTokens
 	status.TotalTokensToday = totalTokensToday
 

@@ -77,6 +77,16 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		req.RouteMode = "auto"
 	}
 
+	// Normalize expires_at at the API boundary (accept RFC3339 or a bare date;
+	// any other format is rejected so a malformed value can never be stored as
+	// a permanent key — see audit F1).
+	normExpires, err := models.NormalizeExpiry(req.ExpiresAt)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	req.ExpiresAt = normExpires
+
 	// Per-request body cap. <=0 falls back to 1MB; cap at the nginx ceiling.
 	maxBodySize := req.MaxBodySize
 	if maxBodySize <= 0 {
@@ -130,9 +140,14 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Apply the cumulative Token cap if the admin specified a non-zero value
-	// (0 = unlimited, which is also the column default, so a no-op either way).
-	if req.QuotaTokenTotalLimit != 0 {
+	// Reject a negative cumulative Token cap (it would brick the user via the
+	// atomic gate with no other error surfaced). 0 = unlimited (no-op),
+	// positive = applied (see audit F3).
+	if req.QuotaTokenTotalLimit < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_token_total_limit must be >= 0"})
+		return
+	}
+	if req.QuotaTokenTotalLimit > 0 {
 		if err := models.UpdateQuotaTokenTotalLimit(h.DB, user.ID, req.QuotaTokenTotalLimit); err != nil {
 			log.Printf("ERROR: set token limit: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to set token limit: " + err.Error()})
@@ -228,6 +243,21 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]any{}
 	routeChanged := false
+
+	// Reject negative quota values (audit F3): a negative cap would permanently
+	// block the user via the atomic gate, with no error surfaced elsewhere.
+	if req.Quota5hLimit != nil && *req.Quota5hLimit < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_5h_limit must be >= 0"})
+		return
+	}
+	if req.QuotaTotalLimit != nil && *req.QuotaTotalLimit < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_total_limit must be >= 0"})
+		return
+	}
+	if req.QuotaTokenTotalLimit != nil && *req.QuotaTokenTotalLimit < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_token_total_limit must be >= 0"})
+		return
+	}
 
 	// Update quota limits
 	if req.Quota5hLimit != nil || req.QuotaTotalLimit != nil {
@@ -475,14 +505,19 @@ func (h *Handler) ExtendUser(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case req.Until != "":
-		// Use the explicit until date directly.
-		newExpiresAt = req.Until
+		// Normalize the explicit until date at the boundary (accept RFC3339 or a
+		// bare date; reject anything else — audit F1).
+		norm, err := models.NormalizeExpiry(req.Until)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		newExpiresAt = norm
 	case req.Days > 0:
 		// Calculate from current expiry (or NOW if permanent).
 		base := now
 		if oldExpiresAt != "" {
-			parsed, err := time.Parse(time.RFC3339, oldExpiresAt)
-			if err == nil {
+			if parsed, ok := models.ParseExpiry(oldExpiresAt); ok {
 				base = parsed
 			}
 		}
