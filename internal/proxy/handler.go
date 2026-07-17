@@ -449,18 +449,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		models.InsertCallLog(h.QuotaChecker.DB(), callLog)
 
-		// Classify the rejection reason. A non-zero Token cap that has already
-		// been reached yields token_quota_exceeded (中文「Token 额度已用尽」);
-		// otherwise it is a call-count quota (quota_exceeded). If GetQuota fails
-		// we conservatively fall back to the generic count message so the
-		// request is always rejected.
-		msg, errType := "Quota exceeded", "quota_exceeded"
-		if q, qErr := models.GetQuota(h.QuotaChecker.DB(), userID); qErr == nil && q != nil {
-			if q.QuotaTokenTotalLimit != 0 && q.QuotaTokenTotalUsed >= q.QuotaTokenTotalLimit {
-				msg, errType = "Token 额度已用尽", "token_quota_exceeded"
-			}
-		}
-		writeProxyError(w, http.StatusTooManyRequests, msg, errType)
+		writeProxyError(w, http.StatusTooManyRequests, "Quota exceeded", "quota_exceeded")
 		return
 	}
 
@@ -549,13 +538,6 @@ func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int
 		LatencyMs:        latencyMs,
 	}
 	models.InsertCallLog(h.QuotaChecker.DB(), callLog)
-
-	// Account the Token usage toward the user's cumulative Token quota. This is
-	// fire-and-forget bookkeeping that must NOT break the already-built response,
-	// so any error is logged only (no client impact).
-	if err := models.AddTokenUsage(h.QuotaChecker.DB(), userID, promptTokens+completionTokens); err != nil {
-		log.Printf("ERROR: add token usage (sync) for user %d: %v", userID, err)
-	}
 
 	// Forward response to client
 	for key, values := range resp.Header {

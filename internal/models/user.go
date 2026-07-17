@@ -51,8 +51,6 @@ type UserWithQuota struct {
 	Quota5hUsed          int      `json:"quota_5h_used"`
 	QuotaTotalLimit      int      `json:"quota_total_limit"`
 	QuotaTotalUsed       int      `json:"quota_total_used"`
-	QuotaTokenTotalLimit int      `json:"quota_token_total_limit"` // 0 = unlimited
-	QuotaTokenTotalUsed  int      `json:"quota_token_total_used"`  // cumulative used
 	TotalTokens          int64    `json:"total_tokens"`
 	SubKey               string   `json:"sub_key,omitempty"`
 	FixedMultiplier      *float64 `json:"fixed_multiplier"` // nil = global
@@ -141,8 +139,6 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 		Quota5hUsed:          0,
 		QuotaTotalLimit:      quotaTotalLimit,
 		QuotaTotalUsed:       0,
-		QuotaTokenTotalLimit: 0,
-		QuotaTokenTotalUsed:  0,
 	}, nil
 }
 
@@ -201,7 +197,7 @@ func GetUserByUsername(db *sql.DB, username string) (*User, error) {
 func ListUsers(db *sql.DB) ([]UserWithQuota, error) {
 	rows, err := db.Query(
 		`SELECT u.id, u.username, u.sub_key_preview, u.role, u.status, u.created_at, u.updated_at, u.expires_at, u.route_mode, u.fixed_provider, u.max_body_size, u.max_concurrency,
-		        q.quota_5h_limit, q.quota_5h_used, q.quota_total_limit, q.quota_total_used, q.quota_token_total_limit, q.quota_token_total_used, q.fixed_multiplier,
+		        q.quota_5h_limit, q.quota_5h_used, q.quota_total_limit, q.quota_total_used, q.fixed_multiplier,
 		        COALESCE(t.total_tokens, 0) AS total_tokens
 		 FROM users u
 		 LEFT JOIN quotas q ON u.id = q.user_id
@@ -222,7 +218,6 @@ func ListUsers(db *sql.DB) ([]UserWithQuota, error) {
 			&uwq.ID, &uwq.Username, &uwq.SubKeyPreview, &uwq.Role, &uwq.Status,
 			&uwq.CreatedAt, &uwq.UpdatedAt, &uwq.ExpiresAt, &uwq.RouteMode, &uwq.FixedProvider, &uwq.MaxBodySize, &uwq.MaxConcurrency,
 			&uwq.Quota5hLimit, &uwq.Quota5hUsed, &uwq.QuotaTotalLimit, &uwq.QuotaTotalUsed,
-			&uwq.QuotaTokenTotalLimit, &uwq.QuotaTokenTotalUsed,
 			&fixedMult, &uwq.TotalTokens,
 		)
 		if err != nil {
