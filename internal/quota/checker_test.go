@@ -49,7 +49,7 @@ func TestCheckAndDeduct_Success(t *testing.T) {
 		"user", "active", "", "auto", "",
 		100,  // quota_5h_limit
 		1000, // quota_total_limit
-		nil, 0,
+		nil, 0, models.DefaultMaxConcurrency,
 	)
 	if err != nil {
 		t.Fatalf("CreateUser failed: %v", err)
@@ -93,7 +93,7 @@ func TestCheckAndDeduct_Exceeded(t *testing.T) {
 		"user", "active", "", "auto", "",
 		100, // quota_5h_limit
 		0,   // quota_total_limit -> immediately exhausted
-		nil, 0,
+		nil, 0, models.DefaultMaxConcurrency,
 	)
 	if err != nil {
 		t.Fatalf("CreateUser failed: %v", err)

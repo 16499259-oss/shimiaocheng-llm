@@ -488,7 +488,7 @@ async function loadUsers() {
                 <td><div class="btn-group">
                     <button class="btn btn-outline btn-sm" onclick="extendUser(${u.id},'${escapeAttr(u.username)}','${escapeAttr(u.expires_at || '')}')">🕐 延期</button>
                     <button class="btn btn-outline btn-sm" onclick="shareUser('${escapeAttr(u.username)}',${u.id})">📋 分享</button>
-                    <button class="btn btn-outline btn-sm" onclick="editUser(${u.id},'${escapeAttr(u.status)}',${u.quota_5h_limit},${u.quota_total_limit},'${escapeAttr(u.route_mode || 'auto')}','${escapeAttr(u.fixed_provider || '')}',${u.fixed_multiplier != null ? u.fixed_multiplier : 'null'},${u.max_body_size ? u.max_body_size : 1048576},${u.quota_token_total_limit || 0},${u.quota_token_total_used || 0},${u.max_concurrency || 10})">编辑</button>
+                    <button class="btn btn-outline btn-sm" onclick="editUser(${u.id},'${escapeAttr(u.status)}',${u.quota_5h_limit},${u.quota_total_limit},'${escapeAttr(u.route_mode || 'auto')}','${escapeAttr(u.fixed_provider || '')}',${u.fixed_multiplier != null ? u.fixed_multiplier : 'null'},${u.max_body_size ? u.max_body_size : 1048576},${u.quota_token_total_limit || 0},${u.quota_token_total_used || 0},${u.max_concurrency != null ? u.max_concurrency : 10})">编辑</button>
                     <button class="btn btn-outline btn-sm" onclick="viewCalls(${u.id},'${escapeAttr(u.username)}')">记录</button>
                     <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id},'${escapeAttr(u.username)}')">删除</button>
                 </div></td>
@@ -528,9 +528,15 @@ async function createUser(e) {
     const body = { username, quota_5h_limit: q5, quota_total_limit: qt, expires_at: expiresAt, route_mode: routeMode, fixed_provider: fixedProvider };
     if (fixedMultiplier != null) body.fixed_multiplier = fixedMultiplier;
     body.max_body_size = mbs * 1048576;
-    // Per-user concurrency cap: only send when >0 (0/absent → server default 10).
+    // Per-user concurrency cap:
+    //   - 留空 (empty) → 不发送该字段，后端按默认上限 (10) 处理
+    //   - 0            → 发送 0（不限）
+    //   - 正数 (>0)    → 发送该上限
+    //   - 负数（理论上已被 input min=0 拦截）→ 仍发送，交由后端返回 400
     const mcRaw = document.getElementById('new-max-concurrency').value.trim();
-    if (mcRaw !== '' && parseInt(mcRaw) > 0) body.max_concurrency = parseInt(mcRaw);
+    if (mcRaw !== '') {
+        body.max_concurrency = parseInt(mcRaw, 10);
+    }
     // Cumulative Token cap: only send when the field is non-empty (default 0 = unlimited).
     const qttRaw = document.getElementById('new-quota-token-total').value.trim();
     if (qttRaw !== '') {

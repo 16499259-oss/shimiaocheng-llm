@@ -7,7 +7,9 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"io/fs"
 	"log"
@@ -15,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -198,18 +201,26 @@ func main() {
 	// ── Phase 10: Start server ──
 	server := &http.Server{
 		Addr:         cfg.Server.ListenAddr,
-		Handler:      withLogging(mux),
+		Handler:      recoverMiddleware(withLogging(mux)),
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
 	}
 
-	// Graceful shutdown
+	// Graceful shutdown: stop accepting new connections and give in-flight
+	// requests (and their per-user concurrency counters) up to 30s to finish
+	// before forcing closure.
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		log.Println("Shutting down server...")
-		server.Close()
+		log.Println("Shutting down server (graceful)...")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("Graceful shutdown failed (forcing close): %v", err)
+			server.Close()
+		}
+		log.Println("Server stopped")
 	}()
 
 	log.Printf("LLM API Gateway starting on %s", cfg.Server.ListenAddr)
@@ -260,7 +271,7 @@ func initAdminPassword(conn *sql.DB, password string, default5hLimit, defaultTot
 
 		_, err := models.CreateUser(
 			conn, "admin", string(hashedPassword), placeholderHash, placeholderPreview,
-			"admin", "active", "", "auto", "", 1000000, 100000000, nil, 0,
+			"admin", "active", "", "auto", "", 1000000, 100000000, nil, 0, 0,
 		)
 		if err != nil {
 			log.Fatalf("Failed to create admin user: %v", err)
@@ -274,5 +285,35 @@ func withLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("%s %s %s", r.Method, r.URL.Path, r.RemoteAddr)
 		next.ServeHTTP(w, r)
+	})
+}
+
+// recoverMiddleware catches panics raised in downstream handlers and converts
+// them into a clean 500 response, instead of relying on the net/http server's
+// per-connection recovery (which can leave a half-written response). The proxy
+// Handler's deferred releaseConcurrency still runs for panics during request
+// handling, so we must NOT release the counter here.
+func recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("PANIC recovered: %s %s: %v", r.Method, r.URL.Path, rec)
+				writeFatalError(w)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// writeFatalError writes a uniform 500 JSON body for recovered panics.
+func writeFatalError(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]string{
+			"message": "Internal server error",
+			"type":    "internal_error",
+			"code":    "internal_error",
+		},
 	})
 }

@@ -382,7 +382,7 @@
                     </select>
                 </div>
                 <div class="form-group">
-                    <label for="new-max-concurrency">并发上限（同时请求数，0=不限，默认 10）</label>
+                    <label for="new-max-concurrency">并发上限（同时请求数，0=不限，默认 10；降低立即生效，可能短暂阻塞当前高并发用户直至在途结束）</label>
                     <input type="number" id="new-max-concurrency" min="0" placeholder="留空=默认 10">
                 </div>
                 <div id="create-user-result" class="result-box hidden"></div>
@@ -448,7 +448,7 @@
                     </select>
                 </div>
                 <div class="form-group">
-                    <label for="update-max-concurrency">并发上限（同时请求数，0=不限）</label>
+                    <label for="update-max-concurrency">并发上限（同时请求数，0=不限；降低立即生效，可能短暂阻塞当前高并发用户直至在途结束）</label>
                     <input type="number" id="update-max-concurrency" min="0" placeholder="0 = 不限制">
                 </div>
                 <div id="update-user-result" class="result-box hidden"></div>

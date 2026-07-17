@@ -29,7 +29,7 @@ func TestHandler_DebugBodyDump(t *testing.T) {
 	subHash := auth.HashSubKey(subKey)
 	subPreview := auth.SubKeyPreview(subKey)
 	if _, err := models.CreateUser(database.Conn, "dbg", "pw", subHash, subPreview,
-		"user", "active", "", "auto", "", 1_000_000, 1_000_000, nil, 1<<20); err != nil {
+		"user", "active", "", "auto", "", 1_000_000, 1_000_000, nil, 1<<20, models.DefaultMaxConcurrency); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 

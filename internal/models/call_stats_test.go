@@ -20,7 +20,7 @@ func TestAggregateCallStats_ByModelMergeCaseInsensitive(t *testing.T) {
 		database.Conn,
 		"stats-owner", "pw-hash", "sub-hash-owner", "sk-owner...",
 		"user", "active", "", "auto", "",
-		1000, 100000, nil, 0,
+		1000, 100000, nil, 0, models.DefaultMaxConcurrency,
 	)
 	if err != nil {
 		t.Fatalf("CreateUser(owner) failed: %v", err)
@@ -97,7 +97,7 @@ func TestDistinctModels_NormalizedLower(t *testing.T) {
 		database.Conn,
 		"distinct-owner", "pw-hash", "sub-hash-owner", "sk-owner...",
 		"user", "active", "", "auto", "",
-		1000, 100000, nil, 0,
+		1000, 100000, nil, 0, models.DefaultMaxConcurrency,
 	)
 	if err != nil {
 		t.Fatalf("CreateUser(owner) failed: %v", err)
@@ -164,7 +164,7 @@ func TestQueryCallLogsGlobal_ModelFilterCaseInsensitive(t *testing.T) {
 		database.Conn,
 		"filter-owner", "pw-hash", "sub-hash-filter", "sk-filter...",
 		"user", "active", "", "auto", "",
-		1000, 100000, nil, 0,
+		1000, 100000, nil, 0, models.DefaultMaxConcurrency,
 	)
 	if err != nil {
 		t.Fatalf("CreateUser(owner) failed: %v", err)
