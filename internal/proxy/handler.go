@@ -10,6 +10,8 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"llm_api_gateway/internal/auth"
@@ -37,6 +39,37 @@ type Handler struct {
 	// failure — useful for troubleshooting malformed clients. OFF by default
 	// to avoid leaking user conversation content into logs in production.
 	Debug bool
+}
+
+// userConcurrency tracks the number of in-flight (concurrent) requests per
+// user, so the gateway can enforce a per-user concurrent-request cap configured
+// in the admin panel. A sync.Map of userID -> *int64 atomic counters. A cap of
+// 0 means unlimited and is always allowed. The map is append-only (counters
+// linger after a user is deleted) which is harmless for this use.
+var userConcurrency sync.Map
+
+// tryAcquireConcurrency increments the user's in-flight counter and returns
+// false if doing so would exceed max (max <= 0 means unlimited, always
+// allowed). On failure the counter is rolled back, so callers must NOT call
+// releaseConcurrency for that attempt.
+func tryAcquireConcurrency(userID int64, max int) bool {
+	if max <= 0 {
+		return true
+	}
+	v, _ := userConcurrency.LoadOrStore(userID, new(int64))
+	c := atomic.AddInt64(v.(*int64), 1)
+	if c > int64(max) {
+		atomic.AddInt64(v.(*int64), -1)
+		return false
+	}
+	return true
+}
+
+// releaseConcurrency decrements the user's in-flight counter.
+func releaseConcurrency(userID int64) {
+	if v, ok := userConcurrency.Load(userID); ok {
+		atomic.AddInt64(v.(*int64), -1)
+	}
 }
 
 // ChatCompletionRequest mirrors the upstream request structure.
@@ -185,6 +218,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeProxyError(w, http.StatusUnauthorized, "Not authenticated", "not_authenticated")
 		return
 	}
+
+	// ── Per-user concurrent request cap ──
+	// Reject bursts above the user's configured concurrency limit *before*
+	// reading/forwarding the request, so a single misbehaving client cannot
+	// exhaust the shared upstream rate-limit budget (all sub-users funnel
+	// through the gateway's single upstream credential) or the gateway's own
+	// resources (per-request body reads can be up to 32MB). 0 = unlimited.
+	// Released on every subsequent return path via the deferred call below.
+	maxConc := auth.GetMaxConcurrency(r)
+	if !tryAcquireConcurrency(userID, int(maxConc)) {
+		writeProxyError(w, http.StatusTooManyRequests,
+			"并发请求数超过上限", "concurrency_limit_exceeded")
+		return
+	}
+	defer releaseConcurrency(userID)
 
 	// Determine the user's per-request body budget. The gateway always reads
 	// the full request up to the absolute 32MB ceiling so it can inspect and,
@@ -347,7 +395,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !allowed {
-		// Log the rejected call
+		// Log the rejected call (unified 429; the specific type is reported to
+		// the client below after classifying the cause).
 		callLog := &models.CallLog{
 			UserID:         userID,
 			Model:          rewrittenModel,
@@ -360,7 +409,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		models.InsertCallLog(h.QuotaChecker.DB(), callLog)
 
-		writeProxyError(w, http.StatusTooManyRequests, "Quota exceeded", "quota_exceeded")
+		// Classify the rejection reason. A non-zero Token cap that has already
+		// been reached yields token_quota_exceeded (中文「Token 额度已用尽」);
+		// otherwise it is a call-count quota (quota_exceeded). If GetQuota fails
+		// we conservatively fall back to the generic count message so the
+		// request is always rejected.
+		msg, errType := "Quota exceeded", "quota_exceeded"
+		if q, qErr := models.GetQuota(h.QuotaChecker.DB(), userID); qErr == nil && q != nil {
+			if q.QuotaTokenTotalLimit != 0 && q.QuotaTokenTotalUsed >= q.QuotaTokenTotalLimit {
+				msg, errType = "Token 额度已用尽", "token_quota_exceeded"
+			}
+		}
+		writeProxyError(w, http.StatusTooManyRequests, msg, errType)
 		return
 	}
 
@@ -449,6 +509,13 @@ func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int
 		LatencyMs:        latencyMs,
 	}
 	models.InsertCallLog(h.QuotaChecker.DB(), callLog)
+
+	// Account the Token usage toward the user's cumulative Token quota. This is
+	// fire-and-forget bookkeeping that must NOT break the already-built response,
+	// so any error is logged only (no client impact).
+	if err := models.AddTokenUsage(h.QuotaChecker.DB(), userID, promptTokens+completionTokens); err != nil {
+		log.Printf("ERROR: add token usage (sync) for user %d: %v", userID, err)
+	}
 
 	// Forward response to client
 	for key, values := range resp.Header {
