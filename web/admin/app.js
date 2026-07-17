@@ -445,7 +445,18 @@ async function loadUsers() {
         tbody.innerHTML = data.data.map(u => {
             const quota5h = `${u.quota_5h_used} / ${u.quota_5h_limit}`;
             const quotaTotal = `${u.quota_total_used.toLocaleString()} / ${u.quota_total_limit.toLocaleString()}`;
-            const tokens = (u.total_tokens || 0).toLocaleString();
+            // Cumulative Token usage cell (quota 口径). 0 cap => unlimited.
+            const tokenLimit = u.quota_token_total_limit || 0;
+            const tokenUsed = u.quota_token_total_used || 0;
+            let tokenCell;
+            if (tokenLimit === 0) {
+                tokenCell = '<span class="infinite">无限</span>';
+            } else {
+                const pct = Math.min(100, Math.round(tokenUsed / tokenLimit * 100));
+                const cls = pct > 80 ? 'bad' : (pct > 50 ? 'warn' : 'good');
+                tokenCell = `${tokenUsed.toLocaleString()} / ${tokenLimit.toLocaleString()}` +
+                    `<div class="token-progress"><div class="${cls}" style="width:${pct}%"></div></div>`;
+            }
             let s = u.status === 'active' ? '<span class="badge badge-active">启用</span>' : '<span class="badge badge-disabled">禁用</span>';
             // Route mode badge
             let routeHtml = '';
@@ -473,11 +484,11 @@ async function loadUsers() {
             }
             return `<tr${rowClass}>
                 <td>${u.id}</td><td>${escapeHtml(u.username)}</td><td><code>${escapeHtml(u.sub_key_preview)}</code></td>
-                <td>${quota5h}</td><td>${quotaTotal}</td><td>${tokens}</td><td>${routeHtml}</td><td>${formatBodySize(u.max_body_size)}</td><td>${expiryHtml}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
+                <td>${quota5h}</td><td>${quotaTotal}</td><td class="token-cell">${tokenCell}</td><td>${routeHtml}</td><td>${formatBodySize(u.max_body_size)}</td><td>${u.max_concurrency > 0 ? u.max_concurrency : '不限'}</td><td>${expiryHtml}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
                 <td><div class="btn-group">
                     <button class="btn btn-outline btn-sm" onclick="extendUser(${u.id},'${escapeAttr(u.username)}','${escapeAttr(u.expires_at || '')}')">🕐 延期</button>
                     <button class="btn btn-outline btn-sm" onclick="shareUser('${escapeAttr(u.username)}',${u.id})">📋 分享</button>
-                    <button class="btn btn-outline btn-sm" onclick="editUser(${u.id},'${escapeAttr(u.status)}',${u.quota_5h_limit},${u.quota_total_limit},'${escapeAttr(u.route_mode || 'auto')}','${escapeAttr(u.fixed_provider || '')}',${u.fixed_multiplier != null ? u.fixed_multiplier : 'null'},${u.max_body_size ? u.max_body_size : 1048576})">编辑</button>
+                    <button class="btn btn-outline btn-sm" onclick="editUser(${u.id},'${escapeAttr(u.status)}',${u.quota_5h_limit},${u.quota_total_limit},'${escapeAttr(u.route_mode || 'auto')}','${escapeAttr(u.fixed_provider || '')}',${u.fixed_multiplier != null ? u.fixed_multiplier : 'null'},${u.max_body_size ? u.max_body_size : 1048576},${u.quota_token_total_limit || 0},${u.quota_token_total_used || 0},${u.max_concurrency || 10})">编辑</button>
                     <button class="btn btn-outline btn-sm" onclick="viewCalls(${u.id},'${escapeAttr(u.username)}')">记录</button>
                     <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id},'${escapeAttr(u.username)}')">删除</button>
                 </div></td>
@@ -517,6 +528,15 @@ async function createUser(e) {
     const body = { username, quota_5h_limit: q5, quota_total_limit: qt, expires_at: expiresAt, route_mode: routeMode, fixed_provider: fixedProvider };
     if (fixedMultiplier != null) body.fixed_multiplier = fixedMultiplier;
     body.max_body_size = mbs * 1048576;
+    // Per-user concurrency cap: only send when >0 (0/absent → server default 10).
+    const mcRaw = document.getElementById('new-max-concurrency').value.trim();
+    if (mcRaw !== '' && parseInt(mcRaw) > 0) body.max_concurrency = parseInt(mcRaw);
+    // Cumulative Token cap: only send when the field is non-empty (default 0 = unlimited).
+    const qttRaw = document.getElementById('new-quota-token-total').value.trim();
+    if (qttRaw !== '') {
+        const qtt = parseInt(qttRaw);
+        if (!isNaN(qtt) && qtt >= 0) body.quota_token_total_limit = qtt;
+    }
 
     try {
         const data = await apiFetch('api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -537,10 +557,11 @@ async function createUser(e) {
     } catch (err) { document.getElementById('create-user-result').textContent = '创建失败: ' + err.message; document.getElementById('create-user-result').classList.remove('hidden'); }
 }
 
-function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier, maxBodySize) {
+function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier, maxBodySize, tokenLimit, tokenUsed, maxConcurrency) {
     document.getElementById('update-user-id').value = id;
     document.getElementById('update-quota-5h').value = q5;
     document.getElementById('update-quota-total').value = qt;
+    document.getElementById('update-quota-token-total').value = tokenLimit || 0;
     document.getElementById('update-status').value = '';
     document.getElementById('update-regenerate-key').checked = false;
     document.getElementById('update-route-mode').value = '';
@@ -551,6 +572,7 @@ function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier,
     // 512 KB / 0.5 MB step, not just whole MB).
     const mbVal = (maxBodySize || 1048576) / 1048576;
     document.getElementById('update-max-body-size').value = String(Math.round(mbVal * 10) / 10);
+    document.getElementById('update-max-concurrency').value = (maxConcurrency && maxConcurrency > 0) ? maxConcurrency : '0';
     document.getElementById('update-user-result').classList.add('hidden');
     // Pre-fill existing route mode info (display only, user can change)
     if (routeMode && routeMode !== 'null') {
@@ -578,6 +600,11 @@ async function updateUser(e) {
     if (q5) body.quota_5h_limit = parseInt(q5);
     const qt = document.getElementById('update-quota-total').value;
     if (qt) body.quota_total_limit = parseInt(qt);
+    const uttRaw = document.getElementById('update-quota-token-total').value.trim();
+    if (uttRaw !== '') {
+        const utt = parseInt(uttRaw);
+        if (!isNaN(utt) && utt >= 0) body.quota_token_total_limit = utt;
+    }
     const st = document.getElementById('update-status').value;
     if (st) body.status = st;
     body.regenerate_key = document.getElementById('update-regenerate-key').checked;
@@ -596,6 +623,8 @@ async function updateUser(e) {
     }
     const umbs = document.getElementById('update-max-body-size').value;
     if (umbs) body.max_body_size = parseFloat(umbs) * 1048576;
+    const umc = document.getElementById('update-max-concurrency').value.trim();
+    if (umc !== '') body.max_concurrency = parseInt(umc);
     if (body.regenerate_key && !confirm('确定要重新生成 Key 吗？旧 Key 将立即失效。')) return;
     try {
         const data = await apiFetch('api/users/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

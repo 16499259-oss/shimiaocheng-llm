@@ -16,33 +16,40 @@ const DefaultMaxBodySize = 1 << 20
 // unreachable because nginx rejects larger bodies before Go sees them.
 const MaxBodySizeCeiling = 32 << 20
 
+// DefaultMaxConcurrency is the per-user concurrent request cap applied when a
+// user has no explicit max_concurrency set. 0 means unlimited.
+const DefaultMaxConcurrency = 10
+
 // User represents a user in the system.
 type User struct {
-	ID            int64  `json:"id"`
-	Username      string `json:"username"`
-	PasswordHash  string `json:"-"` // never exposed in JSON
-	SubKeyHash    string `json:"-"` // never exposed in JSON
-	SubKeyPreview string `json:"sub_key_preview"`
-	Role          string `json:"role"`
-	Status        string `json:"status"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
-	ExpiresAt     string `json:"expires_at"`
-	RouteMode     string `json:"route_mode"`     // "auto" | "fixed"
-	FixedProvider string `json:"fixed_provider"` // provider slug when route_mode=fixed
-	MaxBodySize   int    `json:"max_body_size"`  // per-request body cap in bytes (default 1MB)
+	ID             int64  `json:"id"`
+	Username       string `json:"username"`
+	PasswordHash   string `json:"-"` // never exposed in JSON
+	SubKeyHash     string `json:"-"` // never exposed in JSON
+	SubKeyPreview  string `json:"sub_key_preview"`
+	Role           string `json:"role"`
+	Status         string `json:"status"`
+	CreatedAt      string `json:"created_at"`
+	UpdatedAt      string `json:"updated_at"`
+	ExpiresAt      string `json:"expires_at"`
+	RouteMode      string `json:"route_mode"`      // "auto" | "fixed"
+	FixedProvider  string `json:"fixed_provider"`  // provider slug when route_mode=fixed
+	MaxBodySize    int    `json:"max_body_size"`   // per-request body cap in bytes (default 1MB)
+	MaxConcurrency int    `json:"max_concurrency"` // max simultaneous in-flight requests (0 = unlimited, default 10)
 }
 
 // UserWithQuota combines user info with quota info for API responses.
 type UserWithQuota struct {
 	User
-	Quota5hLimit    int      `json:"quota_5h_limit"`
-	Quota5hUsed     int      `json:"quota_5h_used"`
-	QuotaTotalLimit int      `json:"quota_total_limit"`
-	QuotaTotalUsed  int      `json:"quota_total_used"`
-	TotalTokens     int64    `json:"total_tokens"`
-	SubKey          string   `json:"sub_key,omitempty"`
-	FixedMultiplier *float64 `json:"fixed_multiplier"` // nil = global
+	Quota5hLimit         int      `json:"quota_5h_limit"`
+	Quota5hUsed          int      `json:"quota_5h_used"`
+	QuotaTotalLimit      int      `json:"quota_total_limit"`
+	QuotaTotalUsed       int      `json:"quota_total_used"`
+	QuotaTokenTotalLimit int      `json:"quota_token_total_limit"` // 0 = unlimited
+	QuotaTokenTotalUsed  int      `json:"quota_token_total_used"`  // cumulative used
+	TotalTokens          int64    `json:"total_tokens"`
+	SubKey               string   `json:"sub_key,omitempty"`
+	FixedMultiplier      *float64 `json:"fixed_multiplier"` // nil = global
 }
 
 // CreateUser inserts a new user and associated quota record.
@@ -107,24 +114,27 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 
 	return &UserWithQuota{
 		User: User{
-			ID:            userID,
-			Username:      username,
-			PasswordHash:  passwordHash,
-			SubKeyHash:    subKeyHash,
-			SubKeyPreview: subKeyPreview,
-			Role:          role,
-			Status:        status,
-			CreatedAt:     now,
-			UpdatedAt:     now,
-			ExpiresAt:     expiresAt,
-			RouteMode:     routeMode,
-			FixedProvider: fixedProvider,
-			MaxBodySize:   maxBodySize,
+			ID:             userID,
+			Username:       username,
+			PasswordHash:   passwordHash,
+			SubKeyHash:     subKeyHash,
+			SubKeyPreview:  subKeyPreview,
+			Role:           role,
+			Status:         status,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+			ExpiresAt:      expiresAt,
+			RouteMode:      routeMode,
+			FixedProvider:  fixedProvider,
+			MaxBodySize:    maxBodySize,
+			MaxConcurrency: DefaultMaxConcurrency,
 		},
-		Quota5hLimit:    quota5hLimit,
-		Quota5hUsed:     0,
-		QuotaTotalLimit: quotaTotalLimit,
-		QuotaTotalUsed:  0,
+		Quota5hLimit:         quota5hLimit,
+		Quota5hUsed:          0,
+		QuotaTotalLimit:      quotaTotalLimit,
+		QuotaTotalUsed:       0,
+		QuotaTokenTotalLimit: 0,
+		QuotaTokenTotalUsed:  0,
 	}, nil
 }
 
@@ -132,9 +142,9 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 func GetUserBySubKeyHash(db *sql.DB, subKeyHash string) (*User, error) {
 	u := &User{}
 	err := db.QueryRow(
-		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at, expires_at, route_mode, fixed_provider, max_body_size
+		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at, expires_at, route_mode, fixed_provider, max_body_size, max_concurrency
 		 FROM users WHERE sub_key_hash = ? AND status != 'deleted'`, subKeyHash,
-	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt, &u.ExpiresAt, &u.RouteMode, &u.FixedProvider, &u.MaxBodySize)
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt, &u.ExpiresAt, &u.RouteMode, &u.FixedProvider, &u.MaxBodySize, &u.MaxConcurrency)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -149,9 +159,9 @@ func GetUserBySubKeyHash(db *sql.DB, subKeyHash string) (*User, error) {
 func GetUserByID(db *sql.DB, id int64) (*User, error) {
 	u := &User{}
 	err := db.QueryRow(
-		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at, expires_at, route_mode, fixed_provider, max_body_size
+		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at, expires_at, route_mode, fixed_provider, max_body_size, max_concurrency
 		 FROM users WHERE id = ?`, id,
-	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt, &u.ExpiresAt, &u.RouteMode, &u.FixedProvider, &u.MaxBodySize)
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt, &u.ExpiresAt, &u.RouteMode, &u.FixedProvider, &u.MaxBodySize, &u.MaxConcurrency)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -166,9 +176,9 @@ func GetUserByID(db *sql.DB, id int64) (*User, error) {
 func GetUserByUsername(db *sql.DB, username string) (*User, error) {
 	u := &User{}
 	err := db.QueryRow(
-		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at, expires_at, route_mode, fixed_provider, max_body_size
+		`SELECT id, username, password_hash, sub_key_hash, sub_key_preview, role, status, created_at, updated_at, expires_at, route_mode, fixed_provider, max_body_size, max_concurrency
 		 FROM users WHERE username = ?`, username,
-	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt, &u.ExpiresAt, &u.RouteMode, &u.FixedProvider, &u.MaxBodySize)
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.SubKeyHash, &u.SubKeyPreview, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt, &u.ExpiresAt, &u.RouteMode, &u.FixedProvider, &u.MaxBodySize, &u.MaxConcurrency)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -182,8 +192,8 @@ func GetUserByUsername(db *sql.DB, username string) (*User, error) {
 // ListUsers returns all users with their quota information (for admin).
 func ListUsers(db *sql.DB) ([]UserWithQuota, error) {
 	rows, err := db.Query(
-		`SELECT u.id, u.username, u.sub_key_preview, u.role, u.status, u.created_at, u.updated_at, u.expires_at, u.route_mode, u.fixed_provider, u.max_body_size,
-		        q.quota_5h_limit, q.quota_5h_used, q.quota_total_limit, q.quota_total_used, q.fixed_multiplier,
+		`SELECT u.id, u.username, u.sub_key_preview, u.role, u.status, u.created_at, u.updated_at, u.expires_at, u.route_mode, u.fixed_provider, u.max_body_size, u.max_concurrency,
+		        q.quota_5h_limit, q.quota_5h_used, q.quota_total_limit, q.quota_total_used, q.quota_token_total_limit, q.quota_token_total_used, q.fixed_multiplier,
 		        COALESCE(t.total_tokens, 0) AS total_tokens
 		 FROM users u
 		 LEFT JOIN quotas q ON u.id = q.user_id
@@ -202,8 +212,9 @@ func ListUsers(db *sql.DB) ([]UserWithQuota, error) {
 		var fixedMult sql.NullFloat64
 		err := rows.Scan(
 			&uwq.ID, &uwq.Username, &uwq.SubKeyPreview, &uwq.Role, &uwq.Status,
-			&uwq.CreatedAt, &uwq.UpdatedAt, &uwq.ExpiresAt, &uwq.RouteMode, &uwq.FixedProvider, &uwq.MaxBodySize,
+			&uwq.CreatedAt, &uwq.UpdatedAt, &uwq.ExpiresAt, &uwq.RouteMode, &uwq.FixedProvider, &uwq.MaxBodySize, &uwq.MaxConcurrency,
 			&uwq.Quota5hLimit, &uwq.Quota5hUsed, &uwq.QuotaTotalLimit, &uwq.QuotaTotalUsed,
+			&uwq.QuotaTokenTotalLimit, &uwq.QuotaTokenTotalUsed,
 			&fixedMult, &uwq.TotalTokens,
 		)
 		if err != nil {
@@ -277,6 +288,20 @@ func UpdateUserMaxBodySize(db *sql.DB, userID int64, maxBodySize int) error {
 	)
 	if err != nil {
 		return fmt.Errorf("update user max body size: %w", err)
+	}
+	return nil
+}
+
+// UpdateUserMaxConcurrency updates a user's per-user concurrent request cap.
+// 0 means unlimited (no cap); a positive N caps simultaneous in-flight requests.
+func UpdateUserMaxConcurrency(db *sql.DB, userID int64, maxConcurrency int) error {
+	now := time.Now().Format(time.RFC3339)
+	_, err := db.Exec(
+		`UPDATE users SET max_concurrency = ?, updated_at = ? WHERE id = ?`,
+		maxConcurrency, now, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("update user max concurrency: %w", err)
 	}
 	return nil
 }

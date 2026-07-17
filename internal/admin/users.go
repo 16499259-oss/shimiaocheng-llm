@@ -19,20 +19,23 @@ import (
 
 // createUserRequest is the JSON body for POST /admin/api/users.
 type createUserRequest struct {
-	Username        string   `json:"username"`
-	Quota5hLimit    int      `json:"quota_5h_limit"`
-	QuotaTotalLimit int      `json:"quota_total_limit"`
-	ExpiresAt       string   `json:"expires_at"`
-	RouteMode       string   `json:"route_mode"`
-	FixedProvider   string   `json:"fixed_provider"`
-	FixedMultiplier *float64 `json:"fixed_multiplier"`
-	MaxBodySize     int      `json:"max_body_size"`
+	Username             string   `json:"username"`
+	Quota5hLimit         int      `json:"quota_5h_limit"`
+	QuotaTotalLimit      int      `json:"quota_total_limit"`
+	QuotaTokenTotalLimit *int     `json:"quota_token_total_limit"` // 0/nil = unlimited
+	ExpiresAt            string   `json:"expires_at"`
+	RouteMode            string   `json:"route_mode"`
+	FixedProvider        string   `json:"fixed_provider"`
+	FixedMultiplier      *float64 `json:"fixed_multiplier"`
+	MaxBodySize          int      `json:"max_body_size"`
+	MaxConcurrency       int      `json:"max_concurrency"`
 }
 
 // updateUserRequest is the JSON body for PUT /admin/api/users/{id}.
 type updateUserRequest struct {
 	Quota5hLimit         *int     `json:"quota_5h_limit"`
 	QuotaTotalLimit      *int     `json:"quota_total_limit"`
+	QuotaTokenTotalLimit *int     `json:"quota_token_total_limit"` // 0/nil = unlimited
 	Status               *string  `json:"status"`
 	RegenerateKey        *bool    `json:"regenerate_key"`
 	RouteMode            *string  `json:"route_mode"`
@@ -40,6 +43,7 @@ type updateUserRequest struct {
 	FixedMultiplier      *float64 `json:"fixed_multiplier"`
 	FixedMultiplierClear bool     `json:"fixed_multiplier_clear"`
 	MaxBodySize          *int     `json:"max_body_size"`
+	MaxConcurrency       *int     `json:"max_concurrency"`
 }
 
 // extendUserRequest is the JSON body for POST /admin/api/users/{id}/extend.
@@ -108,6 +112,28 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Apply the optional cumulative Token cap (0/nil = unlimited). Done right
+	// after user creation so the response can reflect the persisted value.
+	if req.QuotaTokenTotalLimit != nil {
+		if err := models.UpdateQuotaTokenTotalLimit(h.DB, user.ID, *req.QuotaTokenTotalLimit); err != nil {
+			log.Printf("ERROR: update quota token total limit on create: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to set token limit: " + err.Error()})
+			return
+		}
+	}
+
+	// Apply a per-user concurrency cap if the admin supplied one (>0). A value
+	// of 0 (or absent) leaves the DB default (10); unlimited is set via the edit
+	// form (PUT max_concurrency=0).
+	if req.MaxConcurrency > 0 {
+		if err := models.UpdateUserMaxConcurrency(h.DB, user.ID, req.MaxConcurrency); err != nil {
+			log.Printf("ERROR: update max concurrency on create: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to set concurrency limit: " + err.Error()})
+			return
+		}
+		user.MaxConcurrency = req.MaxConcurrency
+	}
+
 	// Now regenerate the sub-key with the actual user ID as input
 	actualSubKey := auth.GenerateSubKey(h.SubKeySalt, user.ID)
 	actualSubKeyHash := auth.HashSubKey(actualSubKey)
@@ -148,7 +174,15 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		"fixed_provider":    user.FixedProvider,
 		"status":            user.Status,
 		"max_body_size":     user.MaxBodySize,
+		"max_concurrency":   user.MaxConcurrency,
 		"created_at":        user.CreatedAt,
+	}
+	// Cumulative Token quota fields (0 = unlimited). Reflect the value the admin
+	// supplied, if any; otherwise the default of 0 (unlimited) applies.
+	response["quota_token_total_limit"] = 0
+	response["quota_token_total_used"] = 0
+	if req.QuotaTokenTotalLimit != nil {
+		response["quota_token_total_limit"] = *req.QuotaTokenTotalLimit
 	}
 	if req.FixedMultiplier != nil {
 		response["fixed_multiplier"] = *req.FixedMultiplier
@@ -204,6 +238,23 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		response["quota_updated"] = true
 	}
 
+	// Update cumulative Token cap (0/nil = unlimited). Lowering the limit below
+	// current usage blocks on the next request (self-consistent).
+	if req.QuotaTokenTotalLimit != nil {
+		if err := models.UpdateQuotaTokenTotalLimit(h.DB, userID, *req.QuotaTokenTotalLimit); err != nil {
+			log.Printf("ERROR: update quota token total limit: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to update token quota"})
+			return
+		}
+		if q, gErr := models.GetQuota(h.DB, userID); gErr == nil && q != nil {
+			response["quota_token_total_limit"] = q.QuotaTokenTotalLimit
+			response["quota_token_total_used"] = q.QuotaTokenTotalUsed
+		} else {
+			response["quota_token_total_limit"] = *req.QuotaTokenTotalLimit
+			response["quota_token_total_used"] = 0
+		}
+	}
+
 	// Update status
 	if req.Status != nil {
 		if *req.Status != "active" && *req.Status != "disabled" {
@@ -257,6 +308,30 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		response["max_body_size"] = v
+	}
+
+	// Update per-user concurrency cap (0 = unlimited).
+	if req.MaxConcurrency != nil {
+		v := *req.MaxConcurrency
+		if v < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "max_concurrency must be >= 0"})
+			return
+		}
+		if err := models.UpdateUserMaxConcurrency(h.DB, userID, v); err != nil {
+			log.Printf("ERROR: update max concurrency: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to update max concurrency"})
+			return
+		}
+		response["max_concurrency"] = v
+		detail := fmt.Sprintf("max_concurrency → %d", v)
+		if v == 0 {
+			detail = "max_concurrency → 不限"
+		}
+		_, _ = h.DB.Exec(
+			`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)
+			 VALUES (?, ?, ?, ?, ?)`,
+			"user.update", "user", strconv.FormatInt(userID, 10), detail, time.Now().Format(time.RFC3339),
+		)
 	}
 
 	// Update fixed_multiplier. fixed_multiplier_clear takes priority —

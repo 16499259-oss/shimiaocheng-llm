@@ -215,12 +215,59 @@ func RunMigrations(conn *DB) error {
 		}
 	}
 
+	// Add max_concurrency column to users (idempotent). Per-user cap on the
+	// number of simultaneous in-flight requests; 0 means unlimited. Enforced in
+	// proxy.Handler via an atomic per-user counter so a single misbehaving
+	// client cannot exhaust the shared upstream rate-limit budget (all sub-users
+	// funnel through the gateway's single upstream credential). Default 10.
+	if !columnExists(conn, "users", "max_concurrency") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE users ADD COLUMN max_concurrency INTEGER NOT NULL DEFAULT 10`,
+		); err != nil {
+			return fmt.Errorf("migration alter users.max_concurrency failed: %w", err)
+		}
+	}
+
 	// Add fixed_multiplier column to quotas (idempotent).
 	if !columnExists(conn, "quotas", "fixed_multiplier") {
 		if _, err := conn.Conn.Exec(
 			`ALTER TABLE quotas ADD COLUMN fixed_multiplier REAL`,
 		); err != nil {
 			return fmt.Errorf("migration alter quotas.fixed_multiplier failed: %w", err)
+		}
+	}
+
+	// Add quota_token_total_used column to quotas (idempotent). Added BEFORE
+	// quota_token_total_limit so the one-time backfill below (run when the
+	// limit column is first created) can safely reference this column.
+	if !columnExists(conn, "quotas", "quota_token_total_used") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE quotas ADD COLUMN quota_token_total_used INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("migration alter quotas.quota_token_total_used failed: %w", err)
+		}
+	}
+
+	// Add quota_token_total_limit column to quotas (idempotent). On first
+	// creation, backfill quota_token_total_used from historical call_logs
+	// (SUM(prompt_tokens + completion_tokens) per user) — a one-time migration
+	// so existing users' cumulative Token usage is preserved under the new
+	// quota-unlimited-by-default model. Idempotent: only runs when the column
+	// does not yet exist.
+	if !columnExists(conn, "quotas", "quota_token_total_limit") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE quotas ADD COLUMN quota_token_total_limit INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("migration alter quotas.quota_token_total_limit failed: %w", err)
+		}
+		// Backfill only where not already incremented (defensive against a
+		// partial prior run). quota_token_total_used now exists (added above).
+		if _, err := conn.Conn.Exec(
+			`UPDATE quotas SET quota_token_total_used = COALESCE(
+				(SELECT SUM(prompt_tokens + completion_tokens) FROM call_logs WHERE call_logs.user_id = quotas.user_id), 0
+			) WHERE quota_token_total_used = 0`,
+		); err != nil {
+			return fmt.Errorf("migration backfill quotas.quota_token_total_used failed: %w", err)
 		}
 	}
 

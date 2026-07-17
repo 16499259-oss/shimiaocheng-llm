@@ -27,6 +27,9 @@ const (
 	CtxKeyFixedProvider contextKey = "fixed_provider"
 	// CtxKeyMaxBodySize is the context key for the user's per-request body cap (bytes).
 	CtxKeyMaxBodySize contextKey = "max_body_size"
+	// CtxKeyMaxConcurrency is the context key for the user's per-user
+	// concurrent request cap (0 = unlimited).
+	CtxKeyMaxConcurrency contextKey = "max_concurrency"
 )
 
 // Middleware provides authentication middleware functions.
@@ -94,6 +97,7 @@ func (m *Middleware) SubKeyAuth(next http.Handler) http.Handler {
 		ctx = context.WithValue(ctx, CtxKeyRouteMode, user.RouteMode)
 		ctx = context.WithValue(ctx, CtxKeyFixedProvider, user.FixedProvider)
 		ctx = context.WithValue(ctx, CtxKeyMaxBodySize, int64(user.MaxBodySize))
+		ctx = context.WithValue(ctx, CtxKeyMaxConcurrency, int64(user.MaxConcurrency))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -191,6 +195,17 @@ func GetFixedProvider(r *http.Request) string {
 // models.DefaultMaxBodySize.
 func GetMaxBodySize(r *http.Request) int64 {
 	v, ok := r.Context().Value(CtxKeyMaxBodySize).(int64)
+	if !ok {
+		return 0
+	}
+	return v
+}
+
+// GetMaxConcurrency extracts the user's per-user concurrent request cap from
+// the request context. Returns 0 if unset, meaning unlimited — callers should
+// allow the request through.
+func GetMaxConcurrency(r *http.Request) int64 {
+	v, ok := r.Context().Value(CtxKeyMaxConcurrency).(int64)
 	if !ok {
 		return 0
 	}

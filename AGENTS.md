@@ -108,6 +108,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 /tmp/go/bin/go test ./...
   `/v1/chat/completions/chat/completions` 导致 404）。
 - **禁用/删除用户三重拦截**：SQL 过滤（`status != 'deleted'`）+ 中间件（`disabled`/`deleted` 返回 403）+ 列表排除。
 - **请求体限制（per-user）**：用户表 `max_body_size` 列（字节，默认 1MB）控制每个用户的单次请求体上限；鉴权后由 Go `http.MaxBytesReader` 按该值执行，未设置回落 1MB、超过 32MB 自动封顶。nginx `/v1/` 维持 `client_max_body_size 32m` 作为**全局通道天花板**（go 无法超过此值），管理后台/UI 路径仍保留 1MB server 级守卫。滥用量由「每用户调用配额 + 每用户请求体上限」共同控制，非全局一刀切。
+- **每用户并发上限（per-user concurrency）**：用户表 `max_concurrency` 列（整数，默认 10，0=不限）限制同一用户的**同时**在途请求数。鉴权后在 `proxy.Handler.ServeHTTP` 用 `sync.Map` + `atomic` 每用户计数器实现：`tryAcquireConcurrency` 在读取/转发请求**之前**拦截超限请求（返回 429 `concurrency_limit_exceeded`），`defer releaseConcurrency` 在任意返回路径释放。目的：防止单个失控客户端打满**共享的上游凭证速率预算**（所有子用户经网关单一上游 key 出网）或网关自身资源（单次体读可达 32MB）。后台用户管理「并发」列与创建/编辑表单可设置。并发超限**不写 call_logs**（避免突发写入放大，响应已含中文说明）。
 - **时段路由：命中即走，绝不回退**（见 ADR-0006）：按 `provider_routing_rules` 的「时间段 + 星期」
   判定，窗口命中某 provider（如 openai）即转发该上游；**若其故障返回 502，绝不静默回退默认
   provider（如 zhipu）**。路由规则表空 / DB 错时回退默认 provider，但不 panic。
@@ -139,6 +140,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 /tmp/go/bin/go test ./...
   `/etc/nginx/conf.d/rate-limit.conf`（http 块 include）；`/m-7xa2/` 套 login_limit 防护后台爆破。`/v1/` **无 nginx 限速**（纯中转，上游自带限速；2026-07-13 决策移除 `api_limit`）
 - **API Key**：内存态 + systemd 环境变量持久化（不落盘明文）
 - **请求体**：per-user `max_body_size`（默认 1MB，后台可调 500KB/1/4/8/16/32MB）；nginx `/v1/` 维持 32m 通道天花板（Go 读取上限），Go 按用户执行。`compaction: "trim"`（默认）下，请求超过用户上限时**自动裁剪历史对话**（保留 system + 最近轮次）后转发，**不再 413**；`compaction: "off"` 恢复旧行为（超限即 413）。无论哪种，超过 32MB 绝对天花板仍 413（滥用防护）。管理后台/UI 路径仍 1MB（nginx server 级 + Go `MaxBytesReader` 双保险）。
+- **每用户并发上限**：`max_concurrency` 列（默认 10，0=不限），由 `proxy.Handler` 原子计数器在请求进入时拦截超限（429 `concurrency_limit_exceeded`）。详见第 6 节。
 - **流式**：10 分钟整体超时
 - **前端**：`escapeAttr` 反斜杠转义（防 self-XSS）
 - **部署模板**：`deploy/nginx.conf` 已同步为脱敏真实配置（`/v1/` 无 api_limit 限速，login_limit 注释保留）
