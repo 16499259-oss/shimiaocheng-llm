@@ -129,3 +129,52 @@ func TestAtomicDeductQuota_MultiStep(t *testing.T) {
 		t.Fatalf("expected 6th deduction to be rejected")
 	}
 }
+
+// TestAtomicDeductQuota_TokenSoftGatePermitsSingleOverage documents the audit L1
+// deviation: the Token gate is a pure column comparison
+// (quota_token_total_used < quota_token_total_limit) evaluated BEFORE the
+// request's billed Token increment is known (the increment is only computed from
+// the upstream response, after the gate has already decided). So a request whose
+// deduction is allowed may still push the cumulative used PAST the cap by up to
+// one billed increment — exactly what a high multiplier amplifies. The overage is
+// accepted by design (a soft gate) and the NEXT request is blocked once used >= limit.
+func TestAtomicDeductQuota_TokenSoftGatePermitsSingleOverage(t *testing.T) {
+	database := newModelsTestDB(t)
+	userID := newQuotaUser(t, database, 1000, 1000) // generous count quotas
+
+	// Token cap = 10, already used = 9.
+	if err := models.UpdateQuotaTokenTotalLimit(database.Conn, userID, 10); err != nil {
+		t.Fatalf("set token limit: %v", err)
+	}
+	if err := models.AddTokenUsage(database.Conn, userID, 9); err != nil {
+		t.Fatalf("seed token usage: %v", err)
+	}
+
+	// Gate: 9 < 10 -> allow the request even though the response will bill more.
+	ok, err := models.AtomicDeductQuota(database.Conn, userID, 1)
+	if err != nil {
+		t.Fatalf("AtomicDeductQuota: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected deduction allowed while used (9) < limit (10)")
+	}
+
+	// Post-response accounting: a high-multiplier window bills, say, 5 more tokens
+	// (representative of ceil((prompt+completion)*multiplier)).
+	if err := models.AddTokenUsage(database.Conn, userID, 5); err != nil {
+		t.Fatalf("add token usage: %v", err)
+	}
+	q, _ := models.GetQuota(database.Conn, userID)
+	if q.QuotaTokenTotalUsed != 14 {
+		t.Fatalf("expected token used == 14 (over cap 10), got %d", q.QuotaTokenTotalUsed)
+	}
+
+	// Next request: used (14) >= limit (10) -> blocked.
+	ok2, err := models.AtomicDeductQuota(database.Conn, userID, 1)
+	if err != nil {
+		t.Fatalf("AtomicDeductQuota(2): %v", err)
+	}
+	if ok2 {
+		t.Fatalf("expected next request blocked once used >= limit")
+	}
+}

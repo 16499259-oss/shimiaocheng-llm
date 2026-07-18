@@ -336,14 +336,30 @@ async function refreshQuota() {
     }
 }
 
+// renderCountRow renders a count-quota stat row (5h / total). A limit of 0 is an
+// invalid value for a COUNT quota: the admin API rejects it with 400 (audit L2)
+// because the backend gate would otherwise treat 0 as "exhausted" and lock the
+// user out. If one is still encountered (e.g. legacy data), we must NOT divide by
+// zero (which would yield Infinity/NaN and break the progress bar) — instead we
+// render it as an invalid/locked state. This is deliberately different from the
+// cumulative Token row, where 0 legitimately means "unlimited".
+function renderCountRow(label, used, limit) {
+    if (!limit || limit === 0) {
+        return `<div class="stat-row">
+            <span class="stat-label">${label}</span>
+            <span class="stat-value bad">${used.toLocaleString()} / 0 次（配额无效）</span>
+        </div>`;
+    }
+    const pct = Math.round((used / limit) * 100);
+    const cls = pct > 80 ? 'bad' : (pct > 50 ? 'warn' : 'good');
+    return `<div class="stat-row">
+        <span class="stat-label">${label}</span>
+        <span class="stat-value ${cls}">${used.toLocaleString()} / ${limit.toLocaleString()} 次</span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill ${cls}" style="width:${pct}%"></div></div>`;
+}
+
 function renderDashboard(data) {
-    // Quota stats
-    const pct5h = Math.round((data.quota_5h_used / data.quota_5h_limit) * 100);
-    const pctTotal = Math.round((data.quota_total_used / data.quota_total_limit) * 100);
-
-    let cls5h = pct5h > 80 ? 'bad' : (pct5h > 50 ? 'warn' : 'good');
-    let clsTotal = pctTotal > 80 ? 'bad' : (pctTotal > 50 ? 'warn' : 'good');
-
     // Cumulative Token quota row. A limit of 0 means unlimited: show 「无限」
     // and hide the progress bar; otherwise show used/limit with a colored bar.
     let tokenRowHtml;
@@ -364,17 +380,14 @@ function renderDashboard(data) {
         <div class="progress-bar"><div class="progress-fill ${clsToken}" style="width:${pctToken}%"></div></div>`;
     }
 
+    // Count quota rows (5h and total). Use the shared helper, which guards
+    // against a limit of 0 so we never divide by zero (audit L2).
+    const count5hHtml = renderCountRow('5小时配额', data.quota_5h_used || 0, data.quota_5h_limit || 0);
+    const countTotalHtml = renderCountRow('总配额', data.quota_total_used || 0, data.quota_total_limit || 0);
+
     $('quota-stats').innerHTML = `
-        <div class="stat-row">
-            <span class="stat-label">5小时配额</span>
-            <span class="stat-value ${cls5h}">${data.quota_5h_used} / ${data.quota_5h_limit} 次</span>
-        </div>
-        <div class="progress-bar"><div class="progress-fill ${cls5h}" style="width:${pct5h}%"></div></div>
-        <div class="stat-row">
-            <span class="stat-label">总配额</span>
-            <span class="stat-value ${clsTotal}">${data.quota_total_used.toLocaleString()} / ${data.quota_total_limit.toLocaleString()} 次</span>
-        </div>
-        <div class="progress-bar"><div class="progress-fill ${clsTotal}" style="width:${pctTotal}%"></div></div>
+        ${count5hHtml}
+        ${countTotalHtml}
         ${tokenRowHtml}
         <div class="stat-row">
             <span class="stat-label">累计 Token</span>
