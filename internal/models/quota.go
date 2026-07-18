@@ -58,10 +58,33 @@ func GetQuota(db *sql.DB, userID int64) (*Quota, error) {
 }
 
 // AtomicDeductQuota atomically deducts effective_calls from both 5h and total
-// quotas, and also gates on the cumulative Token limit. The Token dimension uses
-// a pure column comparison (no extra bind parameters) so the call signature and
-// parameter order are unchanged: a request is blocked when the optional Token
-// cap is set (quota_token_total_limit > 0) and already reached.
+// quotas, and also gates on the cumulative Token limit.
+//
+// Zero-means semantics (audit L2):
+//   - Count quotas (quota_5h_limit / quota_total_limit): 0 is NOT a valid value.
+//     The gate treats a 0 count limit as "already exhausted" (used + calls <= 0
+//     can never hold for calls >= 1), so a 0 would silently lock the user out.
+//     The admin edit API therefore REJECTS a count quota of 0 with 400 (see
+//     internal/admin/users.go) and never stores it; any legacy row that still
+//     holds 0 is likewise blocked here. This is intentionally different from the
+//     cumulative Token cap, where 0 means "unlimited".
+//   - Cumulative Token cap (quota_token_total_limit): 0 means unlimited, so the
+//     gate opens unconditionally for that dimension ("(limit = 0 OR used < limit)").
+//
+// Token soft gate and the multiplier deviation (audit L1):
+// The Token gate is a pure column comparison "quota_token_total_used <
+// quota_token_total_limit". The billed Token counter is multiplier-scaled
+// (AddTokenUsage stores ceil((prompt+completion)*multiplier)), but the actual
+// token counts are only known AFTER the upstream responds — so the gate cannot
+// look ahead by the request's billed increment. Consequently a single request
+// may push used past the cap by up to one billed increment, and the next request
+// is then blocked. This overage widens at higher multipliers and is accepted by
+// design (a soft gate, consistent with Token accounting happening after the
+// response is sent). Tightening it would require the token estimate at request
+// time, which is unavailable without a tokenizer, so the logic is left as-is;
+// handler/quota.go clamps the reported remaining to >= 0 so the overage never
+// surfaces as negative (audit F2).
+//
 // Returns true if the deduction succeeded, false if quota was insufficient.
 func AtomicDeductQuota(db *sql.DB, userID int64, effectiveCalls int) (bool, error) {
 	now := time.Now().Format(time.RFC3339)

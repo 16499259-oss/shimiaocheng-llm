@@ -223,3 +223,49 @@ func TestAdminUpdateUser_MaxConcurrencyPositive(t *testing.T) {
 		t.Fatalf("DB max_concurrency expected 75, got %d", u.MaxConcurrency)
 	}
 }
+
+// L2: edit quota_5h_limit = 0 -> 400. A count limit of 0 is invalid: the gate
+// treats it as "exhausted" and would silently lock the user out, so the API must
+// reject it (mirrors the negative-rejection contract, audit F3).
+func TestAdminUpdateUser_Zero5hLimitRejected(t *testing.T) {
+	h := newAdminTestHandler(t)
+	id, _ := adminCreateUser(t, h, "q5h-zero", nil)
+	zero := 0
+	body, _ := json.Marshal(map[string]any{"quota_5h_limit": zero})
+	req := httptest.NewRequest(http.MethodPut, "/admin/api/users/"+strconv.FormatInt(id, 10), bytes.NewReader(body))
+	req.SetPathValue("id", strconv.FormatInt(id, 10))
+	rec := httptest.NewRecorder()
+	h.UpdateUser(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for update quota_5h_limit=0, got %d; body=%s", rec.Code, rec.Body.String())
+	}
+	q, err := models.GetQuota(h.DB, id)
+	if err != nil || q == nil {
+		t.Fatalf("GetQuota: %v", err)
+	}
+	if q.Quota5hLimit <= 0 {
+		t.Fatalf("5h cap persisted as %d, want positive (rejected)", q.Quota5hLimit)
+	}
+}
+
+// L2: edit quota_total_limit = 0 -> 400 (same rationale as the 5h cap above).
+func TestAdminUpdateUser_ZeroTotalLimitRejected(t *testing.T) {
+	h := newAdminTestHandler(t)
+	id, _ := adminCreateUser(t, h, "qt-zero", nil)
+	zero := 0
+	body, _ := json.Marshal(map[string]any{"quota_total_limit": zero})
+	req := httptest.NewRequest(http.MethodPut, "/admin/api/users/"+strconv.FormatInt(id, 10), bytes.NewReader(body))
+	req.SetPathValue("id", strconv.FormatInt(id, 10))
+	rec := httptest.NewRecorder()
+	h.UpdateUser(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for update quota_total_limit=0, got %d; body=%s", rec.Code, rec.Body.String())
+	}
+	q, err := models.GetQuota(h.DB, id)
+	if err != nil || q == nil {
+		t.Fatalf("GetQuota: %v", err)
+	}
+	if q.QuotaTotalLimit <= 0 {
+		t.Fatalf("total cap persisted as %d, want positive (rejected)", q.QuotaTotalLimit)
+	}
+}

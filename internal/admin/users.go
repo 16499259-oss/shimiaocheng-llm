@@ -66,7 +66,12 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Apply defaults
+	// Apply defaults for the count quotas. NOTE (audit L2): a 0 here means "not
+	// specified" and is normalized to the configured default — it must NOT be
+	// stored as 0, because a 0 count limit would lock the user out via the gate.
+	// This is different from the cumulative Token cap, where 0 = unlimited (handled
+	// separately below). The edit endpoint additionally rejects an explicit 0 with
+	// 400 so an admin can never set a count limit of 0.
 	if req.Quota5hLimit <= 0 {
 		req.Quota5hLimit = h.Default5hLimit
 	}
@@ -244,14 +249,24 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	response := map[string]any{}
 	routeChanged := false
 
-	// Reject negative quota values (audit F3): a negative cap would permanently
-	// block the user via the atomic gate, with no error surfaced elsewhere.
-	if req.Quota5hLimit != nil && *req.Quota5hLimit < 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_5h_limit must be >= 0"})
+	// Reject invalid count-quota values (audit L2 / F3):
+	//   * negative -> would permanently block the user via the atomic gate (F3)
+	//   * zero     -> the gate treats a 0 count limit as "already exhausted"
+	//                 (used + calls <= 0 can never hold for calls >= 1) and
+	//                 silently locks the user out (audit L2). Unlike the
+	//                 cumulative Token cap, where 0 means unlimited, a 0 count
+	//                 limit is NOT a valid "unlimited" value, so we reject it
+	//                 here and force the admin to send a positive integer (or
+	//                 omit the field to keep the existing value). Legacy rows
+	//                 that already hold 0 are still blocked by the gate.
+	// The cumulative Token cap (quota_token_total_limit) is handled separately
+	// below: there 0 means unlimited and is allowed.
+	if req.Quota5hLimit != nil && *req.Quota5hLimit <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_5h_limit must be a positive integer (>= 1)"})
 		return
 	}
-	if req.QuotaTotalLimit != nil && *req.QuotaTotalLimit < 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_total_limit must be >= 0"})
+	if req.QuotaTotalLimit != nil && *req.QuotaTotalLimit <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_total_limit must be a positive integer (>= 1)"})
 		return
 	}
 	if req.QuotaTokenTotalLimit != nil && *req.QuotaTokenTotalLimit < 0 {
