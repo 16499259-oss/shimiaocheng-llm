@@ -228,3 +228,72 @@ func TestAggregateCallStats_EmptyMatch(t *testing.T) {
 		t.Fatalf("expected ErrorCount == 0, got %d", stats.Success.ErrorCount)
 	}
 }
+
+// TestQueryCallLogsGlobal_UsernamePopulated verifies that the global admin
+// call-log list (QueryCallLogsGlobal) returns the calling user's display name
+// per row, so an admin can tell which user made each call. Uses a correlated
+// subquery on users.id = call_logs.user_id (no JOIN, to avoid ambiguous
+// column names with buildCallLogWhere's unqualified created_at).
+func TestQueryCallLogsGlobal_UsernamePopulated(t *testing.T) {
+	database := newModelsTestDB(t)
+
+	alice, err := models.CreateUser(
+		database.Conn,
+		"alice", "pw-hash", "sub-hash-alice", "sk-alice...",
+		"user", "active", "", "auto", "",
+		1000, 100000, nil, 0, models.DefaultMaxConcurrency,
+	)
+	if err != nil {
+		t.Fatalf("CreateUser(alice) failed: %v", err)
+	}
+	bob, err := models.CreateUser(
+		database.Conn,
+		"bob", "pw-hash", "sub-hash-bob", "sk-bob...",
+		"user", "active", "", "auto", "",
+		1000, 100000, nil, 0, models.DefaultMaxConcurrency,
+	)
+	if err != nil {
+		t.Fatalf("CreateUser(bob) failed: %v", err)
+	}
+
+	insert := func(userID int64, model string) {
+		if _, err := models.InsertCallLog(database.Conn, &models.CallLog{
+			UserID:           userID,
+			Model:            model,
+			ProviderID:       "zhipu",
+			PromptTokens:     10,
+			CompletionTokens: 20,
+			TotalTokens:      30,
+			EffectiveCalls:   1,
+			StatusCode:       200,
+		}); err != nil {
+			t.Fatalf("InsertCallLog(%d,%q) failed: %v", userID, model, err)
+		}
+	}
+	insert(alice.ID, "glm-5.2") // alice's call
+	insert(bob.ID, "gpt-4o")    // bob's call
+
+	page, err := models.QueryCallLogsGlobal(database.Conn, models.CallLogFilter{})
+	if err != nil {
+		t.Fatalf("QueryCallLogsGlobal returned error: %v", err)
+	}
+	if page == nil || page.Data == nil {
+		t.Fatalf("expected non-nil page/data, got %+v", page)
+	}
+	if page.Pagination.Total != 2 {
+		t.Fatalf("expected 2 total calls, got %d", page.Pagination.Total)
+	}
+	if len(page.Data) != 2 {
+		t.Fatalf("expected 2 rows, got %d: %+v", len(page.Data), page.Data)
+	}
+
+	// Rows are ordered by id DESC, so the newest (bob's) is first.
+	bobRow := page.Data[0]
+	aliceRow := page.Data[1]
+	if bobRow.UserID != bob.ID || bobRow.Username != "bob" {
+		t.Fatalf("expected first row (newest) to be bob, got id=%d username=%q", bobRow.UserID, bobRow.Username)
+	}
+	if aliceRow.UserID != alice.ID || aliceRow.Username != "alice" {
+		t.Fatalf("expected second row to be alice, got id=%d username=%q", aliceRow.UserID, aliceRow.Username)
+	}
+}

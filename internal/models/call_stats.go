@@ -67,7 +67,8 @@ func QueryCallLogsGlobal(db *sql.DB, filter CallLogFilter) (*CallLogPage, error)
 
 	dataQuery := `SELECT id, user_id, model, provider_id, prompt_tokens, completion_tokens, total_tokens,
 		effective_calls, multiplier_used, status_code, latency_ms,
-		COALESCE(error_msg, ''), created_at
+		COALESCE(error_msg, ''), created_at,
+		COALESCE((SELECT username FROM users WHERE users.id = call_logs.user_id), '') AS username
 		FROM call_logs WHERE ` + where + ` ORDER BY id DESC LIMIT ? OFFSET ?`
 	dataArgs := append(args, filter.Limit, offset)
 
@@ -83,7 +84,7 @@ func QueryCallLogsGlobal(db *sql.DB, filter CallLogFilter) (*CallLogPage, error)
 		if err := rows.Scan(
 			&l.ID, &l.UserID, &l.Model, &l.ProviderID, &l.PromptTokens, &l.CompletionTokens,
 			&l.TotalTokens, &l.EffectiveCalls, &l.MultiplierUsed,
-			&l.StatusCode, &l.LatencyMs, &l.ErrorMsg, &l.CreatedAt,
+			&l.StatusCode, &l.LatencyMs, &l.ErrorMsg, &l.CreatedAt, &l.Username,
 		); err != nil {
 			return nil, err
 		}
