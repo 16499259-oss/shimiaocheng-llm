@@ -16,6 +16,7 @@ type createRoutingRuleRequest struct {
 	EndTime    string `json:"end_time"`
 	DaysOfWeek string `json:"days_of_week"`
 	Timezone   string `json:"timezone"`
+	Priority   int    `json:"priority"`
 	Enabled    bool   `json:"enabled"`
 }
 
@@ -25,6 +26,7 @@ type updateRoutingRuleRequest struct {
 	StartTime  *string `json:"start_time"`
 	EndTime    *string `json:"end_time"`
 	DaysOfWeek *string `json:"days_of_week"`
+	Priority   *int    `json:"priority"`
 	Enabled    *bool   `json:"enabled"`
 }
 
@@ -66,6 +68,7 @@ func (h *Handler) HandleCreateRoutingRule(w http.ResponseWriter, r *http.Request
 		EndTime:    req.EndTime,
 		DaysOfWeek: req.DaysOfWeek,
 		Timezone:   req.Timezone,
+		Priority:   req.Priority,
 		Enabled:    req.Enabled,
 	}
 
@@ -110,6 +113,9 @@ func (h *Handler) HandleUpdateRoutingRule(w http.ResponseWriter, r *http.Request
 	}
 	if req.DaysOfWeek != nil {
 		updates["days_of_week"] = *req.DaysOfWeek
+	}
+	if req.Priority != nil {
+		updates["priority"] = *req.Priority
 	}
 	if req.Enabled != nil {
 		updates["enabled"] = *req.Enabled

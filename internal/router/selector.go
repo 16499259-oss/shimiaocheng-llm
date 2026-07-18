@@ -16,6 +16,7 @@ package router
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -165,11 +166,19 @@ func (r *Router) Reload() error {
 // immediately (no fallback to the default). If no rule matches, the configured
 // default provider is returned. It returns an error only when NO providers are
 // configured at all.
+//
+// Precedence when multiple enabled rules overlap in time:
+//  1. higher Priority wins (explicit administrative control),
+//  2. on equal priority, the narrower (more specific) window wins — so a
+//     later-added override rule that covers a sub-window automatically takes
+//     precedence over a broader base rule without manual reordering,
+//  3. on equal priority AND equal width, the lower id (older) wins for stability.
 func (r *Router) ResolveProvider(now time.Time) (Provider, error) {
 	now = now.In(timeutil.ShanghaiTZ)
 	table := r.table.Load().(*provider.ProviderTable)
 
-	for _, rule := range table.Rules {
+	rules := sortRoutingRules(table.Rules)
+	for _, rule := range rules {
 		if !rule.Enabled {
 			continue
 		}
@@ -270,4 +279,59 @@ func (r *Router) RewriteModel(external, providerID string) string {
 		}
 	}
 	return external
+}
+
+// sortRoutingRules returns a precedence-ordered copy of the rules snapshot.
+// It does NOT mutate the shared snapshot (which lives in an atomic.Value and
+// may be read concurrently), so a fresh copy is made each call.
+//
+// Order: Priority DESC, then narrower window first (more specific), then id ASC.
+func sortRoutingRules(rules []models.RoutingRule) []models.RoutingRule {
+	out := make([]models.RoutingRule, len(rules))
+	copy(out, rules)
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Priority != b.Priority {
+			return a.Priority > b.Priority // higher priority first
+		}
+		da, db := windowMinutes(a.StartTime, a.EndTime), windowMinutes(b.StartTime, b.EndTime)
+		if da != db {
+			return da < db // narrower (more specific) window first
+		}
+		return a.ID < b.ID // stable: older rule first
+	})
+	return out
+}
+
+// windowMinutes returns the duration of a "HH:MM"-"HH:MM" time window in minutes,
+// evaluated in Asia/Shanghai semantics (the router always locks to that zone).
+// Overnight ranges (start > end, e.g. "22:00"-"06:00") wrap past midnight.
+// An unparseable endpoint yields the widest possible window (24*60) so it sorts
+// last among equal-priority rules rather than panicking.
+func windowMinutes(start, end string) int {
+	const day = 24 * 60
+	s := parseHHMM(start)
+	e := parseHHMM(end)
+	if s < 0 || e < 0 {
+		return day
+	}
+	if s <= e {
+		return e - s
+	}
+	// Overnight.
+	return (day - s) + e
+}
+
+// parseHHMM parses an "HH:MM" string into minutes since midnight.
+// Returns -1 if the format is invalid.
+func parseHHMM(v string) int {
+	if len(v) != 5 || v[2] != ':' {
+		return -1
+	}
+	h := int(v[0]-'0')*10 + int(v[1]-'0')
+	m := int(v[3]-'0')*10 + int(v[4]-'0')
+	if h < 0 || h > 23 || m < 0 || m > 59 {
+		return -1
+	}
+	return h*60 + m
 }

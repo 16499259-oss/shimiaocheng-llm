@@ -376,7 +376,7 @@ func (s *ProviderStore) DeleteMapping(id int64) error {
 func (s *ProviderStore) ListRoutingRules() ([]models.RoutingRule, error) {
 	rows, err := s.db.Query(
 		`SELECT id, provider_id, start_time, end_time, days_of_week, timezone, enabled,
-		        COALESCE(default_provider_id, '')
+		        COALESCE(default_provider_id, ''), COALESCE(priority, 0)
 		 FROM provider_routing_rules
 		 ORDER BY id`)
 	if err != nil {
@@ -390,7 +390,7 @@ func (s *ProviderStore) ListRoutingRules() ([]models.RoutingRule, error) {
 		var enabled int
 		if err := rows.Scan(
 			&rule.ID, &rule.ProviderID, &rule.StartTime, &rule.EndTime,
-			&rule.DaysOfWeek, &rule.Timezone, &enabled, &rule.DefaultProviderID,
+			&rule.DaysOfWeek, &rule.Timezone, &enabled, &rule.DefaultProviderID, &rule.Priority,
 		); err != nil {
 			return nil, fmt.Errorf("scan routing rule: %w", err)
 		}
@@ -410,9 +410,9 @@ func (s *ProviderStore) CreateRoutingRule(rule *models.RoutingRule) error {
 		enabled = 1
 	}
 	result, err := s.db.Exec(
-		`INSERT INTO provider_routing_rules (provider_id, start_time, end_time, days_of_week, timezone, enabled)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		rule.ProviderID, rule.StartTime, rule.EndTime, rule.DaysOfWeek, rule.Timezone, enabled,
+		`INSERT INTO provider_routing_rules (provider_id, start_time, end_time, days_of_week, timezone, enabled, priority)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		rule.ProviderID, rule.StartTime, rule.EndTime, rule.DaysOfWeek, rule.Timezone, enabled, rule.Priority,
 	)
 	if err != nil {
 		return fmt.Errorf("insert routing rule: %w", err)
@@ -422,7 +422,7 @@ func (s *ProviderStore) CreateRoutingRule(rule *models.RoutingRule) error {
 	rule.ID = id
 
 	s.WriteAudit("routing_rule.create", "routing_rule", fmt.Sprintf("%d", id),
-		fmt.Sprintf(`{"provider_id":"%s","start_time":"%s","end_time":"%s"}`, rule.ProviderID, rule.StartTime, rule.EndTime))
+		fmt.Sprintf(`{"provider_id":"%s","start_time":"%s","end_time":"%s","priority":%d}`, rule.ProviderID, rule.StartTime, rule.EndTime, rule.Priority))
 	return nil
 }
 
@@ -447,6 +447,19 @@ func (s *ProviderStore) UpdateRoutingRule(id int64, updates map[string]any) erro
 	if v, ok := updates["days_of_week"]; ok {
 		setClauses = append(setClauses, "days_of_week = ?")
 		args = append(args, v)
+	}
+	if v, ok := updates["priority"]; ok {
+		// Accept both int and *int (from the admin request layer).
+		switch p := v.(type) {
+		case int:
+			setClauses = append(setClauses, "priority = ?")
+			args = append(args, p)
+		case *int:
+			if p != nil {
+				setClauses = append(setClauses, "priority = ?")
+				args = append(args, *p)
+			}
+		}
 	}
 	if v, ok := updates["enabled"]; ok {
 		if b, ok := v.(bool); ok {

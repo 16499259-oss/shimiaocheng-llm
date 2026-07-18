@@ -305,7 +305,7 @@ async function loadRoutingRules() {
         const data = await apiFetch('api/routing-rules');
         const tbody = document.getElementById('routing-rules-tbody');
         if (!data || !data.data || data.data.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="7" class="text-center">暂无路由规则</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="8" class="text-center">暂无路由规则</td></tr>';
             return;
         }
         tbody.innerHTML = data.data.map(r => {
@@ -318,6 +318,7 @@ async function loadRoutingRules() {
                 <td>${r.start_time}</td>
                 <td>${r.end_time}</td>
                 <td>${formatDaysOfWeek(r.days_of_week)}</td>
+                <td>${r.priority ?? 0}</td>
                 <td>${s}</td>
                 <td>
                     <div class="btn-group">
@@ -338,6 +339,8 @@ function openRoutingRuleModal() {
     document.getElementById('routing-start').value = '';
     document.getElementById('routing-end').value = '';
     document.getElementById('routing-days').value = '*';
+    const prioEl = document.getElementById('routing-priority');
+    if (prioEl) prioEl.value = '0';
     showModal('routing-modal');
 }
 
@@ -350,6 +353,11 @@ async function saveRoutingRule(e) {
         days_of_week: document.getElementById('routing-days').value,
         enabled: true,
     };
+    const prioEl = document.getElementById('routing-priority');
+    if (prioEl && prioEl.value !== '') {
+        const p = parseInt(prioEl.value, 10);
+        if (!Number.isNaN(p)) body.priority = p;
+    }
     if (!body.provider_id || !body.start_time || !body.end_time) {
         showToast('Provider、开始时间和结束时间为必填项', 'error'); return;
     }
