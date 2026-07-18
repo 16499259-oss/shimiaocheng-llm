@@ -550,6 +550,17 @@ func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int
 	}
 	models.InsertCallLog(h.QuotaChecker.DB(), callLog)
 
+	// Account the Token usage toward the user's cumulative Token quota.
+	// Mirrors the streaming path (stream.go): fire-and-forget so a DB hiccup
+	// can never break the already-built response. A delta <= 0 (e.g. upstream
+	// returned no usage) is a safe no-op inside AddTokenUsage. Before this fix
+	// the SYNC (non-streaming) path only wrote call_logs and never incremented
+	// quota_token_total_used, causing the user-panel Token total to under-count
+	// every non-streaming request.
+	if err := models.AddTokenUsage(h.QuotaChecker.DB(), userID, promptTokens+completionTokens); err != nil {
+		log.Printf("ERROR: add token usage (sync) for user %d: %v", userID, err)
+	}
+
 	// Forward response to client
 	for key, values := range resp.Header {
 		for _, v := range values {
