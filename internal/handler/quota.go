@@ -81,6 +81,10 @@ func (h *QuotaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		QuotaTokenTotalRemaining: 0,
 		WindowResetAt:            windowStart.Format(time.RFC3339),
 		Status:                   user.Status,
+		// Propagate the user's account expiry to the self-service panel so the
+		// /user/ dashboard can show it (fix: user-expiry-display). An empty
+		// string means "permanent" — the frontend renders that as 「永久」.
+		ExpiresAt: user.ExpiresAt,
 	}
 	if quotaRecord.QuotaTokenTotalLimit > 0 {
 		status.QuotaTokenTotalRemaining = max(0, quotaRecord.QuotaTokenTotalLimit-quotaRecord.QuotaTokenTotalUsed)

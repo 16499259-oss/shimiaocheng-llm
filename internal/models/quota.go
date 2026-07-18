@@ -36,6 +36,7 @@ type QuotaStatus struct {
 	TotalTokensToday         int64  `json:"total_tokens_today"`
 	WindowResetAt            string `json:"window_reset_at"`
 	Status                   string `json:"status"`
+	ExpiresAt                string `json:"expires_at"` // user account expiry; "" means permanent (no expiry)
 }
 
 // GetQuota retrieves the quota record for a user.
