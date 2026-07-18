@@ -359,6 +359,45 @@ function renderCountRow(label, used, limit) {
     <div class="progress-bar"><div class="progress-fill ${cls}" style="width:${pct}%"></div></div>`;
 }
 
+// renderExpiryRow renders the account-expiry stat row, mirroring the admin user
+// list logic (web/admin/app.js). An empty expires_at means "permanent" (永久);
+// a past date is flagged as expired (red); a date within 7 days is near-expiry
+// (orange). Returns null when the field is absent so callers can skip gracefully.
+function renderExpiryRow(expiresAt) {
+    if (!expiresAt) {
+        return `<div class="stat-row">
+            <span class="stat-label">到期时间</span>
+            <span class="stat-value">永久</span>
+        </div>`;
+    }
+    const expDate = new Date(expiresAt);
+    if (isNaN(expDate.getTime())) {
+        return `<div class="stat-row">
+            <span class="stat-label">到期时间</span>
+            <span class="stat-value">${expiresAt}</span>
+        </div>`;
+    }
+    const now = new Date();
+    const label = expDate.toLocaleDateString('zh-CN');
+    if (expDate < now) {
+        return `<div class="stat-row">
+            <span class="stat-label">到期时间</span>
+            <span class="stat-value bad">${label}（已过期）</span>
+        </div>`;
+    }
+    if ((expDate - now) < 7 * 86400000) {
+        const daysLeft = Math.ceil((expDate - now) / 86400000);
+        return `<div class="stat-row">
+            <span class="stat-label">到期时间</span>
+            <span class="stat-value warn">${label}（${daysLeft} 天后到期）</span>
+        </div>`;
+    }
+    return `<div class="stat-row">
+        <span class="stat-label">到期时间</span>
+        <span class="stat-value">${label}</span>
+    </div>`;
+}
+
 function renderDashboard(data) {
     // Cumulative Token quota row. A limit of 0 means unlimited: show 「无限」
     // and hide the progress bar; otherwise show used/limit with a colored bar.
@@ -401,6 +440,7 @@ function renderDashboard(data) {
             <span class="stat-label">下次重置</span>
             <span class="stat-value">${new Date(data.window_reset_at).toLocaleString('zh-CN')}</span>
         </div>
+        ${renderExpiryRow(data.expires_at)}
         <div class="stat-row">
             <span class="stat-label">账户状态</span>
             <span class="stat-value good">${data.status === 'active' ? '✅ 正常' : '🚫 ' + data.status}</span>
