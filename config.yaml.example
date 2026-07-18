@@ -55,3 +55,10 @@ compaction: "trim"
 #   false（默认）— 生产安全，JSON 解析失败时只记录错误与长度，不打印请求体（避免泄露用户对话内容）；
 #   true          — 解析失败时额外把原始请求体 dump 到日志，便于排查畸形客户端。
 debug: false
+
+# 通配透传总开关（MCP / 任意上游路径）：
+#   passthrough_enabled: false（默认）— /v1/passthrough/ 端点完全关闭，任何请求返回 403 passthrough_disabled；
+#   passthrough_enabled: true  — 全局放行；但仍需目标 provider 的 allow_passthrough=true 才真正转发（双开关，纵深防御）。
+# 详见 docs/design-mcp-passthrough.md。建议为 MCP 用途单独新建 provider（endpoint 填 base URL，如 https://api.anthropic.com）。
+proxy:
+  passthrough_enabled: false

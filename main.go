@@ -145,6 +145,20 @@ func main() {
 		Debug:          cfg.Debug,
 	}
 
+	// Passthrough handler — wildcard /v1/passthrough/ for MCP / arbitrary
+	// upstream paths. Auth, per-user concurrency, quota, routing and key-hiding
+	// are all inherited from the gateway (see internal/proxy/passthrough*.go).
+	// The endpoint is OFF unless BOTH the global master switch and the target
+	// provider's allow_passthrough are true.
+	passthroughHandler := &proxy.PassthroughHandler{
+		QuotaChecker:       quotaChecker,
+		MultiplierEng:      multiplierEng,
+		Router:             routerInst,
+		PassthroughEnabled: func() bool { return cfg.Proxy.PassthroughEnabled },
+		SyncTimeout:        300 * time.Second,
+		StreamTimeout:      10 * time.Minute,
+	}
+
 	// Quota query handler
 	quotaQueryHandler := &handler.QuotaHandler{
 		DB:            database.Conn,
@@ -187,6 +201,12 @@ func main() {
 	mux.Handle("POST /v1/chat/completions", authMW.SubKeyAuth(proxyHandler))
 	mux.Handle("GET /v1/quota", authMW.SubKeyAuth(quotaQueryHandler))
 	mux.Handle("GET /v1/calls", authMW.SubKeyAuth(callsHandler))
+	// Wildcard passthrough (MCP / arbitrary upstream paths). The trailing
+	// slash makes this a Go 1.22 subtree that matches ANY method and ANY
+	// sub-path under /v1/passthrough/ (e.g. POST /v1/passthrough/mcp,
+	// GET /v1/passthrough/sse). Double-gated by the global switch and
+	// the target provider's allow_passthrough.
+	mux.Handle("/v1/passthrough/", authMW.SubKeyAuth(passthroughHandler))
 
 	// Admin routes
 	adminHandler.RegisterRoutes(mux)

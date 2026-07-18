@@ -314,6 +314,34 @@ body {
 .badge-warning  { background: #fef3c7; color: #92400e; }
 .badge-error    { background: #fef2f2; color: #dc2626; }
 
+/* ── Provider passthrough form ── */
+.form-divider {
+    border: none;
+    border-top: 1px solid var(--color-border, #e5e7eb);
+    margin: 18px 0 12px;
+}
+.form-section-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-text-secondary, #6b7280);
+    margin: 0 0 8px;
+}
+.form-hint {
+    display: block;
+    margin-top: 4px;
+    font-size: 0.72rem;
+    color: var(--color-text-secondary, #9ca3af);
+    line-height: 1.4;
+}
+.extra-header-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 6px;
+}
+.extra-header-row .eh-key   { flex: 0 0 45%; }
+.extra-header-row .eh-value { flex: 1 1 auto; }
+
 /* ── Utilities ── */
 .hidden { display: none !important; }
 

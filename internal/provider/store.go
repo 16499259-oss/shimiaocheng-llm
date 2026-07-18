@@ -30,6 +30,11 @@ type ProviderEntry struct {
 	Slug     string
 	Endpoint string
 	APIKey   string // decrypted plaintext key (memory only, never logged or serialized)
+	// ── Passthrough / MCP support ──
+	AllowPassthrough bool              // provider may be used as a passthrough target
+	AuthHeader       string            // upstream auth header name (default "Authorization")
+	AuthScheme       string            // "bearer" | "x-api-key" | "none", default "bearer"
+	ExtraHeaders     map[string]string // static extra headers (e.g. anthropic-version)
 }
 
 // ProviderStore is the data access layer for providers, model mappings,
@@ -53,7 +58,8 @@ func NewProviderStore(db *sql.DB, kek []byte) *ProviderStore {
 // ListProviders returns all providers (including disabled ones).
 func (s *ProviderStore) ListProviders() ([]models.ProviderRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, slug, endpoint, encrypted_key, is_default, enabled, created_at, updated_at
+		`SELECT id, name, slug, endpoint, encrypted_key, is_default, enabled,
+		        allow_passthrough, auth_header, auth_scheme, extra_headers, created_at, updated_at
 		 FROM providers ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("list providers: %w", err)
@@ -63,13 +69,19 @@ func (s *ProviderStore) ListProviders() ([]models.ProviderRecord, error) {
 	var providers []models.ProviderRecord
 	for rows.Next() {
 		var p models.ProviderRecord
-		var isDef, enabled int
+		var isDef, enabled, allowPassthrough int
+		var authHeader, authScheme, extraHeaders string
 		if err := rows.Scan(&p.ID, &p.Name, &p.Slug, &p.Endpoint, &p.EncryptedKey,
-			&isDef, &enabled, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			&isDef, &enabled, &allowPassthrough, &authHeader, &authScheme,
+			&extraHeaders, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan provider: %w", err)
 		}
 		p.IsDefault = isDef == 1
 		p.Enabled = enabled == 1
+		p.AllowPassthrough = allowPassthrough == 1
+		p.AuthHeader = authHeader
+		p.AuthScheme = authScheme
+		p.ExtraHeaders = extraHeaders
 		providers = append(providers, p)
 	}
 	if providers == nil {
@@ -81,12 +93,15 @@ func (s *ProviderStore) ListProviders() ([]models.ProviderRecord, error) {
 // GetProvider returns a single provider by slug.
 func (s *ProviderStore) GetProvider(slug string) (*models.ProviderRecord, error) {
 	var p models.ProviderRecord
-	var isDef, enabled int
+	var isDef, enabled, allowPassthrough int
+	var authHeader, authScheme, extraHeaders string
 	err := s.db.QueryRow(
-		`SELECT id, name, slug, endpoint, encrypted_key, is_default, enabled, created_at, updated_at
+		`SELECT id, name, slug, endpoint, encrypted_key, is_default, enabled,
+		        allow_passthrough, auth_header, auth_scheme, extra_headers, created_at, updated_at
 		 FROM providers WHERE slug = ?`, slug,
 	).Scan(&p.ID, &p.Name, &p.Slug, &p.Endpoint, &p.EncryptedKey,
-		&isDef, &enabled, &p.CreatedAt, &p.UpdatedAt)
+		&isDef, &enabled, &allowPassthrough, &authHeader, &authScheme,
+		&extraHeaders, &p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -95,11 +110,15 @@ func (s *ProviderStore) GetProvider(slug string) (*models.ProviderRecord, error)
 	}
 	p.IsDefault = isDef == 1
 	p.Enabled = enabled == 1
+	p.AllowPassthrough = allowPassthrough == 1
+	p.AuthHeader = authHeader
+	p.AuthScheme = authScheme
+	p.ExtraHeaders = extraHeaders
 	return &p, nil
 }
 
 // CreateProvider inserts a new provider with encrypted API key.
-func (s *ProviderStore) CreateProvider(name, slug, endpoint, apiKey string, isDefault bool) (*models.ProviderRecord, error) {
+func (s *ProviderStore) CreateProvider(name, slug, endpoint, apiKey string, isDefault, allowPassthrough bool, authHeader, authScheme string, extraHeaders map[string]string) (*models.ProviderRecord, error) {
 	now := time.Now().Format(time.RFC3339)
 
 	// Encrypt the API key.
@@ -111,6 +130,21 @@ func (s *ProviderStore) CreateProvider(name, slug, endpoint, apiKey string, isDe
 	isDefInt := 0
 	if isDefault {
 		isDefInt = 1
+	}
+	allowInt := 0
+	if allowPassthrough {
+		allowInt = 1
+	}
+	// Default the auth scheme to chat-compatible values when unspecified.
+	if authHeader == "" {
+		authHeader = "Authorization"
+	}
+	if authScheme == "" {
+		authScheme = "bearer"
+	}
+	extraJSON, err := json.Marshal(extraHeaders)
+	if err != nil {
+		return nil, fmt.Errorf("marshal extra_headers: %w", err)
 	}
 
 	tx, err := s.db.Begin()
@@ -127,9 +161,10 @@ func (s *ProviderStore) CreateProvider(name, slug, endpoint, apiKey string, isDe
 	}
 
 	result, err := tx.Exec(
-		`INSERT INTO providers (name, slug, endpoint, encrypted_key, is_default, enabled, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
-		name, slug, endpoint, encryptedKey, isDefInt, now, now,
+		`INSERT INTO providers (name, slug, endpoint, encrypted_key, is_default, enabled,
+		        allow_passthrough, auth_header, auth_scheme, extra_headers, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
+		name, slug, endpoint, encryptedKey, isDefInt, allowInt, authHeader, authScheme, string(extraJSON), now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert provider: %w", err)
@@ -145,17 +180,22 @@ func (s *ProviderStore) CreateProvider(name, slug, endpoint, apiKey string, isDe
 	}
 
 	s.WriteAudit("provider.create", "provider", slug,
-		fmt.Sprintf(`{"name":"%s","slug":"%s","endpoint":"%s","is_default":%v}`, name, slug, endpoint, isDefault))
+		fmt.Sprintf(`{"name":"%s","slug":"%s","endpoint":"%s","is_default":%v,"allow_passthrough":%v,"auth_scheme":"%s"}`,
+			name, slug, endpoint, isDefault, allowPassthrough, authScheme))
 
 	return &models.ProviderRecord{
-		ID:        id,
-		Name:      name,
-		Slug:      slug,
-		Endpoint:  endpoint,
-		IsDefault: isDefault,
-		Enabled:   true,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:               id,
+		Name:             name,
+		Slug:             slug,
+		Endpoint:         endpoint,
+		IsDefault:        isDefault,
+		Enabled:          true,
+		AllowPassthrough: allowPassthrough,
+		AuthHeader:       authHeader,
+		AuthScheme:       authScheme,
+		ExtraHeaders:     string(extraJSON),
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}, nil
 }
 
@@ -223,6 +263,37 @@ func (s *ProviderStore) UpdateProvider(slug string, updates map[string]any) (*mo
 			} else {
 				setClauses = append(setClauses, "enabled = 0")
 			}
+		}
+	}
+	if v, ok := updates["allow_passthrough"]; ok {
+		if b, ok := v.(bool); ok {
+			if b {
+				setClauses = append(setClauses, "allow_passthrough = 1")
+			} else {
+				setClauses = append(setClauses, "allow_passthrough = 0")
+			}
+		}
+	}
+	if v, ok := updates["auth_header"]; ok {
+		if s, ok := v.(string); ok {
+			setClauses = append(setClauses, "auth_header = ?")
+			args = append(args, s)
+		}
+	}
+	if v, ok := updates["auth_scheme"]; ok {
+		if s, ok := v.(string); ok {
+			setClauses = append(setClauses, "auth_scheme = ?")
+			args = append(args, s)
+		}
+	}
+	if v, ok := updates["extra_headers"]; ok {
+		if m, ok := v.(map[string]string); ok {
+			ej, err := json.Marshal(m)
+			if err != nil {
+				return nil, fmt.Errorf("marshal extra_headers: %w", err)
+			}
+			setClauses = append(setClauses, "extra_headers = ?")
+			args = append(args, string(ej))
 		}
 	}
 
@@ -595,12 +666,29 @@ func (s *ProviderStore) SeedFromConfig(cfg *config.Config) error {
 		if p.IsDefault {
 			isDef = 1
 		}
+		allow := 0
+		if p.AllowPassthrough {
+			allow = 1
+		}
+		authHeader := p.AuthHeader
+		if authHeader == "" {
+			authHeader = "Authorization"
+		}
+		authScheme := p.AuthScheme
+		if authScheme == "" {
+			authScheme = "bearer"
+		}
+		extraJSON, err := json.Marshal(p.ExtraHeaders)
+		if err != nil {
+			return fmt.Errorf("seed marshal extra_headers for %s: %w", p.ID, err)
+		}
 
 		now := time.Now().Format(time.RFC3339)
 		if _, err := s.db.Exec(
-			`INSERT INTO providers (name, slug, endpoint, encrypted_key, is_default, enabled, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
-			p.ID, p.ID, p.Endpoint, encryptedKey, isDef, now, now,
+			`INSERT INTO providers (name, slug, endpoint, encrypted_key, is_default, enabled,
+			        allow_passthrough, auth_header, auth_scheme, extra_headers, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
+			p.ID, p.ID, p.Endpoint, encryptedKey, isDef, allow, authHeader, authScheme, string(extraJSON), now, now,
 		); err != nil {
 			return fmt.Errorf("seed insert provider %s: %w", p.ID, err)
 		}
@@ -637,7 +725,8 @@ func (s *ProviderStore) BuildProviderTable() (*ProviderTable, error) {
 
 	// Load enabled providers.
 	rows, err := s.db.Query(
-		`SELECT slug, endpoint, encrypted_key, is_default
+		`SELECT slug, endpoint, encrypted_key, is_default,
+		        allow_passthrough, auth_header, auth_scheme, extra_headers
 		 FROM providers WHERE enabled = 1`)
 	if err != nil {
 		return nil, fmt.Errorf("build table: query providers: %w", err)
@@ -645,10 +734,11 @@ func (s *ProviderStore) BuildProviderTable() (*ProviderTable, error) {
 	defer rows.Close()
 
 	for rows.Next() {
-		var slug, endpoint string
+		var slug, endpoint, authHeader, authScheme, extraHeaders string
 		var encryptedKey []byte
-		var isDef int
-		if err := rows.Scan(&slug, &endpoint, &encryptedKey, &isDef); err != nil {
+		var isDef, allowPassthrough int
+		if err := rows.Scan(&slug, &endpoint, &encryptedKey, &isDef,
+			&allowPassthrough, &authHeader, &authScheme, &extraHeaders); err != nil {
 			return nil, fmt.Errorf("build table: scan provider: %w", err)
 		}
 
@@ -658,9 +748,13 @@ func (s *ProviderStore) BuildProviderTable() (*ProviderTable, error) {
 		}
 
 		table.Providers[slug] = ProviderEntry{
-			Slug:     slug,
-			Endpoint: endpoint,
-			APIKey:   apiKey,
+			Slug:             slug,
+			Endpoint:         endpoint,
+			APIKey:           apiKey,
+			AllowPassthrough: allowPassthrough == 1,
+			AuthHeader:       authHeader,
+			AuthScheme:       authScheme,
+			ExtraHeaders:     parseExtraHeaders(extraHeaders),
 		}
 
 		if isDef == 1 {
@@ -733,6 +827,21 @@ func (s *ProviderStore) MaskProviderKey(slug string) (string, error) {
 	return security.MaskKey(plaintext), nil
 }
 
+// parseExtraHeaders decodes the extra_headers JSON column into a map.
+// A malformed or empty value falls back to an empty map (defensive: a
+// corrupt JSON must never break the passthrough path).
+func parseExtraHeaders(s string) map[string]string {
+	if s == "" {
+		return map[string]string{}
+	}
+	out := map[string]string{}
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		log.Printf("WARNING: parse extra_headers %q: %v", s, err)
+		return map[string]string{}
+	}
+	return out
+}
+
 // BuildMaskedProviders returns all providers with masked keys for the admin list API.
 func (s *ProviderStore) BuildMaskedProviders() ([]models.ProviderWithMaskedKey, error) {
 	providers, err := s.ListProviders()
@@ -755,15 +864,19 @@ func (s *ProviderStore) BuildMaskedProviders() ([]models.ProviderWithMaskedKey, 
 		}
 
 		result = append(result, models.ProviderWithMaskedKey{
-			ID:        p.ID,
-			Name:      p.Name,
-			Slug:      p.Slug,
-			Endpoint:  p.Endpoint,
-			MaskedKey: masked,
-			IsDefault: p.IsDefault,
-			Enabled:   p.Enabled,
-			CreatedAt: p.CreatedAt,
-			UpdatedAt: p.UpdatedAt,
+			ID:               p.ID,
+			Name:             p.Name,
+			Slug:             p.Slug,
+			Endpoint:         p.Endpoint,
+			MaskedKey:        masked,
+			IsDefault:        p.IsDefault,
+			Enabled:          p.Enabled,
+			AllowPassthrough: p.AllowPassthrough,
+			AuthHeader:       p.AuthHeader,
+			AuthScheme:       p.AuthScheme,
+			ExtraHeaders:     p.ExtraHeaders,
+			CreatedAt:        p.CreatedAt,
+			UpdatedAt:        p.UpdatedAt,
 		})
 	}
 

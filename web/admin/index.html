@@ -103,8 +103,8 @@
                     <button class="btn btn-primary" onclick="openProviderModal()">+ 新增上游</button>
                 </div>
                 <table class="table" id="providers-table">
-                    <thead><tr><th>ID</th><th>名称</th><th>Slug</th><th>端点</th><th>Key</th><th>默认</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
-                    <tbody id="providers-tbody"><tr><td colspan="9" class="text-center">加载中...</td></tr></tbody>
+                    <thead><tr><th>ID</th><th>名称</th><th>Slug</th><th>端点</th><th>Key</th><th>默认</th><th>透传</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
+                    <tbody id="providers-tbody"><tr><td colspan="10" class="text-center">加载中...</td></tr></tbody>
                 </table>
             </section>
 
@@ -266,6 +266,30 @@
                 </div>
                 <div class="form-group">
                     <label><input type="checkbox" id="prov-is-default"> 设为默认上游</label>
+                </div>
+                <hr class="form-divider">
+                <p class="form-section-title">通配透传 / MCP（可选）</p>
+                <div class="form-group">
+                    <label><input type="checkbox" id="prov-allow-passthrough"> 允许通配透传（MCP / 任意路径）</label>
+                    <small class="form-hint">需同时开启全局 proxy.passthrough_enabled 才生效（双开关）。建议为 MCP 单独新建上游（端点填 base URL，如 https://api.anthropic.com）。</small>
+                </div>
+                <div class="form-group">
+                    <label for="prov-auth-header">认证头字段</label>
+                    <input type="text" id="prov-auth-header" placeholder="Authorization（默认）">
+                </div>
+                <div class="form-group">
+                    <label for="prov-auth-scheme">认证方案</label>
+                    <select id="prov-auth-scheme">
+                        <option value="bearer">bearer（默认）</option>
+                        <option value="x-api-key">x-api-key</option>
+                        <option value="none">none</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>额外静态请求头</label>
+                    <div id="prov-extra-headers"></div>
+                    <button type="button" class="btn btn-outline btn-sm" onclick="addExtraHeaderRow()">+ 添加请求头</button>
+                    <small class="form-hint">如 anthropic-version / 2023-06-01</small>
                 </div>
                 <button type="submit" class="btn btn-primary btn-block">保存</button>
             </form>

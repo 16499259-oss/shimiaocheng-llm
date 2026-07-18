@@ -4,6 +4,7 @@ let currentCallsUserId = null;
 let currentCallsPage = 1;
 let currentAuditPage = 1;
 let providerMap = {}; // slug -> name for dropdowns
+let providerDetail = {}; // slug -> full provider object (for edit modal)
 
 // ===== Initialization =====
 document.addEventListener('DOMContentLoaded', () => {
@@ -125,17 +126,21 @@ async function loadProviders() {
         const data = await apiFetch('api/providers');
         const tbody = document.getElementById('providers-tbody');
         if (!data || !data.data || data.data.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="9" class="text-center">暂无上游</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="10" class="text-center">暂无上游</td></tr>';
             return;
         }
         providerMap = {};
-        data.data.forEach(p => { providerMap[p.slug] = p.name; });
+        providerDetail = {};
+        data.data.forEach(p => { providerMap[p.slug] = p.name; providerDetail[p.slug] = p; });
 
         tbody.innerHTML = data.data.map(p => {
             const defBadge = p.is_default ? ' <span class="badge badge-success">默认</span>' : '';
             const statusBadge = p.enabled
                 ? '<span class="badge badge-active">启用</span>'
                 : '<span class="badge badge-disabled">禁用</span>';
+            const passBadge = p.allow_passthrough
+                ? '<span class="badge badge-success">✅</span>'
+                : '<span class="badge badge-disabled">-</span>';
             return `<tr>
                 <td>${p.id}</td>
                 <td>${escapeHtml(p.name)}${defBadge}</td>
@@ -143,11 +148,12 @@ async function loadProviders() {
                 <td><span class="endpoint-text" title="${escapeHtml(p.endpoint)}">${escapeHtml(truncateUrl(p.endpoint))}</span></td>
                 <td><span class="key-masked">${escapeHtml(p.masked_key)}</span></td>
                 <td>${p.is_default ? '✅' : '-'}</td>
+                <td>${passBadge}</td>
                 <td>${statusBadge}</td>
                 <td>${formatDate(p.created_at)}</td>
                 <td>
                     <div class="btn-group">
-                        <button class="btn btn-outline btn-sm" onclick="editProvider('${escapeAttr(p.slug)}','${escapeAttr(p.name)}','${escapeAttr(p.endpoint)}',${p.is_default},${p.enabled})">编辑</button>
+                        <button class="btn btn-outline btn-sm" onclick="editProvider('${escapeAttr(p.slug)}')">编辑</button>
                         <button class="btn btn-danger btn-sm" onclick="deleteProvider('${escapeAttr(p.slug)}','${escapeAttr(p.name)}')">删除</button>
                     </div>
                 </td>
@@ -179,21 +185,65 @@ function openProviderModal(slug) {
         document.getElementById('prov-endpoint').value = '';
         document.getElementById('prov-apikey').value = '';
         document.getElementById('prov-is-default').checked = false;
+        // Passthrough defaults (off / chat-compatible auth).
+        document.getElementById('prov-allow-passthrough').checked = false;
+        document.getElementById('prov-auth-header').value = '';
+        document.getElementById('prov-auth-scheme').value = 'bearer';
+        document.getElementById('prov-extra-headers').innerHTML = '';
     }
     showModal('provider-modal');
 }
 
-function editProvider(slug, name, endpoint, isDefault, enabled) {
+function editProvider(slug) {
+    const p = providerDetail[slug];
+    if (!p) { showToast('未找到上游信息', 'error'); return; }
     document.getElementById('provider-modal-title').textContent = '编辑上游';
     document.getElementById('prov-edit-slug').value = slug;
-    document.getElementById('prov-name').value = name;
+    document.getElementById('prov-name').value = p.name || '';
     document.getElementById('prov-slug').value = slug;
     document.getElementById('prov-slug').disabled = true;
-    document.getElementById('prov-endpoint').value = endpoint;
+    document.getElementById('prov-endpoint').value = p.endpoint || '';
     document.getElementById('prov-apikey').value = '';
     document.getElementById('prov-apikey').placeholder = '留空则不修改';
-    document.getElementById('prov-is-default').checked = isDefault;
+    document.getElementById('prov-is-default').checked = !!p.is_default;
+    // Passthrough fields.
+    document.getElementById('prov-allow-passthrough').checked = !!p.allow_passthrough;
+    document.getElementById('prov-auth-header').value = p.auth_header || '';
+    document.getElementById('prov-auth-scheme').value = p.auth_scheme || 'bearer';
+    // Rebuild extra_headers rows from the stored JSON string.
+    document.getElementById('prov-extra-headers').innerHTML = '';
+    let extra = {};
+    try { extra = p.extra_headers ? JSON.parse(p.extra_headers) : {}; } catch (e) { extra = {}; }
+    const keys = Object.keys(extra);
+    if (keys.length === 0) {
+        addExtraHeaderRow('', '');
+    } else {
+        keys.forEach(k => addExtraHeaderRow(k, extra[k]));
+    }
     showModal('provider-modal');
+}
+
+// addExtraHeaderRow appends one key/value row to the extra_headers editor.
+function addExtraHeaderRow(key = '', value = '') {
+    const container = document.getElementById('prov-extra-headers');
+    const row = document.createElement('div');
+    row.className = 'extra-header-row';
+    row.innerHTML = `<input type="text" class="eh-key" placeholder="Header 名（如 anthropic-version）" value="${escapeAttr(key)}">` +
+        `<input type="text" class="eh-value" placeholder="值（如 2023-06-01）" value="${escapeAttr(value)}">` +
+        `<button type="button" class="btn btn-outline btn-sm" onclick="this.parentNode.remove()">✕</button>`;
+    container.appendChild(row);
+}
+
+// collectExtraHeaders reads the extra_headers editor rows into a plain map,
+// skipping rows with an empty key. Returns {} when nothing is configured.
+function collectExtraHeaders() {
+    const map = {};
+    document.querySelectorAll('#prov-extra-headers .extra-header-row').forEach(row => {
+        const k = row.querySelector('.eh-key').value.trim();
+        const v = row.querySelector('.eh-value').value.trim();
+        if (k !== '') map[k] = v;
+    });
+    return map;
 }
 
 async function saveProvider(e) {
@@ -205,13 +255,17 @@ async function saveProvider(e) {
     const endpoint = document.getElementById('prov-endpoint').value.trim();
     const apiKey = document.getElementById('prov-apikey').value.trim();
     const isDefault = document.getElementById('prov-is-default').checked;
+    const allowPassthrough = document.getElementById('prov-allow-passthrough').checked;
+    const authHeader = document.getElementById('prov-auth-header').value.trim();
+    const authScheme = document.getElementById('prov-auth-scheme').value;
+    const extraHeaders = collectExtraHeaders();
 
     if (!name || !endpoint) { showToast('名称和端点为必填项', 'error'); return; }
     if (!isEdit && !slug) { showToast('Slug 为必填项', 'error'); return; }
 
     try {
         if (isEdit) {
-            const body = { name, endpoint };
+            const body = { name, endpoint, allow_passthrough: allowPassthrough, auth_header: authHeader, auth_scheme: authScheme, extra_headers: extraHeaders };
             if (apiKey) body.api_key = apiKey;
             if (isDefault) body.is_default = true;
             await apiFetch('api/providers/' + encodeURIComponent(editSlug), {
@@ -221,7 +275,11 @@ async function saveProvider(e) {
         } else {
             await apiFetch('api/providers', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, slug, endpoint, api_key: apiKey, is_default: isDefault }),
+                body: JSON.stringify({
+                    name, slug, endpoint, api_key: apiKey, is_default: isDefault,
+                    allow_passthrough: allowPassthrough, auth_header: authHeader,
+                    auth_scheme: authScheme, extra_headers: extraHeaders,
+                }),
             });
             showToast('上游已创建', 'success');
         }

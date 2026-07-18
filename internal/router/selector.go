@@ -32,6 +32,11 @@ type Provider struct {
 	ID       string // provider id, e.g. "zhipu" / "openai"
 	Endpoint string // upstream chat-completions endpoint
 	APIKey   string // in-memory API key (never logged)
+	// ── Passthrough / MCP support (populated from the snapshot) ──
+	AllowPassthrough bool              // provider may be used as a passthrough target
+	AuthHeader       string            // upstream auth header name
+	AuthScheme       string            // "bearer" | "x-api-key" | "none"
+	ExtraHeaders     map[string]string // static extra headers
 }
 
 // CredentialHolder is a thread-safe in-memory holder for a single provider's
@@ -200,9 +205,13 @@ func (r *Router) ResolveProvider(now time.Time) (Provider, error) {
 			return Provider{}, fmt.Errorf("routing rule %d targets provider %q which is not configured", rule.ID, rule.ProviderID)
 		}
 		return Provider{
-			ID:       prov.Slug,
-			Endpoint: prov.Endpoint,
-			APIKey:   prov.APIKey,
+			ID:               prov.Slug,
+			Endpoint:         prov.Endpoint,
+			APIKey:           prov.APIKey,
+			AllowPassthrough: prov.AllowPassthrough,
+			AuthHeader:       prov.AuthHeader,
+			AuthScheme:       prov.AuthScheme,
+			ExtraHeaders:     prov.ExtraHeaders,
 		}, nil
 	}
 
@@ -217,17 +226,25 @@ func (r *Router) defaultProvider(table *provider.ProviderTable) (Provider, error
 	}
 	if prov, ok := table.Providers[table.Default]; ok {
 		return Provider{
-			ID:       prov.Slug,
-			Endpoint: prov.Endpoint,
-			APIKey:   prov.APIKey,
+			ID:               prov.Slug,
+			Endpoint:         prov.Endpoint,
+			APIKey:           prov.APIKey,
+			AllowPassthrough: prov.AllowPassthrough,
+			AuthHeader:       prov.AuthHeader,
+			AuthScheme:       prov.AuthScheme,
+			ExtraHeaders:     prov.ExtraHeaders,
 		}, nil
 	}
 	// Defensive: default slug not found — return the first configured provider.
 	for _, prov := range table.Providers {
 		return Provider{
-			ID:       prov.Slug,
-			Endpoint: prov.Endpoint,
-			APIKey:   prov.APIKey,
+			ID:               prov.Slug,
+			Endpoint:         prov.Endpoint,
+			APIKey:           prov.APIKey,
+			AllowPassthrough: prov.AllowPassthrough,
+			AuthHeader:       prov.AuthHeader,
+			AuthScheme:       prov.AuthScheme,
+			ExtraHeaders:     prov.ExtraHeaders,
 		}, nil
 	}
 	return Provider{}, fmt.Errorf("no upstream providers configured")
@@ -244,9 +261,13 @@ func (r *Router) GetProviderBySlug(slug string) (Provider, bool) {
 		return Provider{}, false
 	}
 	return Provider{
-		ID:       prov.Slug,
-		Endpoint: prov.Endpoint,
-		APIKey:   prov.APIKey,
+		ID:               prov.Slug,
+		Endpoint:         prov.Endpoint,
+		APIKey:           prov.APIKey,
+		AllowPassthrough: prov.AllowPassthrough,
+		AuthHeader:       prov.AuthHeader,
+		AuthScheme:       prov.AuthScheme,
+		ExtraHeaders:     prov.ExtraHeaders,
 	}, true
 }
 
