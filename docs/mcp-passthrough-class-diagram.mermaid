@@ -1,0 +1,99 @@
+classDiagram
+    class Config {
+        +Server ServerConfig
+        +Proxy ProxyConfig
+        +Providers []ProviderConfig
+    }
+    class ProxyConfig {
+        +bool PassthroughEnabled
+    }
+    class ProviderConfig {
+        +string ID
+        +string Endpoint
+        +string APIKeyEnv
+        +bool IsDefault
+        +bool AllowPassthrough
+        +string AuthHeader
+        +string AuthScheme
+        +map~string,string~ ExtraHeaders
+    }
+    class ProviderRecord {
+        +int64 ID
+        +string Name
+        +string Slug
+        +string Endpoint
+        +[]byte EncryptedKey
+        +bool IsDefault
+        +bool Enabled
+        +bool AllowPassthrough
+        +string AuthHeader
+        +string AuthScheme
+        +string ExtraHeaders
+        +string CreatedAt
+        +string UpdatedAt
+    }
+    class ProviderWithMaskedKey {
+        +int64 ID
+        +string Name
+        +string Slug
+        +string Endpoint
+        +string MaskedKey
+        +bool IsDefault
+        +bool Enabled
+        +bool AllowPassthrough
+        +string AuthHeader
+        +string AuthScheme
+        +string ExtraHeaders
+    }
+    class ProviderEntry {
+        +string Slug
+        +string Endpoint
+        +string APIKey
+        +bool AllowPassthrough
+        +string AuthHeader
+        +string AuthScheme
+        +map~string,string~ ExtraHeaders
+    }
+    class PassthroughHandler {
+        +QuotaChecker *quota.Checker
+        +MultiplierEng *quota.MultiplierEngine
+        +Router *router.Router
+        +PassthroughEnabled func() bool
+        +SyncTimeout time.Duration
+        +StreamTimeout time.Duration
+        +ServeHTTP(w, r)
+    }
+    class Router {
+        +GetProviderBySlug(slug string) Provider, bool
+        +ResolveProvider(now time.Time) Provider, error
+    }
+    class QuotaChecker {
+        +CheckAndDeduct(userID int64, calls int) bool, error
+        +DB() *sql.DB
+    }
+    class MultiplierEngine {
+        +GetEffectiveMultiplier(now time.Time) float64
+    }
+    class CallLog {
+        +int64 UserID
+        +string Model
+        +string ProviderID
+        +int EffectiveCalls
+        +float64 MultiplierUsed
+        +int StatusCode
+        +int LatencyMs
+        +string ErrorMsg
+    }
+
+    Config *-- ProxyConfig : contains
+    Config *-- ProviderConfig : seeds
+    ProviderRecord <|-- ProviderWithMaskedKey : masked view
+    ProviderStore ..> ProviderRecord : CRUD
+    ProviderStore ..> ProviderEntry : BuildProviderTable
+    ProviderStore ..> ProviderConfig : SeedFromConfig
+    PassthroughHandler --> Router : resolve provider
+    PassthroughHandler --> QuotaChecker : quota
+    PassthroughHandler --> MultiplierEngine : multiplier
+    PassthroughHandler ..> CallLog : InsertCallLog
+    PassthroughHandler ..> ProviderEntry : inject auth
+    Router ..> ProviderEntry : snapshot

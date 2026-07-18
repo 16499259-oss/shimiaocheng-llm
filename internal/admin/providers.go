@@ -18,15 +18,27 @@ type createProviderRequest struct {
 	Endpoint  string `json:"endpoint"`
 	APIKey    string `json:"api_key"`
 	IsDefault bool   `json:"is_default"`
+	// ── Passthrough / MCP support ──
+	AllowPassthrough bool              `json:"allow_passthrough"`
+	AuthHeader       string            `json:"auth_header"`
+	AuthScheme       string            `json:"auth_scheme"`
+	ExtraHeaders     map[string]string `json:"extra_headers"`
 }
 
 // updateProviderRequest is the JSON body for PUT /admin/api/providers/{slug}.
+// Optional fields use pointers so "not provided" can be distinguished from
+// "set to zero value".
 type updateProviderRequest struct {
 	Name      *string `json:"name"`
 	Endpoint  *string `json:"endpoint"`
 	APIKey    *string `json:"api_key"`
 	IsDefault *bool   `json:"is_default"`
 	Enabled   *bool   `json:"enabled"`
+	// ── Passthrough / MCP support ──
+	AllowPassthrough *bool              `json:"allow_passthrough"`
+	AuthHeader       *string            `json:"auth_header"`
+	AuthScheme       *string            `json:"auth_scheme"`
+	ExtraHeaders     *map[string]string `json:"extra_headers"`
 }
 
 // HandleListProviders handles GET /admin/api/providers.
@@ -54,7 +66,19 @@ func (h *Handler) HandleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	prov, err := h.ProviderStore.CreateProvider(req.Name, req.Slug, req.Endpoint, req.APIKey, req.IsDefault)
+	authHeader := req.AuthHeader
+	if authHeader == "" {
+		authHeader = "Authorization"
+	}
+	authScheme := req.AuthScheme
+	if authScheme == "" {
+		authScheme = "bearer"
+	}
+
+	prov, err := h.ProviderStore.CreateProvider(
+		req.Name, req.Slug, req.Endpoint, req.APIKey, req.IsDefault,
+		req.AllowPassthrough, authHeader, authScheme, req.ExtraHeaders,
+	)
 	if err != nil {
 		log.Printf("ERROR: create provider: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -98,6 +122,18 @@ func (h *Handler) HandleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Enabled != nil {
 		updates["enabled"] = *req.Enabled
+	}
+	if req.AllowPassthrough != nil {
+		updates["allow_passthrough"] = *req.AllowPassthrough
+	}
+	if req.AuthHeader != nil {
+		updates["auth_header"] = *req.AuthHeader
+	}
+	if req.AuthScheme != nil {
+		updates["auth_scheme"] = *req.AuthScheme
+	}
+	if req.ExtraHeaders != nil {
+		updates["extra_headers"] = *req.ExtraHeaders
 	}
 
 	if len(updates) == 0 {

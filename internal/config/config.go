@@ -29,6 +29,19 @@ type Config struct {
 	// Debug enables verbose request logging (e.g. raw body dump on JSON parse
 	// failure). OFF by default to avoid leaking user content into logs.
 	Debug bool `yaml:"debug"`
+	// Proxy holds the global switchboard for the wildcard passthrough endpoint
+	// (/v1/passthrough/). See internal/proxy/passthrough*.go.
+	Proxy ProxyConfig `yaml:"proxy"`
+}
+
+// ProxyConfig holds the global proxy / passthrough switchboard settings.
+type ProxyConfig struct {
+	// PassthroughEnabled is the GLOBAL master switch for the wildcard
+	// /v1/passthrough/ endpoint. It is OFF by default; a request is only
+	// forwarded when BOTH this flag AND the target provider's allow_passthrough
+	// are true (defence in depth against an open-proxy / SSRF surface).
+	// See docs/design-mcp-passthrough.md §8.
+	PassthroughEnabled bool `yaml:"passthrough_enabled"`
 }
 
 // ProviderConfig describes a single upstream LLM provider.
@@ -37,6 +50,20 @@ type ProviderConfig struct {
 	Endpoint  string `yaml:"endpoint"`    // upstream chat-completions endpoint URL
 	APIKeyEnv string `yaml:"api_key_env"` // env var that injects this provider's key at startup
 	IsDefault bool   `yaml:"is_default"`  // true for the global default provider
+	// ── Passthrough / MCP support ──
+	// AllowPassthrough enables this provider as a wildcard passthrough target
+	// (e.g. MCP / arbitrary upstream paths). Effective only when the global
+	// Proxy.PassthroughEnabled master switch is also on.
+	AllowPassthrough bool `yaml:"allow_passthrough"`
+	// AuthHeader is the upstream auth header name. Empty defaults to
+	// "Authorization" (bearer) or "X-Api-Key" (x-api-key).
+	AuthHeader string `yaml:"auth_header"`
+	// AuthScheme selects the upstream auth injection: "bearer" (default),
+	// "x-api-key", or "none" (inject only when AuthHeader is set).
+	AuthScheme string `yaml:"auth_scheme"`
+	// ExtraHeaders are static extra headers injected verbatim on every
+	// passthrough request (e.g. {"anthropic-version": "2023-06-01"}).
+	ExtraHeaders map[string]string `yaml:"extra_headers"`
 }
 
 // ModelMapping maps an external model name to per-provider real model names.

@@ -294,6 +294,42 @@ func RunMigrations(conn *DB) error {
 		return fmt.Errorf("data fix daxian expiry: %w", err)
 	}
 
+	// ── Passthrough / MCP support (idempotent) ──
+	// Per-provider flags enabling wildcard passthrough (e.g. MCP / arbitrary path):
+	//   allow_passthrough : whether this provider may be used as a passthrough target.
+	//   auth_header       : upstream auth header name (default "Authorization").
+	//   auth_scheme       : "bearer" | "x-api-key" | "none" (default "bearer").
+	//   extra_headers     : JSON object of static extra headers (e.g. anthropic-version).
+	// All default to "chat-compatible" values so existing providers keep working.
+	if !columnExists(conn, "providers", "allow_passthrough") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE providers ADD COLUMN allow_passthrough INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("migration alter providers.allow_passthrough failed: %w", err)
+		}
+	}
+	if !columnExists(conn, "providers", "auth_header") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE providers ADD COLUMN auth_header TEXT NOT NULL DEFAULT 'Authorization'`,
+		); err != nil {
+			return fmt.Errorf("migration alter providers.auth_header failed: %w", err)
+		}
+	}
+	if !columnExists(conn, "providers", "auth_scheme") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE providers ADD COLUMN auth_scheme TEXT NOT NULL DEFAULT 'bearer'`,
+		); err != nil {
+			return fmt.Errorf("migration alter providers.auth_scheme failed: %w", err)
+		}
+	}
+	if !columnExists(conn, "providers", "extra_headers") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE providers ADD COLUMN extra_headers TEXT NOT NULL DEFAULT '{}'`,
+		); err != nil {
+			return fmt.Errorf("migration alter providers.extra_headers failed: %w", err)
+		}
+	}
+
 	log.Println("Database migrations completed successfully")
 	return nil
 }

@@ -1,0 +1,71 @@
+sequenceDiagram
+    participant C as Client (MCP/任意HTTP)
+    participant M as SubKeyAuth
+    participant H as PassthroughHandler
+    participant G as GlobalSwitch
+    participant R as Router
+    participant Q as QuotaChecker
+    participant U as Upstream
+
+    C->>M: 任意 METHOD /v1/passthrough/<rest>?query<br/>Authorization: Bearer <subKey>
+    M->>M: GetUserBySubKeyHash → ctx: user_id / route_mode / fixed_provider / max_body_size / max_concurrency
+    M->>H: ServeHTTP
+
+    Note over H: === 全局开关 ===
+    H->>G: PassthroughEnabled()
+    alt 全局关闭
+        H-->>C: 403 passthrough_disabled
+        Note over H: return（不占并发/配额）
+    end
+
+    Note over H: === 并发上限（复用 proxy.tryAcquireConcurrency）===
+    H->>H: tryAcquireConcurrency(userID, maxConcurrency)
+    alt 超限
+        H-->>C: 429 concurrency_limit_exceeded
+        Note over H: 不写 call_logs
+    end
+    H->>H: defer releaseConcurrency(userID)
+
+    Note over H: === 请求体上限（MaxBytesReader）===
+    H->>H: r.Body = MaxBytesReader(w, r.Body, budget≤32MB)
+    H->>H: bodyBytes = io.ReadAll(r.Body)
+    alt 超限
+        H-->>C: 413 request_entity_too_large
+    end
+
+    Note over H: === 解析上游 Provider ===
+    alt route_mode=fixed 且 fixed_provider≠""
+        H->>R: GetProviderBySlug(fixedProvider)
+    else auto / 空
+        H->>R: ResolveProvider(now)
+    end
+    alt 无 Provider
+        H-->>C: 503 no_provider
+    end
+    alt provider.allow_passthrough == false
+        H-->>C: 403 passthrough_disabled
+    end
+
+    Note over H: === 倍率 + 配额（复用）===
+    H->>H: multiplier = fixed_multiplier ?: MultiplierEng.GetEffectiveMultiplier(now)
+    H->>H: effectiveCalls = ceil(multiplier)
+    H->>Q: CheckAndDeduct(userID, effectiveCalls)
+    alt 配额不足
+        H-->>C: 429 quota_exceeded / token_quota_exceeded
+    end
+
+    Note over H: === 构造上游请求（藏 Key）===
+    H->>H: targetURL = endpoint + subPath + "?" + rawQuery
+    H->>H: buildUpstreamRequest: 拷贝过滤头 + Del(Authorization/X-Api-Key) + injectUpstreamAuth(prov)
+    H->>U: client.Do(upstreamReq)
+    alt 上游不可达
+        H->>H: InsertCallLog(502, upstream_error)
+        H-->>C: 502 upstream_error
+    end
+
+    Note over H: === 通用流式转发 ===
+    H->>H: copyResponseHeaders(w, resp.Header, isStream)
+    H->>H: w.WriteHeader(resp.StatusCode)
+    H->>H: streamCopy(w, r, resp.Body)  // io.Copy + Flusher + Context.Done 检测
+    H->>H: InsertCallLog(status, latency, effectiveCalls, multiplier)
+    H-->>C: 状态码 + 过滤头 + body（原样，4xx/5xx 不包装）
