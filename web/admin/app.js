@@ -785,6 +785,13 @@ async function viewCalls(userId, username) {
     // Store user info in sessionStorage so initCallStatsTab can pick it up.
     try {
         sessionStorage.setItem('cs_preselected_user', JSON.stringify({id: userId, name: username}));
+        // Drop any stale call-stats filter (e.g. a previously saved custom time
+        // range whose upper bound is in the past). Without this, the preselected
+        // user's records — which may all be recent — could be hidden behind an
+        // outdated range, showing "暂无调用记录" even though rows exist. This
+        // only affects the jump-from-user-management flow; the manual filter on
+        // the call-stats tab itself is untouched and still persists normally.
+        sessionStorage.removeItem(CS_STORAGE_KEY);
     } catch (_) {}
     switchTab('callstats');
 }
@@ -946,6 +953,15 @@ async function initCallStatsTab() {
             const u = JSON.parse(raw);
             if (u.id) {
                 csFilter.user_id = String(u.id);
+                // Reset the time range so the preselected user's records are
+                // guaranteed visible. A previously-saved custom range (upper
+                // bound in the past) would otherwise hide all of this user's
+                // (possibly recent) call logs. '7d' covers recent activity;
+                // the admin can still narrow it manually afterward.
+                csFilter.time = '7d';
+                csFilter.customFrom = '';
+                csFilter.customTo = '';
+                applyCsFilterToDOM();
                 document.getElementById('cs-user').value = csFilter.user_id;
             }
             sessionStorage.removeItem('cs_preselected_user');
