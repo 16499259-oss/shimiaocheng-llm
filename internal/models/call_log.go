@@ -12,6 +12,7 @@ import (
 type CallLog struct {
 	ID               int64   `json:"id"`
 	UserID           int64   `json:"user_id"`
+	Username         string  `json:"username"` // display name of the calling user; populated by the global admin query
 	Model            string  `json:"model"`
 	ProviderID       string  `json:"provider_id"` // upstream provider that served the call ("zhipu"/"openai"/...)
 	PromptTokens     int     `json:"prompt_tokens"`

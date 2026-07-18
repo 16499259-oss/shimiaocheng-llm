@@ -1047,7 +1047,7 @@ function renderCsCalls(calls) {
     const tbody = document.getElementById('cs-tbody');
     const data = calls.data || [];
     if (data.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="9" class="text-center">暂无调用记录</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" class="text-center">暂无调用记录</td></tr>';
         document.getElementById('cs-pagination').innerHTML = '';
         return;
     }
@@ -1056,6 +1056,7 @@ function renderCsCalls(calls) {
         const mult = (c.multiplier_used != null) ? c.multiplier_used.toFixed(1) + 'x' : '-';
         return `<tr>
             <td>${c.id}</td>
+            <td>${escapeHtml(c.username || '-')}</td>
             <td>${escapeHtml(c.model)}</td>
             <td>${(c.total_tokens || 0).toLocaleString()}</td>
             <td>${c.effective_calls}</td>
