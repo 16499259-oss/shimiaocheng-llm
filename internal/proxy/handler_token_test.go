@@ -123,3 +123,51 @@ func TestHandler_ServeHTTP_CountQuotaExceededReturns429(t *testing.T) {
 		t.Fatalf("expected type=quota_exceeded, got %q (body=%s)", resp.Error.Type, rec.Body.String())
 	}
 }
+
+// TestHandler_ServeHTTPSync_AccumulatesTokenUsage is the REGRESSION test for the
+// sync (non-streaming) token-accounting bug: the SYNC response path wrote
+// call_logs but never called AddTokenUsage, so every non-streaming request's
+// Token usage was missing from quota_token_total_used (the user-panel total).
+// It mocks an upstream that returns a chat completion WITH a usage block and
+// asserts that the sync path accumulates prompt_tokens+completion_tokens into
+// the cumulative Token quota.
+func TestHandler_ServeHTTPSync_AccumulatesTokenUsage(t *testing.T) {
+	database := openProxyTestDB(t)
+	subKey, userID := newTokenTestUser(t, database, "sync", "sync")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+	}))
+	defer upstream.Close()
+
+	multEng := quota.NewMultiplierEngine(database.Conn)
+	checker := quota.NewChecker(database.Conn, multEng, 5)
+	h := &Handler{
+		APIKeyGetter:   func() string { return "sk-dummy" },
+		EndpointGetter: func() string { return upstream.URL },
+		QuotaChecker:   checker,
+		MultiplierEng:  multEng,
+		Compaction:     CompactionTrim,
+	}
+	wrapped := auth.NewMiddleware(database.Conn).SubKeyAuth(h)
+
+	body := []byte(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],"stream":false}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+subKey)
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	q, err := models.GetQuota(database.Conn, userID)
+	if err != nil {
+		t.Fatalf("get quota: %v", err)
+	}
+	if q.QuotaTokenTotalUsed != 15 {
+		t.Fatalf("sync path must accumulate prompt+completion (10+5=15) into quota_token_total_used, got %d", q.QuotaTokenTotalUsed)
+	}
+}
