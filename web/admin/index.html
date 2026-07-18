@@ -127,8 +127,8 @@
                     <button class="btn btn-primary" onclick="openRoutingRuleModal()">+ 新增规则</button>
                 </div>
                 <table class="table" id="routing-rules-table">
-                    <thead><tr><th>ID</th><th>Provider</th><th>开始</th><th>结束</th><th>星期</th><th>状态</th><th>操作</th></tr></thead>
-                    <tbody id="routing-rules-tbody"><tr><td colspan="7" class="text-center">加载中...</td></tr></tbody>
+                    <thead><tr><th>ID</th><th>Provider</th><th>开始</th><th>结束</th><th>星期</th><th>优先级</th><th>状态</th><th>操作</th></tr></thead>
+                    <tbody id="routing-rules-tbody"><tr><td colspan="8" class="text-center">加载中...</td></tr></tbody>
                 </table>
             </section>
 
@@ -324,6 +324,10 @@
                         <option value="1,2,3,4,5">工作日</option>
                         <option value="0,6">周末</option>
                     </select>
+                </div>
+                <div class="form-group">
+                    <label for="routing-priority">优先级（数值越大越优先；相同优先级下窗口更窄的规则胜出）</label>
+                    <input type="number" id="routing-priority" value="0" min="0" step="1">
                 </div>
                 <button type="submit" class="btn btn-primary btn-block">保存</button>
             </form>

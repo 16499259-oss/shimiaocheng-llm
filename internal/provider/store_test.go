@@ -65,7 +65,8 @@ func testStore(t *testing.T) (*ProviderStore, *sql.DB) {
 			days_of_week        TEXT    NOT NULL DEFAULT '*',
 			timezone            TEXT    NOT NULL DEFAULT 'Asia/Shanghai',
 			enabled             INTEGER NOT NULL DEFAULT 1,
-			default_provider_id TEXT
+			default_provider_id TEXT,
+			priority            INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (
 			id          INTEGER PRIMARY KEY AUTOINCREMENT,

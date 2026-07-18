@@ -248,6 +248,18 @@ func RunMigrations(conn *DB) error {
 		}
 	}
 
+	// Add priority column to provider_routing_rules (idempotent). Drives
+	// routing precedence: when multiple enabled rules' windows overlap, the
+	// higher-priority rule wins; ties are broken by narrower window then id.
+	// Default 0 preserves legacy first-match-by-id behaviour for existing rows.
+	if !columnExists(conn, "provider_routing_rules", "priority") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE provider_routing_rules ADD COLUMN priority INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("migration alter provider_routing_rules.priority failed: %w", err)
+		}
+	}
+
 	// Add quota_token_total_limit column to quotas (idempotent). On first
 	// creation, backfill quota_token_total_used from historical call_logs
 	// (SUM(prompt_tokens + completion_tokens) per user) — a one-time migration

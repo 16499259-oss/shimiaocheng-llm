@@ -214,3 +214,112 @@ func TestResolveProvider_WindowHitProviderNotConfigured(t *testing.T) {
 		t.Fatalf("P1 reproduction: window matched 'openai' (not configured) but router silently fell back to default %q; expected an error / no silent downgrade (AGENTS.md §6 strict no-fallback)", prov.ID)
 	}
 }
+
+// TestResolveProvider_OverlappingRules_NarrowerWins is the REPRODUCTION of the
+// production bug: an admin added a narrower override rule (xunfei 00:01-10:00)
+// that overlaps an older, broader base rule (zhipu 00:01-12:29). With the old
+// first-match-by-id behaviour the broader (lower-id) rule shadowed the override
+// and auto users silently stayed on zhipu. The fix sorts by (priority DESC,
+// narrower-window-first, id ASC) so the narrower override wins within the
+// overlap without any manual reordering.
+func TestResolveProvider_OverlappingRules_NarrowerWins(t *testing.T) {
+	database := newRouterTestDB(t)
+	cfg := &config.Config{
+		Providers: []config.ProviderConfig{
+			{ID: "zhipu", Endpoint: "https://zhipu.example/v1", APIKeyEnv: "ZHIPU_API_KEY", IsDefault: true},
+			{ID: "xunfei", Endpoint: "https://xunfei.example/v1", APIKeyEnv: "XUNFEI_API_KEY", IsDefault: false},
+		},
+	}
+	os.Setenv("ZHIPU_API_KEY", "sk-zhipu")
+	os.Setenv("XUNFEI_API_KEY", "sk-xunfei")
+	defer os.Unsetenv("ZHIPU_API_KEY")
+	defer os.Unsetenv("XUNFEI_API_KEY")
+	r := newRouterWithConfig(t, database, cfg)
+
+	// Insert the two overlapping rules in id order: base (zhipu, broader) first,
+	// override (xunfei, narrower) second — mirroring the production scenario.
+	if _, err := database.Conn.Exec(
+		`INSERT INTO provider_routing_rules (provider_id, start_time, end_time, days_of_week, timezone, enabled, priority)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"zhipu", "00:01", "12:29", "*", "Asia/Shanghai", 1, 0,
+	); err != nil {
+		t.Fatalf("insert base rule: %v", err)
+	}
+	if _, err := database.Conn.Exec(
+		`INSERT INTO provider_routing_rules (provider_id, start_time, end_time, days_of_week, timezone, enabled, priority)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"xunfei", "00:01", "10:00", "*", "Asia/Shanghai", 1, 0,
+	); err != nil {
+		t.Fatalf("insert override rule: %v", err)
+	}
+	if err := r.Reload(); err != nil {
+		t.Fatalf("reload after insert: %v", err)
+	}
+
+	// Inside the overlap (09:00) the narrower xunfei rule must win.
+	at0900 := time.Date(2026, 1, 1, 9, 0, 0, 0, timeutil.ShanghaiTZ)
+	prov, err := r.ResolveProvider(at0900)
+	if err != nil {
+		t.Fatalf("ResolveProvider(09:00) error: %v", err)
+	}
+	if prov.ID != "xunfei" {
+		t.Fatalf("overlap @09:00: expected narrower override 'xunfei', got %q", prov.ID)
+	}
+
+	// Outside the override but inside the base window (11:00) -> base zhipu.
+	at1100 := time.Date(2026, 1, 1, 11, 0, 0, 0, timeutil.ShanghaiTZ)
+	prov, err = r.ResolveProvider(at1100)
+	if err != nil {
+		t.Fatalf("ResolveProvider(11:00) error: %v", err)
+	}
+	if prov.ID != "zhipu" {
+		t.Fatalf("outside override @11:00: expected base 'zhipu', got %q", prov.ID)
+	}
+}
+
+// TestResolveProvider_PriorityOverridesNarrower verifies that an explicit
+// higher priority beats the narrower-window tiebreak — giving admins clear
+// control when they DO want the broader rule to win.
+func TestResolveProvider_PriorityOverridesNarrower(t *testing.T) {
+	database := newRouterTestDB(t)
+	cfg := &config.Config{
+		Providers: []config.ProviderConfig{
+			{ID: "zhipu", Endpoint: "https://zhipu.example/v1", APIKeyEnv: "ZHIPU_API_KEY", IsDefault: true},
+			{ID: "xunfei", Endpoint: "https://xunfei.example/v1", APIKeyEnv: "XUNFEI_API_KEY", IsDefault: false},
+		},
+	}
+	os.Setenv("ZHIPU_API_KEY", "sk-zhipu")
+	os.Setenv("XUNFEI_API_KEY", "sk-xunfei")
+	defer os.Unsetenv("ZHIPU_API_KEY")
+	defer os.Unsetenv("XUNFEI_API_KEY")
+	r := newRouterWithConfig(t, database, cfg)
+
+	// Base zhipu (broader) gets priority 10; override xunfei (narrower) stays 0.
+	if _, err := database.Conn.Exec(
+		`INSERT INTO provider_routing_rules (provider_id, start_time, end_time, days_of_week, timezone, enabled, priority)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"zhipu", "00:01", "12:29", "*", "Asia/Shanghai", 1, 10,
+	); err != nil {
+		t.Fatalf("insert base rule: %v", err)
+	}
+	if _, err := database.Conn.Exec(
+		`INSERT INTO provider_routing_rules (provider_id, start_time, end_time, days_of_week, timezone, enabled, priority)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"xunfei", "00:01", "10:00", "*", "Asia/Shanghai", 1, 0,
+	); err != nil {
+		t.Fatalf("insert override rule: %v", err)
+	}
+	if err := r.Reload(); err != nil {
+		t.Fatalf("reload after insert: %v", err)
+	}
+
+	// Even though xunfei is narrower, zhipu's higher priority wins at 09:00.
+	at0900 := time.Date(2026, 1, 1, 9, 0, 0, 0, timeutil.ShanghaiTZ)
+	prov, err := r.ResolveProvider(at0900)
+	if err != nil {
+		t.Fatalf("ResolveProvider(09:00) error: %v", err)
+	}
+	if prov.ID != "zhipu" {
+		t.Fatalf("priority should beat narrower window @09:00: expected 'zhipu', got %q", prov.ID)
+	}
+}

@@ -59,5 +59,6 @@ type RoutingRule struct {
 	DaysOfWeek        string `json:"days_of_week"` // "*" or comma list of weekday nums
 	Timezone          string `json:"timezone"`
 	Enabled           bool   `json:"enabled"`
+	Priority          int    `json:"priority"`                      // higher = evaluated first on overlap; tie-break by narrower window then id
 	DefaultProviderID string `json:"default_provider_id,omitempty"` // schema-reserved
 }
