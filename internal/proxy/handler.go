@@ -557,7 +557,14 @@ func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int
 	// the SYNC (non-streaming) path only wrote call_logs and never incremented
 	// quota_token_total_used, causing the user-panel Token total to under-count
 	// every non-streaming request.
-	if err := models.AddTokenUsage(h.QuotaChecker.DB(), userID, promptTokens+completionTokens); err != nil {
+	//
+	// The active multiplier is applied to the BILLED Token counter so that the
+	// cumulative Token quota is charged the same way the call-count quota is:
+	// a request under a 2x window costs 2x Tokens toward the cap. The real
+	// upstream usage is still recorded verbatim in call_logs (see above) for
+	// honest auditing; only the billed counter is scaled.
+	billedTokens := int(math.Ceil(float64(promptTokens+completionTokens) * multiplier))
+	if err := models.AddTokenUsage(h.QuotaChecker.DB(), userID, billedTokens); err != nil {
 		log.Printf("ERROR: add token usage (sync) for user %d: %v", userID, err)
 	}
 

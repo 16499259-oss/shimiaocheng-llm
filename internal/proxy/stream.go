@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -188,7 +189,13 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, bodyBytes
 	// Account the Token usage toward the user's cumulative Token quota
 	// (fire-and-forget: a failure is logged only and must not break the
 	// already-flushed SSE response).
-	if err := models.AddTokenUsage(h.QuotaChecker.DB(), userID, promptTokens+completionTokens); err != nil {
+	//
+	// Apply the active multiplier to the BILLED Token counter (mirrors the sync
+	// path in handler.go): a request under a 2x window costs 2x Tokens toward
+	// the cap, exactly like the call-count quota does. The real upstream usage
+	// is still recorded verbatim in call_logs for honest auditing.
+	billedTokens := int(math.Ceil(float64(promptTokens+completionTokens) * multiplier))
+	if err := models.AddTokenUsage(h.QuotaChecker.DB(), userID, billedTokens); err != nil {
 		log.Printf("ERROR: add token usage (stream) for user %d: %v", userID, err)
 	}
 }
