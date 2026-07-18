@@ -171,3 +171,68 @@ func TestHandler_ServeHTTPSync_AccumulatesTokenUsage(t *testing.T) {
 		t.Fatalf("sync path must accumulate prompt+completion (10+5=15) into quota_token_total_used, got %d", q.QuotaTokenTotalUsed)
 	}
 }
+
+// TestHandler_ServeHTTPSync_TokenUsageAppliesMultiplier is the REGRESSION test
+// for the multiplier-on-Token-accounting gap: the active multiplier was applied
+// to the call-count quota but NOT to the cumulative Token quota, so a request
+// under a 2x window still only cost 1x Tokens toward quota_token_total_used.
+//
+// This pins the fix: the BILLED Token counter (quota_token_total_used) must be
+// charged raw_usage × multiplier (15 × 2.0 = 30), while call_logs keeps the real
+// upstream usage (15) for auditing.
+func TestHandler_ServeHTTPSync_TokenUsageAppliesMultiplier(t *testing.T) {
+	database := openProxyTestDB(t)
+	subKey, userID := newTokenTestUser(t, database, "mult", "mult")
+
+	mult := 2.0
+	if err := models.UpdateFixedMultiplier(database.Conn, userID, &mult); err != nil {
+		t.Fatalf("set fixed multiplier: %v", err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+	}))
+	defer upstream.Close()
+
+	multEng := quota.NewMultiplierEngine(database.Conn)
+	checker := quota.NewChecker(database.Conn, multEng, 5)
+	h := &Handler{
+		APIKeyGetter:   func() string { return "sk-dummy" },
+		EndpointGetter: func() string { return upstream.URL },
+		QuotaChecker:   checker,
+		MultiplierEng:  multEng,
+		Compaction:     CompactionTrim,
+	}
+	wrapped := auth.NewMiddleware(database.Conn).SubKeyAuth(h)
+
+	body := []byte(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],"stream":false}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+subKey)
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	q, err := models.GetQuota(database.Conn, userID)
+	if err != nil {
+		t.Fatalf("get quota: %v", err)
+	}
+	if q.QuotaTokenTotalUsed != 30 {
+		t.Fatalf("billed Token must be raw_usage × multiplier (15 × 2.0 = 30), got %d", q.QuotaTokenTotalUsed)
+	}
+
+	// call_logs must still record the REAL upstream usage (15), not the billed 30.
+	var loggedTotal int
+	if err := database.Conn.QueryRow(
+		`SELECT total_tokens FROM call_logs WHERE user_id = ? ORDER BY id DESC LIMIT 1`, userID,
+	).Scan(&loggedTotal); err != nil {
+		t.Fatalf("read call_logs total_tokens: %v", err)
+	}
+	if loggedTotal != 15 {
+		t.Fatalf("call_logs.total_tokens must stay raw (15) for auditing, got %d", loggedTotal)
+	}
+}
