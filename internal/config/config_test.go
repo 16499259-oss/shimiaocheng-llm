@@ -98,3 +98,64 @@ func TestLoad_MissingFile(t *testing.T) {
 		t.Error("expected error loading nonexistent config file, got nil")
 	}
 }
+
+// TestLoad_ProviderQuotaDefaults verifies the P2 global default low-balance
+// thresholds (config.ProviderQuota) fall back to 0.10 when the section is
+// missing or a field is omitted, and that explicit values are honoured. The
+// defaults are set BEFORE yaml.Unmarshal so a missing section/field must NOT
+// panic and must NOT yield the zero value (0 would mean "flag everything").
+func TestLoad_ProviderQuotaDefaults(t *testing.T) {
+	writeCfg := func(t *testing.T, src string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "pq.yaml")
+		if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+			t.Fatalf("write cfg: %v", err)
+		}
+		return path
+	}
+
+	// 1) Missing provider_quota section entirely -> both default to 0.10, no panic.
+	cfg, err := Load(writeCfg(t, "server:\n  listen_addr: \"0.0.0.0:80\"\n"))
+	if err != nil {
+		t.Fatalf("Load missing section: %v", err)
+	}
+	if cfg.ProviderQuota.DefaultTokenLowRatio != 0.10 {
+		t.Errorf("DefaultTokenLowRatio = %v, want 0.10 (missing section fallback)", cfg.ProviderQuota.DefaultTokenLowRatio)
+	}
+	if cfg.ProviderQuota.DefaultCallLowRatio != 0.10 {
+		t.Errorf("DefaultCallLowRatio = %v, want 0.10 (missing section fallback)", cfg.ProviderQuota.DefaultCallLowRatio)
+	}
+
+	// 2) Partial: only token set -> call inherits 0.10.
+	cfg, err = Load(writeCfg(t, "provider_quota:\n  default_token_low_ratio: 0.25\n"))
+	if err != nil {
+		t.Fatalf("Load partial token: %v", err)
+	}
+	if cfg.ProviderQuota.DefaultTokenLowRatio != 0.25 {
+		t.Errorf("DefaultTokenLowRatio = %v, want 0.25", cfg.ProviderQuota.DefaultTokenLowRatio)
+	}
+	if cfg.ProviderQuota.DefaultCallLowRatio != 0.10 {
+		t.Errorf("DefaultCallLowRatio = %v, want 0.10 (missing field fallback)", cfg.ProviderQuota.DefaultCallLowRatio)
+	}
+
+	// 3) Partial: only call set -> token inherits 0.10.
+	cfg, err = Load(writeCfg(t, "provider_quota:\n  default_call_low_ratio: 0.05\n"))
+	if err != nil {
+		t.Fatalf("Load partial call: %v", err)
+	}
+	if cfg.ProviderQuota.DefaultCallLowRatio != 0.05 {
+		t.Errorf("DefaultCallLowRatio = %v, want 0.05", cfg.ProviderQuota.DefaultCallLowRatio)
+	}
+	if cfg.ProviderQuota.DefaultTokenLowRatio != 0.10 {
+		t.Errorf("DefaultTokenLowRatio = %v, want 0.10 (missing field fallback)", cfg.ProviderQuota.DefaultTokenLowRatio)
+	}
+
+	// 4) Both explicit -> honoured exactly.
+	cfg, err = Load(writeCfg(t, "provider_quota:\n  default_token_low_ratio: 0.30\n  default_call_low_ratio: 0.40\n"))
+	if err != nil {
+		t.Fatalf("Load explicit: %v", err)
+	}
+	if cfg.ProviderQuota.DefaultTokenLowRatio != 0.30 || cfg.ProviderQuota.DefaultCallLowRatio != 0.40 {
+		t.Errorf("explicit = tok=%v call=%v, want 0.30/0.40", cfg.ProviderQuota.DefaultTokenLowRatio, cfg.ProviderQuota.DefaultCallLowRatio)
+	}
+}

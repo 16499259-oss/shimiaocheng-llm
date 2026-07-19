@@ -136,6 +136,58 @@ func TestBuildProviderUsageView(t *testing.T) {
 	}
 }
 
+// TestBuildProviderUsageView_PerProviderIndependence verifies the P2 per-provider
+// override resolution: a provider-level ratio > 0 wins over the global default
+// (0 means "inherit global"), and token / call dimensions are resolved
+// independently. Global remaining threshold is 0.10 (flag when <10% remains).
+func TestBuildProviderUsageView_PerProviderIndependence(t *testing.T) {
+	const gTok, gCall = 0.10, 0.10
+
+	// Provider A: per-provider TOKEN override = 0.10, CALL inherits global 0.10.
+	// Token used 920/1000 = 8% remaining -> low (token 剩8%标红).
+	// Call used 80/100 = 20% remaining -> not low (call 剩20%不标红).
+	v := BuildProviderUsageView(ProviderRecord{
+		Slug: "a", MonthlyTokenLimit: 1000, MonthlyCallLimit: 100,
+		MonthlyTokenLowRatio: 0.10, MonthlyCallLowRatio: 0,
+	}, &ProviderMonthlyUsage{Slug: "a", TokenUsed: 920, CallUsed: 80}, "w", gTok, gCall)
+	if !v.TokenLow {
+		t.Error("A: token should be low (8% remaining < 10% override)")
+	}
+	if v.CallLow {
+		t.Error("A: call should NOT be low (20% remaining > 10% global)")
+	}
+
+	// Provider B: stricter TOKEN override = 0.05 (flag when <5% remaining).
+	// Same token usage 920/1000 = 8% remaining: 8% > 5% override -> NOT low,
+	// but the GLOBAL 0.10 would have flagged it. This proves the per-provider
+	// override value (not the global default) is what drives token.
+	v = BuildProviderUsageView(ProviderRecord{
+		Slug: "b", MonthlyTokenLimit: 1000, MonthlyCallLimit: 100,
+		MonthlyTokenLowRatio: 0.05, MonthlyCallLowRatio: 0,
+	}, &ProviderMonthlyUsage{Slug: "b", TokenUsed: 920, CallUsed: 80}, "w", gTok, gCall)
+	if v.TokenLow {
+		t.Error("B: token should NOT be low (8% remaining > 5% override); proves override is honoured, not global")
+	}
+	if v.CallLow {
+		t.Error("B: call should NOT be low (20% remaining > 10% global)")
+	}
+
+	// Provider C: token inherits global (0), CALL override = 0.05.
+	// Token used 920/1000 = 8% remaining -> low under global 0.10.
+	// Call used 80/100 = 20% remaining -> not low under call override 0.05.
+	// Demonstrates the two dimensions resolve their OWN thresholds.
+	v = BuildProviderUsageView(ProviderRecord{
+		Slug: "c", MonthlyTokenLimit: 1000, MonthlyCallLimit: 100,
+		MonthlyTokenLowRatio: 0, MonthlyCallLowRatio: 0.05,
+	}, &ProviderMonthlyUsage{Slug: "c", TokenUsed: 920, CallUsed: 80}, "w", gTok, gCall)
+	if !v.TokenLow {
+		t.Error("C: token should be low (8% remaining < 10% global)")
+	}
+	if v.CallLow {
+		t.Error("C: call should NOT be low (20% remaining > 5% override)")
+	}
+}
+
 func TestAggregateProviderUsage(t *testing.T) {
 	conn := usageTestDB(t)
 	in := time.Now().Add(-1 * time.Hour).In(timeutil.ShanghaiTZ).Format(time.RFC3339)

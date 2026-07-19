@@ -107,3 +107,63 @@ func TestUpdateProvider_InvalidLowRatio(t *testing.T) {
 		t.Fatalf("expected 400 for update ratio=2.0, got %d; body=%s", rec2.Code, rec2.Body.String())
 	}
 }
+
+// TestCreateProvider_NegativeLowRatio verifies a negative (out-of-range) low
+// balance ratio is rejected with HTTP 400 and that no provider is persisted.
+// The <0 branch is distinct from the >1.0 branch exercised above.
+func TestCreateProvider_NegativeLowRatio(t *testing.T) {
+	mux, store := newProviderTestHandler(t)
+
+	body := map[string]any{
+		"name":                    "BadNeg",
+		"slug":                    "bad-neg",
+		"endpoint":                "https://api.example.com",
+		"api_key":                 "sk-test",
+		"monthly_token_low_ratio": -0.1, // < 0 -> invalid
+	}
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/providers", bytes.NewReader(b))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for ratio=-0.1, got %d; body=%s", rec.Code, rec.Body.String())
+	}
+	g, err := store.GetProvider("bad-neg")
+	if err != nil {
+		t.Fatalf("GetProvider: %v", err)
+	}
+	if g != nil {
+		t.Error("provider should NOT be persisted when ratio is negative")
+	}
+}
+
+// TestUpdateProvider_NegativeLowRatio verifies a negative ratio in a partial
+// PUT update is also rejected with HTTP 400 (defense holds on partial updates).
+func TestUpdateProvider_NegativeLowRatio(t *testing.T) {
+	mux, _ := newProviderTestHandler(t)
+
+	createBody := map[string]any{
+		"name":     "Anthropic2",
+		"slug":     "anthropic2",
+		"endpoint": "https://api.anthropic.com",
+		"api_key":  "sk-test",
+	}
+	cb, _ := json.Marshal(createBody)
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/providers", bytes.NewReader(cb))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create expected 201, got %d", rec.Code)
+	}
+
+	updateBody := map[string]any{
+		"monthly_call_low_ratio": -0.1, // < 0 -> invalid
+	}
+	ub, _ := json.Marshal(updateBody)
+	req2 := httptest.NewRequest(http.MethodPut, "/admin/api/providers/anthropic2", bytes.NewReader(ub))
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for update ratio=-0.1, got %d; body=%s", rec2.Code, rec2.Body.String())
+	}
+}

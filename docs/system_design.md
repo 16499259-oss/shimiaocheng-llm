@@ -163,12 +163,13 @@ result = append(result, models.ProviderWithMaskedKey{
 ```go
 // 移除旧的 const LowBalanceRatio = 0.9（不再使用，避免死代码）。
 
-// IsLowBalance 现带 ratio 参数：limit<=0 永不标红；否则 used/limit >= ratio 即标红。
-func IsLowBalance(used, limit int64, ratio float64) bool {
+// IsLowBalance 现带 remainingRatio 参数（用户配置的"剩余阈值"，如 0.10 = 剩余<10% 标红）：
+// limit<=0 永不标红；否则当 已用比例 >= 1-remainingRatio（等价于 剩余 < remainingRatio）时标红。
+func IsLowBalance(used, limit int64, remainingRatio float64) bool {
     if limit <= 0 {
         return false
     }
-    return float64(used)/float64(limit) >= ratio
+    return float64(used)/float64(limit) >= (1 - remainingRatio)
 }
 
 // BuildProviderUsageView 增加全局比例两参，解析 effectiveRatio（单一真相源）。
@@ -190,7 +191,7 @@ func BuildProviderUsageView(p ProviderRecord, used *ProviderMonthlyUsage, window
     return view
 }
 ```
-> 行为语义：limit>0 且 `used/limit >= effectiveRatio` 才标红；limit<=0 永不标红；超限仍仅可见不拦截（真实负值标红）。
+> 行为语义：limit>0 且 已用比例 >= 1-effectiveRatio（即剩余 < effectiveRatio）才标红；limit<=0 永不标红；超限仍仅可见不拦截（真实负值标红）。
 > effectiveRatio = 每 provider >0 ? 各自 : 全局默认；0 = 继承全局。
 
 ### 3.6 admin/provider_usage.go — 注入全局比例 + Handler 回退 helper
