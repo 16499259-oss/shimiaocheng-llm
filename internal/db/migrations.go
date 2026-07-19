@@ -330,6 +330,24 @@ func RunMigrations(conn *DB) error {
 		}
 	}
 
+	// ── Provider monthly quota (idempotent) ──
+	// 0 = unlimited / no limit. Token limit may exceed 2^31 (hundreds of
+	// millions) so the columns are INTEGER (64-bit in SQLite, fine for int64).
+	if !columnExists(conn, "providers", "monthly_token_limit") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE providers ADD COLUMN monthly_token_limit INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("migration alter providers.monthly_token_limit failed: %w", err)
+		}
+	}
+	if !columnExists(conn, "providers", "monthly_call_limit") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE providers ADD COLUMN monthly_call_limit INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("migration alter providers.monthly_call_limit failed: %w", err)
+		}
+	}
+
 	log.Println("Database migrations completed successfully")
 	return nil
 }

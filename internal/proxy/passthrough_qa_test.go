@@ -99,7 +99,7 @@ func qaNewGateway(t *testing.T, opts qaOpts) (*httptest.Server, string, *sql.DB)
 		authHeader = "X-Api-Key"
 	}
 	if _, err := store.CreateProvider("Anthropic", "anthropic", endpoint,
-		"sk-real-upstream-key", false, opts.allowPassthrough, authHeader, scheme, opts.extra); err != nil {
+		"sk-real-upstream-key", false, opts.allowPassthrough, authHeader, scheme, opts.extra, 0, 0); err != nil {
 		t.Fatalf("seed provider: %v", err)
 	}
 

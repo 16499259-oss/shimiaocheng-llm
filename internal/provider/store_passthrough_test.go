@@ -16,7 +16,7 @@ func TestCreateProvider_PassthroughFields(t *testing.T) {
 
 	p, err := store.CreateProvider("Anthropic", "anthropic", "https://api.anthropic.com",
 		"sk-ant-key", false, true, "X-Api-Key", "x-api-key",
-		map[string]string{"anthropic-version": "2023-06-01"})
+		map[string]string{"anthropic-version": "2023-06-01"}, 0, 0)
 	if err != nil {
 		t.Fatalf("CreateProvider: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestCreateProvider_PassthroughFields(t *testing.T) {
 // new passthrough fields via the updates map.
 func TestUpdateProvider_PassthroughFields(t *testing.T) {
 	store, _ := testStore(t)
-	_, err := store.CreateProvider("P1", "p1", "https://api.p1.com", "key1", true, false, "Authorization", "bearer", nil)
+	_, err := store.CreateProvider("P1", "p1", "https://api.p1.com", "key1", true, false, "Authorization", "bearer", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("CreateProvider: %v", err)
 	}
