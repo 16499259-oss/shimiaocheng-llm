@@ -188,6 +188,9 @@ func main() {
 		// New fields for provider management.
 		ProviderStore: providerStore,
 		Router:        routerInst,
+		// Config carries the global default low-balance thresholds
+		// (config.ProviderQuota) used by the provider-usage views.
+		Config: cfg,
 	}
 
 	// ── Phase 9: Build routes ──

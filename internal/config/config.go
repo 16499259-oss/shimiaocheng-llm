@@ -32,6 +32,20 @@ type Config struct {
 	// Proxy holds the global switchboard for the wildcard passthrough endpoint
 	// (/v1/passthrough/). See internal/proxy/passthrough*.go.
 	Proxy ProxyConfig `yaml:"proxy"`
+	// ProviderQuota holds the global default low-balance thresholds for
+	// upstream providers. token 与 调用次数 各自独立；每 provider 可在 DB 中
+	// 覆盖（0 = 继承全局默认）。
+	ProviderQuota ProviderQuotaConfig `yaml:"provider_quota"`
+}
+
+// ProviderQuotaConfig holds the global default low-balance thresholds for
+// upstream providers, expressed as a REMAINING ratio (e.g. 0.10 = "flag red
+// when < 10% remaining"). The two dimensions (token / call-count) are
+// configured independently. A per-provider value of 0 means "inherit this
+// global default".
+type ProviderQuotaConfig struct {
+	DefaultTokenLowRatio float64 `yaml:"default_token_low_ratio"`
+	DefaultCallLowRatio  float64 `yaml:"default_call_low_ratio"`
 }
 
 // ProxyConfig holds the global proxy / passthrough switchboard settings.
@@ -122,6 +136,13 @@ func Load(path string) (*Config, error) {
 	cfg.Quota.DefaultTotalLimit = 10000
 	cfg.Quota.ResetIntervalHours = 5
 	cfg.Compaction = "trim" // auto-compact over-budget requests; "off" = legacy hard 413
+
+	// Global default low-balance thresholds (remaining ratio). Set BEFORE
+	// yaml.Unmarshal so a missing provider_quota section or a missing field
+	// falls back to 0.10 instead of the zero value (0 would mean "flag
+	// immediately"). Unmarshal only overwrites the sub-fields present in YAML.
+	cfg.ProviderQuota.DefaultTokenLowRatio = 0.10
+	cfg.ProviderQuota.DefaultCallLowRatio = 0.10
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, err

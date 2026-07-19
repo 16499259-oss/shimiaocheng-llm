@@ -9,6 +9,30 @@ import (
 	"llm_api_gateway/internal/models"
 )
 
+// globalTokenLowRatio returns the global default token low-balance threshold
+// (remaining ratio) from config, falling back to 0.10 when Config is nil or
+// the configured value is zero (defensive for tests and missing config).
+func (h *Handler) globalTokenLowRatio() float64 {
+	if h.Config != nil {
+		if r := h.Config.ProviderQuota.DefaultTokenLowRatio; r > 0 {
+			return r
+		}
+	}
+	return 0.10
+}
+
+// globalCallLowRatio returns the global default call-count low-balance
+// threshold (remaining ratio), with the same 0.10 fallback as
+// globalTokenLowRatio.
+func (h *Handler) globalCallLowRatio() float64 {
+	if h.Config != nil {
+		if r := h.Config.ProviderQuota.DefaultCallLowRatio; r > 0 {
+			return r
+		}
+	}
+	return 0.10
+}
+
 // HandleListProviderUsage handles GET /admin/api/provider-usage.
 //
 // It aggregates rolling-window usage for every provider and merges it with the
@@ -34,7 +58,8 @@ func (h *Handler) HandleListProviderUsage(w http.ResponseWriter, r *http.Request
 
 	views := make([]models.ProviderUsageView, 0, len(providers))
 	for _, p := range providers {
-		views = append(views, models.BuildProviderUsageView(p, usage[p.Slug], windowStart))
+		views = append(views, models.BuildProviderUsageView(p, usage[p.Slug], windowStart,
+			h.globalTokenLowRatio(), h.globalCallLowRatio()))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": views})
@@ -70,7 +95,8 @@ func (h *Handler) HandleGetProviderUsage(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	view := models.BuildProviderUsageView(*p, used, windowStart)
+	view := models.BuildProviderUsageView(*p, used, windowStart,
+		h.globalTokenLowRatio(), h.globalCallLowRatio())
 	writeJSON(w, http.StatusOK, map[string]any{"data": view})
 }
 

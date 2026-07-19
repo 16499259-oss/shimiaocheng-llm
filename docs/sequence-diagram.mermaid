@@ -1,40 +1,35 @@
 sequenceDiagram
-    participant UI as Admin Web (app.js)
-    participant API as Admin Handler (Go)
+    participant UI as 前端 provider 模态
+    participant API as admin.Handler
     participant Store as ProviderStore
-    participant DB as SQLite (call_logs / providers)
+    participant DB as SQLite
+    participant Cfg as config.Config (启动加载)
+    participant M as models.BuildProviderUsageView
 
-    Note over UI,DB: ① 上游管理列表加载（P0-3）
-    UI->>API: GET /admin/api/providers
+    Note over Cfg: 启动时 Load() 读 provider_quota 段<br/>DefaultTokenLowRatio / DefaultCallLowRatio = 0.10
+
+    rect rgb(235,245,255)
+    Note over UI,DB: 配置阈值（创建 / 编辑 provider）
+    UI->>API: PUT/POST /api/providers {monthly_token_low_ratio, monthly_call_low_ratio (比例)}
+    API->>Store: CreateProvider / UpdateProvider(... ratio)
+    Store->>DB: INSERT / UPDATE providers (两 REAL 列)
+    DB-->>Store: ok
+    Store-->>API: ProviderRecord (含两 ratio)
+    API-->>UI: 200 + data
+    end
+
+    rect rgb(235,255,235)
+    Note over API,M: 用量面板加载（effectiveRatio 解析）
     API->>Store: ListProviders()
-    Store->>DB: SELECT ... FROM providers (含 monthly_*_limit)
-    DB-->>Store: rows
+    Store->>DB: SELECT ... monthly_token_low_ratio, monthly_call_low_ratio
+    DB-->>Store: rows (含每 provider 覆盖值)
     Store-->>API: []ProviderRecord
-    API-->>UI: { data: [ ProviderWithMaskedKey... ] }
-    UI->>API: GET /admin/api/provider-usage
-    API->>DB: SELECT provider_id, SUM(prompt_tokens+completion_tokens), SUM(effective_calls) FROM call_logs WHERE created_at >= ? GROUP BY provider_id
-    DB-->>API: 各 provider 已用
-    API->>Store: ListProviders() (拿 name + 限额)
-    Store-->>API: providers
-    API->>API: BuildProviderUsageView() + IsLowBalance() 逐 provider 合成
-    API-->>UI: { data: [ ProviderUsageView... ] } (含 token_low / call_low)
-    UI->>UI: 按 slug 合并，渲染两列（已用/剩余 + 进度条 + 标红）
-
-    Note over UI,DB: ② 开账号表单切换 fixed_provider（P0-4，仅提示不拦截）
-    UI->>UI: 用户选择 fixed_provider = slug
-    UI->>API: GET /admin/api/providers/{slug}/usage
-    API->>Store: GetProvider(slug)
-    Store-->>API: ProviderRecord
-    API->>DB: SELECT SUM(...) FROM call_logs WHERE provider_id = ? AND created_at >= ?
-    DB-->>API: token_used, call_used
-    API->>API: BuildProviderUsageView()
-    API-->>UI: { data: ProviderUsageView }
-    UI->>UI: 渲染「上游剩余额度」块（已用/剩余/进度条/标红）<br/>失败也【不】拦截表单提交
-
-    Note over UI,DB: ③ 独立额度仪表盘页加载（P1-1）
-    UI->>API: GET /admin/provider-usage (页面)
-    API-->>UI: index.html + window.__INIT_TAB__='provider-usage'
-    UI->>UI: switchTab('provider-usage')
-    UI->>API: GET /admin/api/provider-usage
-    API-->>UI: { data: [ ProviderUsageView... ] }
-    UI->>UI: 渲染每 provider 卡片（进度条 + 低余额标红 + 窗口起点 + 更新时间）
+    API->>M: BuildProviderUsageView(p, used, window, cfg.DefaultTokenLowRatio, cfg.DefaultCallLowRatio)
+    M->>M: effToken = p.MonthlyTokenLowRatio>0 ? p.MonthlyTokenLowRatio : globalToken
+    M->>M: effCall  = p.MonthlyCallLowRatio>0  ? p.MonthlyCallLowRatio  : globalCall
+    M->>M: TokenLow = IsLowBalance(used, limit, effToken)
+    M->>M: CallLow  = IsLowBalance(used, limit, effCall)
+    M-->>API: ProviderUsageView { token_low, call_low }
+    API-->>UI: GET /api/provider-usage -> data[]
+    UI->>UI: renderUsageCell 读 token_low / call_low 布尔标红
+    end

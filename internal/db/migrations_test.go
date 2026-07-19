@@ -72,6 +72,11 @@ func TestRunMigrations_AddsExpectedColumns(t *testing.T) {
 		{"users", "route_mode"},
 		{"users", "fixed_provider"},
 		{"quotas", "fixed_multiplier"},
+		// P2: provider monthly quota + low-balance threshold columns (REAL).
+		{"providers", "monthly_token_limit"},
+		{"providers", "monthly_call_limit"},
+		{"providers", "monthly_token_low_ratio"},
+		{"providers", "monthly_call_low_ratio"},
 	}
 	for _, c := range checks {
 		if !columnExists(database, c.table, c.column) {

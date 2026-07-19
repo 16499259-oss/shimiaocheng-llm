@@ -17,8 +17,11 @@ type ProviderRecord struct {
 	ExtraHeaders      string `json:"extra_headers"`       // JSON object string, e.g. {"anthropic-version":"2023-06-01"}
 	MonthlyTokenLimit int64  `json:"monthly_token_limit"` // 0 = unlimited
 	MonthlyCallLimit  int64  `json:"monthly_call_limit"`  // 0 = unlimited
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
+	// ── Low-balance thresholds (remaining ratio; 0 = inherit global default) ──
+	MonthlyTokenLowRatio float64 `json:"monthly_token_low_ratio"` // 0 = 继承全局默认
+	MonthlyCallLowRatio  float64 `json:"monthly_call_low_ratio"`  // 0 = 继承全局默认
+	CreatedAt            string  `json:"created_at"`
+	UpdatedAt            string  `json:"updated_at"`
 }
 
 // ModelMappingRecord is a row from the model_mappings table.
@@ -58,8 +61,11 @@ type ProviderWithMaskedKey struct {
 	ExtraHeaders      string `json:"extra_headers"`
 	MonthlyTokenLimit int64  `json:"monthly_token_limit"` // 0 = unlimited
 	MonthlyCallLimit  int64  `json:"monthly_call_limit"`  // 0 = unlimited
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
+	// ── Low-balance thresholds (remaining ratio; 0 = inherit global default) ──
+	MonthlyTokenLowRatio float64 `json:"monthly_token_low_ratio"` // 0 = 继承全局默认
+	MonthlyCallLowRatio  float64 `json:"monthly_call_low_ratio"`  // 0 = 继承全局默认
+	CreatedAt            string  `json:"created_at"`
+	UpdatedAt            string  `json:"updated_at"`
 }
 
 // RoutingRule mirrors a row in the provider_routing_rules table.

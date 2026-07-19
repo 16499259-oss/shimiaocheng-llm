@@ -348,6 +348,25 @@ func RunMigrations(conn *DB) error {
 		}
 	}
 
+	// ── Provider low-balance thresholds (idempotent) ──
+	// Per-provider override of the global default low-balance threshold,
+	// expressed as a remaining ratio (0.10 = flag when < 10% remaining).
+	// token 与 call-count 各自独立。0 = 继承全局默认（见 config.ProviderQuota）。
+	if !columnExists(conn, "providers", "monthly_token_low_ratio") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE providers ADD COLUMN monthly_token_low_ratio REAL NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("migration alter providers.monthly_token_low_ratio failed: %w", err)
+		}
+	}
+	if !columnExists(conn, "providers", "monthly_call_low_ratio") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE providers ADD COLUMN monthly_call_low_ratio REAL NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("migration alter providers.monthly_call_low_ratio failed: %w", err)
+		}
+	}
+
 	log.Println("Database migrations completed successfully")
 	return nil
 }

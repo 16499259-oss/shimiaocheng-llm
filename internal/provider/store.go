@@ -60,7 +60,9 @@ func (s *ProviderStore) ListProviders() ([]models.ProviderRecord, error) {
 	rows, err := s.db.Query(
 		`SELECT id, name, slug, endpoint, encrypted_key, is_default, enabled,
 		        allow_passthrough, auth_header, auth_scheme, extra_headers,
-		        monthly_token_limit, monthly_call_limit, created_at, updated_at
+		        monthly_token_limit, monthly_call_limit,
+		        monthly_token_low_ratio, monthly_call_low_ratio,
+		        created_at, updated_at
 		 FROM providers ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("list providers: %w", err)
@@ -73,9 +75,11 @@ func (s *ProviderStore) ListProviders() ([]models.ProviderRecord, error) {
 		var isDef, enabled, allowPassthrough int
 		var authHeader, authScheme, extraHeaders string
 		var monthlyTokenLimit, monthlyCallLimit int64
+		var monthlyTokenLowRatio, monthlyCallLowRatio float64
 		if err := rows.Scan(&p.ID, &p.Name, &p.Slug, &p.Endpoint, &p.EncryptedKey,
 			&isDef, &enabled, &allowPassthrough, &authHeader, &authScheme,
-			&extraHeaders, &monthlyTokenLimit, &monthlyCallLimit, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			&extraHeaders, &monthlyTokenLimit, &monthlyCallLimit,
+			&monthlyTokenLowRatio, &monthlyCallLowRatio, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan provider: %w", err)
 		}
 		p.IsDefault = isDef == 1
@@ -86,6 +90,8 @@ func (s *ProviderStore) ListProviders() ([]models.ProviderRecord, error) {
 		p.ExtraHeaders = extraHeaders
 		p.MonthlyTokenLimit = monthlyTokenLimit
 		p.MonthlyCallLimit = monthlyCallLimit
+		p.MonthlyTokenLowRatio = monthlyTokenLowRatio
+		p.MonthlyCallLowRatio = monthlyCallLowRatio
 		providers = append(providers, p)
 	}
 	if providers == nil {
@@ -100,14 +106,18 @@ func (s *ProviderStore) GetProvider(slug string) (*models.ProviderRecord, error)
 	var isDef, enabled, allowPassthrough int
 	var authHeader, authScheme, extraHeaders string
 	var monthlyTokenLimit, monthlyCallLimit int64
+	var monthlyTokenLowRatio, monthlyCallLowRatio float64
 	err := s.db.QueryRow(
 		`SELECT id, name, slug, endpoint, encrypted_key, is_default, enabled,
 		        allow_passthrough, auth_header, auth_scheme, extra_headers,
-		        monthly_token_limit, monthly_call_limit, created_at, updated_at
+		        monthly_token_limit, monthly_call_limit,
+		        monthly_token_low_ratio, monthly_call_low_ratio,
+		        created_at, updated_at
 		 FROM providers WHERE slug = ?`, slug,
 	).Scan(&p.ID, &p.Name, &p.Slug, &p.Endpoint, &p.EncryptedKey,
 		&isDef, &enabled, &allowPassthrough, &authHeader, &authScheme,
-		&extraHeaders, &monthlyTokenLimit, &monthlyCallLimit, &p.CreatedAt, &p.UpdatedAt)
+		&extraHeaders, &monthlyTokenLimit, &monthlyCallLimit,
+		&monthlyTokenLowRatio, &monthlyCallLowRatio, &p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -122,14 +132,18 @@ func (s *ProviderStore) GetProvider(slug string) (*models.ProviderRecord, error)
 	p.ExtraHeaders = extraHeaders
 	p.MonthlyTokenLimit = monthlyTokenLimit
 	p.MonthlyCallLimit = monthlyCallLimit
+	p.MonthlyTokenLowRatio = monthlyTokenLowRatio
+	p.MonthlyCallLowRatio = monthlyCallLowRatio
 	return &p, nil
 }
 
 // CreateProvider inserts a new provider with encrypted API key.
 // monthlyTokenLimit and monthlyCallLimit are the provider's monthly usage caps
 // (0 = unlimited). They are persisted as-is (a 0 value is valid and means
-// "no limit").
-func (s *ProviderStore) CreateProvider(name, slug, endpoint, apiKey string, isDefault, allowPassthrough bool, authHeader, authScheme string, extraHeaders map[string]string, monthlyTokenLimit, monthlyCallLimit int64) (*models.ProviderRecord, error) {
+// "no limit"). monthlyTokenLowRatio and monthlyCallLowRatio are the provider's
+// low-balance threshold overrides (remaining ratio; 0 = inherit the global
+// default configured in config.ProviderQuota).
+func (s *ProviderStore) CreateProvider(name, slug, endpoint, apiKey string, isDefault, allowPassthrough bool, authHeader, authScheme string, extraHeaders map[string]string, monthlyTokenLimit, monthlyCallLimit int64, monthlyTokenLowRatio, monthlyCallLowRatio float64) (*models.ProviderRecord, error) {
 	now := time.Now().Format(time.RFC3339)
 
 	// Encrypt the API key.
@@ -174,9 +188,10 @@ func (s *ProviderStore) CreateProvider(name, slug, endpoint, apiKey string, isDe
 	result, err := tx.Exec(
 		`INSERT INTO providers (name, slug, endpoint, encrypted_key, is_default, enabled,
 		        allow_passthrough, auth_header, auth_scheme, extra_headers,
-		        monthly_token_limit, monthly_call_limit, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		name, slug, endpoint, encryptedKey, isDefInt, allowInt, authHeader, authScheme, string(extraJSON), monthlyTokenLimit, monthlyCallLimit, now, now,
+		        monthly_token_limit, monthly_call_limit,
+		        monthly_token_low_ratio, monthly_call_low_ratio, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		name, slug, endpoint, encryptedKey, isDefInt, allowInt, authHeader, authScheme, string(extraJSON), monthlyTokenLimit, monthlyCallLimit, monthlyTokenLowRatio, monthlyCallLowRatio, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert provider: %w", err)
@@ -196,20 +211,22 @@ func (s *ProviderStore) CreateProvider(name, slug, endpoint, apiKey string, isDe
 			name, slug, endpoint, isDefault, allowPassthrough, authScheme))
 
 	return &models.ProviderRecord{
-		ID:                id,
-		Name:              name,
-		Slug:              slug,
-		Endpoint:          endpoint,
-		IsDefault:         isDefault,
-		Enabled:           true,
-		AllowPassthrough:  allowPassthrough,
-		AuthHeader:        authHeader,
-		AuthScheme:        authScheme,
-		ExtraHeaders:      string(extraJSON),
-		MonthlyTokenLimit: monthlyTokenLimit,
-		MonthlyCallLimit:  monthlyCallLimit,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		ID:                   id,
+		Name:                 name,
+		Slug:                 slug,
+		Endpoint:             endpoint,
+		IsDefault:            isDefault,
+		Enabled:              true,
+		AllowPassthrough:     allowPassthrough,
+		AuthHeader:           authHeader,
+		AuthScheme:           authScheme,
+		ExtraHeaders:         string(extraJSON),
+		MonthlyTokenLimit:    monthlyTokenLimit,
+		MonthlyCallLimit:     monthlyCallLimit,
+		MonthlyTokenLowRatio: monthlyTokenLowRatio,
+		MonthlyCallLowRatio:  monthlyCallLowRatio,
+		CreatedAt:            now,
+		UpdatedAt:            now,
 	}, nil
 }
 
@@ -319,6 +336,18 @@ func (s *ProviderStore) UpdateProvider(slug string, updates map[string]any) (*mo
 	if v, ok := updates["monthly_call_limit"]; ok {
 		if n, ok := v.(int64); ok {
 			setClauses = append(setClauses, "monthly_call_limit = ?")
+			args = append(args, n)
+		}
+	}
+	if v, ok := updates["monthly_token_low_ratio"]; ok {
+		if n, ok := v.(float64); ok {
+			setClauses = append(setClauses, "monthly_token_low_ratio = ?")
+			args = append(args, n)
+		}
+	}
+	if v, ok := updates["monthly_call_low_ratio"]; ok {
+		if n, ok := v.(float64); ok {
+			setClauses = append(setClauses, "monthly_call_low_ratio = ?")
 			args = append(args, n)
 		}
 	}
@@ -713,8 +742,9 @@ func (s *ProviderStore) SeedFromConfig(cfg *config.Config) error {
 		if _, err := s.db.Exec(
 			`INSERT INTO providers (name, slug, endpoint, encrypted_key, is_default, enabled,
 			        allow_passthrough, auth_header, auth_scheme, extra_headers,
-			        monthly_token_limit, monthly_call_limit, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, 0, ?, ?)`,
+			        monthly_token_limit, monthly_call_limit,
+			        monthly_token_low_ratio, monthly_call_low_ratio, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?)`,
 			p.ID, p.ID, p.Endpoint, encryptedKey, isDef, allow, authHeader, authScheme, string(extraJSON), now, now,
 		); err != nil {
 			return fmt.Errorf("seed insert provider %s: %w", p.ID, err)
@@ -891,21 +921,23 @@ func (s *ProviderStore) BuildMaskedProviders() ([]models.ProviderWithMaskedKey, 
 		}
 
 		result = append(result, models.ProviderWithMaskedKey{
-			ID:                p.ID,
-			Name:              p.Name,
-			Slug:              p.Slug,
-			Endpoint:          p.Endpoint,
-			MaskedKey:         masked,
-			IsDefault:         p.IsDefault,
-			Enabled:           p.Enabled,
-			AllowPassthrough:  p.AllowPassthrough,
-			AuthHeader:        p.AuthHeader,
-			AuthScheme:        p.AuthScheme,
-			ExtraHeaders:      p.ExtraHeaders,
-			MonthlyTokenLimit: p.MonthlyTokenLimit,
-			MonthlyCallLimit:  p.MonthlyCallLimit,
-			CreatedAt:         p.CreatedAt,
-			UpdatedAt:         p.UpdatedAt,
+			ID:                   p.ID,
+			Name:                 p.Name,
+			Slug:                 p.Slug,
+			Endpoint:             p.Endpoint,
+			MaskedKey:            masked,
+			IsDefault:            p.IsDefault,
+			Enabled:              p.Enabled,
+			AllowPassthrough:     p.AllowPassthrough,
+			AuthHeader:           p.AuthHeader,
+			AuthScheme:           p.AuthScheme,
+			ExtraHeaders:         p.ExtraHeaders,
+			MonthlyTokenLimit:    p.MonthlyTokenLimit,
+			MonthlyCallLimit:     p.MonthlyCallLimit,
+			MonthlyTokenLowRatio: p.MonthlyTokenLowRatio,
+			MonthlyCallLowRatio:  p.MonthlyCallLowRatio,
+			CreatedAt:            p.CreatedAt,
+			UpdatedAt:            p.UpdatedAt,
 		})
 	}
 

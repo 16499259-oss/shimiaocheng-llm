@@ -226,6 +226,9 @@ function openProviderModal(slug) {
         // Monthly quota defaults (0 = unlimited).
         document.getElementById('prov-monthly-token-limit').value = '0';
         document.getElementById('prov-monthly-call-limit').value = '0';
+        // Low-balance thresholds: empty = inherit global default (rendered as %).
+        document.getElementById('prov-monthly-token-low-ratio').value = '';
+        document.getElementById('prov-monthly-call-low-ratio').value = '';
     }
     showModal('provider-modal');
 }
@@ -249,6 +252,12 @@ function editProvider(slug) {
     // Monthly quota fields.
     document.getElementById('prov-monthly-token-limit').value = (p.monthly_token_limit != null) ? p.monthly_token_limit : 0;
     document.getElementById('prov-monthly-call-limit').value = (p.monthly_call_limit != null) ? p.monthly_call_limit : 0;
+    // Low-balance thresholds: stored as a ratio (0.10 = 10%); render as % and
+    // show empty when 0 (= inherit global default).
+    document.getElementById('prov-monthly-token-low-ratio').value =
+        (p.monthly_token_low_ratio > 0) ? (p.monthly_token_low_ratio * 100) : '';
+    document.getElementById('prov-monthly-call-low-ratio').value =
+        (p.monthly_call_low_ratio > 0) ? (p.monthly_call_low_ratio * 100) : '';
     // Rebuild extra_headers rows from the stored JSON string.
     document.getElementById('prov-extra-headers').innerHTML = '';
     let extra = {};
@@ -300,6 +309,12 @@ async function saveProvider(e) {
     const extraHeaders = collectExtraHeaders();
     const monthlyTokenLimit = parseInt(document.getElementById('prov-monthly-token-limit').value, 10) || 0;
     const monthlyCallLimit = parseInt(document.getElementById('prov-monthly-call-limit').value, 10) || 0;
+    // Low-balance thresholds: read as % from the input, submit as ratio
+    // (value / 100). Empty or 0 -> 0 (inherit global default).
+    const tkLowRaw = document.getElementById('prov-monthly-token-low-ratio').value.trim();
+    const clLowRaw = document.getElementById('prov-monthly-call-low-ratio').value.trim();
+    const monthlyTokenLowRatio = tkLowRaw === '' ? 0 : (parseFloat(tkLowRaw) / 100);
+    const monthlyCallLowRatio = clLowRaw === '' ? 0 : (parseFloat(clLowRaw) / 100);
 
     if (!name || !endpoint) { showToast('名称和端点为必填项', 'error'); return; }
     if (!isEdit && !slug) { showToast('Slug 为必填项', 'error'); return; }
@@ -307,7 +322,8 @@ async function saveProvider(e) {
     try {
         if (isEdit) {
             const body = { name, endpoint, allow_passthrough: allowPassthrough, auth_header: authHeader, auth_scheme: authScheme, extra_headers: extraHeaders,
-                monthly_token_limit: monthlyTokenLimit, monthly_call_limit: monthlyCallLimit };
+                monthly_token_limit: monthlyTokenLimit, monthly_call_limit: monthlyCallLimit,
+                monthly_token_low_ratio: monthlyTokenLowRatio, monthly_call_low_ratio: monthlyCallLowRatio };
             if (apiKey) body.api_key = apiKey;
             if (isDefault) body.is_default = true;
             await apiFetch('api/providers/' + encodeURIComponent(editSlug), {
@@ -322,6 +338,7 @@ async function saveProvider(e) {
                     allow_passthrough: allowPassthrough, auth_header: authHeader,
                     auth_scheme: authScheme, extra_headers: extraHeaders,
                     monthly_token_limit: monthlyTokenLimit, monthly_call_limit: monthlyCallLimit,
+                    monthly_token_low_ratio: monthlyTokenLowRatio, monthly_call_low_ratio: monthlyCallLowRatio,
                 }),
             });
             showToast('上游已创建', 'success');

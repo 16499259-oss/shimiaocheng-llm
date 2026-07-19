@@ -92,7 +92,7 @@ func newTestGateway(t *testing.T, opts gatewayOpts) (*httptest.Server, string) {
 		authHeader = "X-Api-Key"
 	}
 	_, err = store.CreateProvider("Anthropic", "anthropic", endpoint,
-		"sk-real-upstream-key", false, opts.allowPassthrough, authHeader, scheme, opts.extra, 0, 0)
+		"sk-real-upstream-key", false, opts.allowPassthrough, authHeader, scheme, opts.extra, 0, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("seed provider: %v", err)
 	}
