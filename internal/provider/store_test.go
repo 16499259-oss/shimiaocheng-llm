@@ -53,6 +53,7 @@ func testStore(t *testing.T) (*ProviderStore, *sql.DB) {
 		monthly_call_limit  INTEGER NOT NULL DEFAULT 0,
 		monthly_token_low_ratio REAL NOT NULL DEFAULT 0,
 		monthly_call_low_ratio  REAL NOT NULL DEFAULT 0,
+		cycle_start_date TEXT    NOT NULL DEFAULT '',
 		created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
 		updated_at     TEXT    NOT NULL DEFAULT (datetime('now'))
 		)`,
@@ -104,7 +105,7 @@ func testStore(t *testing.T) (*ProviderStore, *sql.DB) {
 func TestCreateAndGetProvider(t *testing.T) {
 	store, _ := testStore(t)
 
-	p, err := store.CreateProvider("Test Provider", "test-prov", "https://api.test.com/v1", "sk-test-key-123", true, false, "Authorization", "bearer", nil, 0, 0, 0, 0)
+	p, err := store.CreateProvider("Test Provider", "test-prov", "https://api.test.com/v1", "sk-test-key-123", true, false, "Authorization", "bearer", nil, 0, 0, 0, 0, "")
 	if err != nil {
 		t.Fatalf("CreateProvider: %v", err)
 	}
@@ -140,7 +141,7 @@ func TestCreateAndGetProvider(t *testing.T) {
 func TestUpdateProvider(t *testing.T) {
 	store, _ := testStore(t)
 
-	_, err := store.CreateProvider("P1", "p1", "https://api.p1.com", "key-old", false, false, "Authorization", "bearer", nil, 0, 0, 0, 0)
+	_, err := store.CreateProvider("P1", "p1", "https://api.p1.com", "key-old", false, false, "Authorization", "bearer", nil, 0, 0, 0, 0, "")
 	if err != nil {
 		t.Fatalf("CreateProvider: %v", err)
 	}
@@ -167,11 +168,11 @@ func TestUpdateProvider(t *testing.T) {
 func TestDeleteProvider(t *testing.T) {
 	store, _ := testStore(t)
 
-	_, err := store.CreateProvider("P1", "p1", "https://api.p1.com", "key1", false, false, "Authorization", "bearer", nil, 0, 0, 0, 0)
+	_, err := store.CreateProvider("P1", "p1", "https://api.p1.com", "key1", false, false, "Authorization", "bearer", nil, 0, 0, 0, 0, "")
 	if err != nil {
 		t.Fatalf("CreateProvider p1: %v", err)
 	}
-	_, err = store.CreateProvider("P2", "p2", "https://api.p2.com", "key2", true, false, "Authorization", "bearer", nil, 0, 0, 0, 0)
+	_, err = store.CreateProvider("P2", "p2", "https://api.p2.com", "key2", true, false, "Authorization", "bearer", nil, 0, 0, 0, 0, "")
 	if err != nil {
 		t.Fatalf("CreateProvider p2: %v", err)
 	}
@@ -205,7 +206,7 @@ func TestDeleteProvider(t *testing.T) {
 func TestCreateMapping_Duplicate(t *testing.T) {
 	store, _ := testStore(t)
 
-	_, err := store.CreateProvider("P1", "p1", "https://api.p1.com", "key1", true, false, "Authorization", "bearer", nil, 0, 0, 0, 0)
+	_, err := store.CreateProvider("P1", "p1", "https://api.p1.com", "key1", true, false, "Authorization", "bearer", nil, 0, 0, 0, 0, "")
 	if err != nil {
 		t.Fatalf("CreateProvider: %v", err)
 	}
@@ -293,11 +294,11 @@ func TestBuildProviderTable(t *testing.T) {
 	store, _ := testStore(t)
 
 	// Create two providers.
-	_, err := store.CreateProvider("Zhipu", "zhipu", "https://api.zhipu.com/v1", "sk-zhipu", true, false, "Authorization", "bearer", nil, 0, 0, 0, 0)
+	_, err := store.CreateProvider("Zhipu", "zhipu", "https://api.zhipu.com/v1", "sk-zhipu", true, false, "Authorization", "bearer", nil, 0, 0, 0, 0, "")
 	if err != nil {
 		t.Fatalf("CreateProvider zhipu: %v", err)
 	}
-	_, err = store.CreateProvider("OpenAI", "openai", "https://api.openai.com/v1", "sk-openai", false, false, "Authorization", "bearer", nil, 0, 0, 0, 0)
+	_, err = store.CreateProvider("OpenAI", "openai", "https://api.openai.com/v1", "sk-openai", false, false, "Authorization", "bearer", nil, 0, 0, 0, 0, "")
 	if err != nil {
 		t.Fatalf("CreateProvider openai: %v", err)
 	}

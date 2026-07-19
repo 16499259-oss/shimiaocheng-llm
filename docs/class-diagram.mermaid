@@ -1,55 +1,105 @@
 classDiagram
-    class Config {
-        +ServerConfig Server
-        +DatabaseConfig Database
-        +ProxyConfig Proxy
-        +ProviderQuotaConfig ProviderQuota
-    }
-    class ProviderQuotaConfig {
-        +float64 DefaultTokenLowRatio
-        +float64 DefaultCallLowRatio
-    }
     class ProviderRecord {
         +int64 ID
+        +string Name
         +string Slug
+        +string Endpoint
+        +[]byte EncryptedKey
+        +bool IsDefault
+        +bool Enabled
+        +bool AllowPassthrough
+        +string AuthHeader
+        +string AuthScheme
+        +string ExtraHeaders
         +int64 MonthlyTokenLimit
         +int64 MonthlyCallLimit
         +float64 MonthlyTokenLowRatio
         +float64 MonthlyCallLowRatio
-    }
-    class ProviderWithMaskedKey {
-        +float64 MonthlyTokenLowRatio
-        +float64 MonthlyCallLowRatio
-    }
-    class ProviderUsageView {
-        +int64 MonthlyTokenLimit
-        +int64 MonthlyCallLimit
-        +bool TokenLow
-        +bool CallLow
-    }
-    class ProviderStore {
-        +CreateProvider(... monthlyTokenLowRatio, monthlyCallLowRatio float64) *ProviderRecord
-        +UpdateProvider(slug, updates map) *ProviderRecord
-        +ListProviders() []ProviderRecord
-        +GetProvider(slug) *ProviderRecord
-        +BuildMaskedProviders() []ProviderWithMaskedKey
-        +SeedFromConfig(cfg)
-    }
-    class ProviderUsageModule {
-        +IsLowBalance(used, limit int64, ratio float64) bool
-        +BuildProviderUsageView(p, used, window, globalTokenRatio, globalCallRatio float64) ProviderUsageView
-    }
-    class Handler {
-        +Config *config.Config
-        +globalTokenLowRatio() float64
-        +globalCallLowRatio() float64
+        +string CycleStartDate
+        +string CreatedAt
+        +string UpdatedAt
     }
 
-    Config *-- ProviderQuotaConfig
-    ProviderRecord "1" ..> "1" ProviderUsageView : BuildProviderUsageView
-    ProviderWithMaskedKey --|> ProviderRecord : 含同名字段
-    ProviderStore ..> ProviderRecord : reads / writes
-    ProviderStore ..> ProviderWithMaskedKey : BuildMaskedProviders
-    Handler ..> ProviderStore : ListProviders / Create / Update
-    Handler ..> ProviderUsageModule : BuildProviderUsageView(...)
-    ProviderUsageModule ..> ProviderRecord : effectiveRatio 解析
+    class ProviderWithMaskedKey {
+        +int64 ID
+        +string Name
+        +string Slug
+        +string Endpoint
+        +string MaskedKey
+        +bool IsDefault
+        +bool Enabled
+        +bool AllowPassthrough
+        +string AuthHeader
+        +string AuthScheme
+        +string ExtraHeaders
+        +int64 MonthlyTokenLimit
+        +int64 MonthlyCallLimit
+        +float64 MonthlyTokenLowRatio
+        +float64 MonthlyCallLowRatio
+        +string CycleStartDate
+        +string CreatedAt
+        +string UpdatedAt
+    }
+
+    class ProviderAllocation {
+        +int64 AllocatedTokens
+        +int64 AllocatedCalls
+        +int64 UnlimitedUserCount
+    }
+
+    class ProviderUsageView {
+        +string Slug
+        +string Name
+        +int64 MonthlyTokenLimit
+        +int64 MonthlyCallLimit
+        +int64 TokenUsed
+        +int64 TokenRemaining
+        +bool TokenUnlimited
+        +int64 CallUsed
+        +int64 CallRemaining
+        +bool CallUnlimited
+        +string WindowStart
+        +bool TokenLow
+        +bool CallLow
+        +int64 AllocatedTokens
+        +int64 AllocatedCalls
+        +int64 UnlimitedUserCount
+        +bool AllocationLow
+        +string CycleStart
+        +string CycleEnd
+        +int CycleDaysRemaining
+    }
+
+    class ProviderMonthlyUsage {
+        +string Slug
+        +int64 TokenUsed
+        +int64 CallUsed
+    }
+
+    class Quota {
+        +int64 ID
+        +int64 UserID
+        +int Quota5hLimit
+        +int Quota5hUsed
+        +int QuotaTotalLimit
+        +int QuotaTotalUsed
+        +int QuotaTokenTotalLimit
+        +int QuotaTokenTotalUsed
+        +string WindowStart
+        +string UpdatedAt
+    }
+
+    class User {
+        +int64 ID
+        +string Username
+        +string Status
+        +string ExpiresAt
+        +string FixedProvider
+        +string Role
+    }
+
+    ProviderRecord "1" --> "0..1" ProviderAllocation : GetProviderAllocation
+    ProviderRecord "1" --> "0..1" ProviderMonthlyUsage : AggregateProviderUsage
+    ProviderRecord ..> ProviderUsageView : BuildProviderUsageView
+    ProviderAllocation --> Quota : cross-table SUM
+    ProviderAllocation --> User : filter by fixed_provider

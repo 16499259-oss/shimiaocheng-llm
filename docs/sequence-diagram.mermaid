@@ -1,35 +1,38 @@
 sequenceDiagram
-    participant UI as 前端 provider 模态
-    participant API as admin.Handler
-    participant Store as ProviderStore
+    participant FE as 前端 SPA
+    participant H as admin.Handler
+    participant M as models (provider_usage)
     participant DB as SQLite
-    participant Cfg as config.Config (启动加载)
-    participant M as models.BuildProviderUsageView
 
-    Note over Cfg: 启动时 Load() 读 provider_quota 段<br/>DefaultTokenLowRatio / DefaultCallLowRatio = 0.10
+    FE->>H: GET /admin/api/provider-usage
+    H->>H: ListProviders() → []ProviderRecord
 
-    rect rgb(235,245,255)
-    Note over UI,DB: 配置阈值（创建 / 编辑 provider）
-    UI->>API: PUT/POST /api/providers {monthly_token_low_ratio, monthly_call_low_ratio (比例)}
-    API->>Store: CreateProvider / UpdateProvider(... ratio)
-    Store->>DB: INSERT / UPDATE providers (两 REAL 列)
-    DB-->>Store: ok
-    Store-->>API: ProviderRecord (含两 ratio)
-    API-->>UI: 200 + data
+    loop 每个 provider
+        H->>M: CurrentCycleWindow(p.CycleStartDate)
+        M-->>H: (cycleStart, cycleEnd)
     end
 
-    rect rgb(235,255,235)
-    Note over API,M: 用量面板加载（effectiveRatio 解析）
-    API->>Store: ListProviders()
-    Store->>DB: SELECT ... monthly_token_low_ratio, monthly_call_low_ratio
-    DB-->>Store: rows (含每 provider 覆盖值)
-    Store-->>API: []ProviderRecord
-    API->>M: BuildProviderUsageView(p, used, window, cfg.DefaultTokenLowRatio, cfg.DefaultCallLowRatio)
-    M->>M: effToken = p.MonthlyTokenLowRatio>0 ? p.MonthlyTokenLowRatio : globalToken
-    M->>M: effCall  = p.MonthlyCallLowRatio>0  ? p.MonthlyCallLowRatio  : globalCall
-    M->>M: TokenLow = IsLowBalance(used, limit, effToken)
-    M->>M: CallLow  = IsLowBalance(used, limit, effCall)
-    M-->>API: ProviderUsageView { token_low, call_low }
-    API-->>UI: GET /api/provider-usage -> data[]
-    UI->>UI: renderUsageCell 读 token_low / call_low 布尔标红
+    par 并行：消耗聚合
+        H->>M: AggregateProviderUsage(DB, cycleStart)
+        M->>DB: SELECT SUM(tokens), SUM(calls) FROM call_logs WHERE DATE(created_at) >= ?
+        DB-->>M: map[slug]*ProviderMonthlyUsage
+    and 并行：分配聚合（逐个 provider）
+        loop 每个 provider
+            H->>M: GetProviderAllocation(DB, slug)
+            M->>DB: SELECT SUM(token_limit WHERE >0), SUM(call_limit WHERE >0), COUNT(token=0) FROM users JOIN quotas WHERE fixed_provider=? AND active
+            DB-->>M: *ProviderAllocation
+        end
     end
+
+    loop 每个 provider
+        H->>M: BuildProviderUsageView(p, usage[p.Slug], allocation, globalTokenRatio, globalCallRatio)
+        Note over M: 消耗低余额 = IsLowBalance(used, limit, ratio)
+        Note over M: 分配超额   = IsLowBalance(allocated, limit, ratio)
+        Note over M: 周期剩余天数 = end - today
+        M-->>H: ProviderUsageView (完整含 allocation + cycle)
+    end
+
+    H-->>FE: {data: []ProviderUsageView}
+    Note over FE: 列表 4 列：Token消耗 | Token分配 | Call消耗 | Call分配
+    Note over FE: 仪表盘 4 行 + 周期起止 + 剩余天数
+    Note over FE: 分配超额标红（仅提醒不拦截）

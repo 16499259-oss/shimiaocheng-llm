@@ -29,6 +29,8 @@ type createProviderRequest struct {
 	// ── Low-balance thresholds (remaining ratio; 0 = inherit global default) ──
 	MonthlyTokenLowRatio float64 `json:"monthly_token_low_ratio"`
 	MonthlyCallLowRatio  float64 `json:"monthly_call_low_ratio"`
+	// ── V3: Fixed 30-day cycle anchor ──
+	CycleStartDate string `json:"cycle_start_date"` // "2006-01-02" DATE, defaults to today if empty
 }
 
 // updateProviderRequest is the JSON body for PUT /admin/api/providers/{slug}.
@@ -51,6 +53,8 @@ type updateProviderRequest struct {
 	// ── Low-balance thresholds (remaining ratio; nil = do not change) ──
 	MonthlyTokenLowRatio *float64 `json:"monthly_token_low_ratio"`
 	MonthlyCallLowRatio  *float64 `json:"monthly_call_low_ratio"`
+	// ── V3: Fixed 30-day cycle anchor ──
+	CycleStartDate *string `json:"cycle_start_date"` // nil = do not change
 }
 
 // HandleListProviders handles GET /admin/api/providers.
@@ -101,6 +105,7 @@ func (h *Handler) HandleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		req.AllowPassthrough, authHeader, authScheme, req.ExtraHeaders,
 		req.MonthlyTokenLimit, req.MonthlyCallLimit,
 		req.MonthlyTokenLowRatio, req.MonthlyCallLowRatio,
+		req.CycleStartDate,
 	)
 	if err != nil {
 		log.Printf("ERROR: create provider: %v", err)
@@ -178,6 +183,9 @@ func (h *Handler) HandleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		updates["monthly_call_low_ratio"] = *req.MonthlyCallLowRatio
+	}
+	if req.CycleStartDate != nil {
+		updates["cycle_start_date"] = *req.CycleStartDate
 	}
 
 	if len(updates) == 0 {

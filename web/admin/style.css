@@ -425,6 +425,8 @@ body {
 /* ── Provider Monthly Usage (上游额度可见性) ── */
 .usage-low { color: #dc2626; }
 .usage-unlimited { color: var(--color-text-secondary); font-weight: 500; }
+/* V3: Allocation low — same visual as usage-low */
+.allocation-low .usage-nums { color: #dc2626; }
 
 /* Cell inside the providers table */
 .usage-cell { font-size: 0.8rem; color: var(--color-text); min-width: 150px; }
@@ -453,3 +455,5 @@ body {
 .usage-card-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 6px 0; }
 .usage-card-label { font-size: 0.85rem; color: var(--color-text-secondary); min-width: 90px; }
 .usage-card-foot { margin-top: 12px; font-size: 0.72rem; color: var(--color-text-secondary); border-top: 1px dashed var(--color-border); padding-top: 8px; }
+/* V3: Cycle ending soon — yellow highlight */
+.cycle-expiring { color: #d97706; font-weight: 600; }

@@ -87,10 +87,10 @@ func insertInWindowLog(t *testing.T, conn *sql.DB, provider string, promptTokens
 func TestHandleListProviderUsage(t *testing.T) {
 	mux, store, conn := newUsageTestHandler(t)
 
-	if _, err := store.CreateProvider("OpenAI", "openai", "https://api.openai.com", "sk", false, false, "Authorization", "bearer", nil, 1000, 10, 0, 0); err != nil {
+	if _, err := store.CreateProvider("OpenAI", "openai", "https://api.openai.com", "sk", false, false, "Authorization", "bearer", nil, 1000, 10, 0, 0, ""); err != nil {
 		t.Fatalf("create openai: %v", err)
 	}
-	if _, err := store.CreateProvider("Zhipu", "zhipu", "https://api.zhipu.com", "sk", false, false, "Authorization", "bearer", nil, 0, 0, 0, 0); err != nil {
+	if _, err := store.CreateProvider("Zhipu", "zhipu", "https://api.zhipu.com", "sk", false, false, "Authorization", "bearer", nil, 0, 0, 0, 0, ""); err != nil {
 		t.Fatalf("create zhipu: %v", err)
 	}
 	// openai is over both limits in the window.
@@ -146,7 +146,7 @@ func TestHandleListProviderUsage(t *testing.T) {
 
 func TestHandleGetProviderUsage(t *testing.T) {
 	mux, store, conn := newUsageTestHandler(t)
-	if _, err := store.CreateProvider("OpenAI", "openai", "https://api.openai.com", "sk", false, false, "Authorization", "bearer", nil, 1000, 10, 0, 0); err != nil {
+	if _, err := store.CreateProvider("OpenAI", "openai", "https://api.openai.com", "sk", false, false, "Authorization", "bearer", nil, 1000, 10, 0, 0, ""); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	insertInWindowLog(t, conn, "openai", 1500, 12)
@@ -187,7 +187,7 @@ func TestHandleListProviderUsage_PerProviderOverride(t *testing.T) {
 	mux, store, conn := newUsageTestHandler(t)
 
 	// token override 0.20 (remaining<20% flags); call inherits global 0.10.
-	if _, err := store.CreateProvider("OpenAI", "openai", "https://api.openai.com", "sk", false, false, "Authorization", "bearer", nil, 1000, 100, 0.20, 0); err != nil {
+	if _, err := store.CreateProvider("OpenAI", "openai", "https://api.openai.com", "sk", false, false, "Authorization", "bearer", nil, 1000, 100, 0.20, 0, ""); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	insertInWindowLog(t, conn, "openai", 850, 20) // token 850/1000 = 15% remaining

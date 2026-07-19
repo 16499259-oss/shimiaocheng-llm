@@ -66,6 +66,9 @@ proxy:
 # 上游低余额阈值（全局默认，比例值；0.10 =「剩余 < 10% 时标红」）。
 # token 与 调用次数 各自独立；每 provider 可在管理面板覆盖（填 0 / 留空 = 继承此处全局默认）。
 # 仅在 config.yaml 配置，不提供 UI 编辑入口。
+#
+# cycle_start_date: 固定 30 天周期的起始锚点（"2006-01-02" DATE 格式）。
+# 新建 provider 默认当天，可在管理面板编辑；存量迁移取 DATE(created_at)。
 provider_quota:
   default_token_low_ratio: 0.10
   default_call_low_ratio: 0.10

@@ -35,20 +35,10 @@ func (h *Handler) globalCallLowRatio() float64 {
 
 // HandleListProviderUsage handles GET /admin/api/provider-usage.
 //
-// It aggregates rolling-window usage for every provider and merges it with the
-// provider records (name, limits) into a single ProviderUsageView slice. The
-// rolling window is computed once (now-30d in Asia/Shanghai) and applied as a
-// text comparison against call_logs.created_at.
+// It iterates over every provider, computes the fixed 30-day cycle window from
+// the provider's cycle_start_date, aggregates usage within that window, fetches
+// the cross-table allocation, and merges everything into ProviderUsageView.
 func (h *Handler) HandleListProviderUsage(w http.ResponseWriter, r *http.Request) {
-	windowStart := models.RollingWindowStart()
-
-	usage, err := models.AggregateProviderUsage(h.DB, windowStart)
-	if err != nil {
-		log.Printf("ERROR: aggregate provider usage: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to aggregate provider usage"})
-		return
-	}
-
 	providers, err := h.ProviderStore.ListProviders()
 	if err != nil {
 		log.Printf("ERROR: list providers for usage: %v", err)
@@ -58,8 +48,31 @@ func (h *Handler) HandleListProviderUsage(w http.ResponseWriter, r *http.Request
 
 	views := make([]models.ProviderUsageView, 0, len(providers))
 	for _, p := range providers {
-		views = append(views, models.BuildProviderUsageView(p, usage[p.Slug], windowStart,
-			h.globalTokenLowRatio(), h.globalCallLowRatio()))
+		// Compute the current fixed 30-day cycle window for this provider.
+		cycleStart, _ := models.CurrentCycleWindow(p.CycleStartDate)
+
+		// Convert "2006-01-02" DATE to RFC3339 for call_logs.created_at comparison.
+		windowRFC3339 := cycleStart + "T00:00:00+08:00"
+
+		// Aggregate usage within the cycle window.
+		used, err := models.GetProviderUsage(h.DB, p.Slug, windowRFC3339)
+		if err != nil {
+			log.Printf("ERROR: get provider usage %s: %v", p.Slug, err)
+			// Degrade gracefully: zero usage.
+			used = nil
+		}
+
+		// Fetch cross-table allocation.
+		alloc, err := models.GetProviderAllocation(h.DB, p.Slug)
+		if err != nil {
+			log.Printf("ERROR: get provider allocation %s: %v", p.Slug, err)
+			// Degrade gracefully: nil allocation.
+			alloc = nil
+		}
+
+		view := models.BuildProviderUsageView(p, used, alloc,
+			h.globalTokenLowRatio(), h.globalCallLowRatio())
+		views = append(views, view)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": views})
@@ -87,15 +100,25 @@ func (h *Handler) HandleGetProviderUsage(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	windowStart := models.RollingWindowStart()
-	used, err := models.GetProviderUsage(h.DB, slug, windowStart)
+	// Compute the current fixed 30-day cycle window.
+	cycleStart, _ := models.CurrentCycleWindow(p.CycleStartDate)
+	windowRFC3339 := cycleStart + "T00:00:00+08:00"
+
+	used, err := models.GetProviderUsage(h.DB, slug, windowRFC3339)
 	if err != nil {
 		log.Printf("ERROR: get provider usage %s: %v", slug, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to get provider usage"})
 		return
 	}
 
-	view := models.BuildProviderUsageView(*p, used, windowStart,
+	alloc, err := models.GetProviderAllocation(h.DB, slug)
+	if err != nil {
+		log.Printf("ERROR: get provider allocation %s: %v", slug, err)
+		// Degrade gracefully: nil allocation.
+		alloc = nil
+	}
+
+	view := models.BuildProviderUsageView(*p, used, alloc,
 		h.globalTokenLowRatio(), h.globalCallLowRatio())
 	writeJSON(w, http.StatusOK, map[string]any{"data": view})
 }

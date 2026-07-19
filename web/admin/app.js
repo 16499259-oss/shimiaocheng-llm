@@ -148,7 +148,7 @@ async function loadProviders() {
         const tbody = document.getElementById('providers-tbody');
         const provs = (provData && provData.data) || [];
         if (provs.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="12" class="text-center">暂无上游</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="14" class="text-center">暂无上游</td></tr>';
             return;
         }
 
@@ -171,7 +171,9 @@ async function loadProviders() {
                 : '<span class="badge badge-disabled">-</span>';
             const u = usageMap[p.slug];
             const tokenCell = u ? renderUsageCell(u.token_used, u.monthly_token_limit, u.token_low) : '<span class="usage-unlimited">不限制</span>';
+            const allocTokenCell = u ? renderAllocationCell(u.allocated_tokens, u.monthly_token_limit, u.allocation_low) : '<span class="usage-unlimited">-</span>';
             const callCell = u ? renderUsageCell(u.call_used, u.monthly_call_limit, u.call_low, localeFmt) : '<span class="usage-unlimited">不限制</span>';
+            const allocCallCell = u ? renderAllocationCell(u.allocated_calls, u.monthly_call_limit, u.allocation_low, localeFmt) : '<span class="usage-unlimited">-</span>';
             return `<tr>
                 <td>${p.id}</td>
                 <td>${escapeHtml(p.name)}${defBadge}</td>
@@ -182,7 +184,9 @@ async function loadProviders() {
                 <td>${passBadge}</td>
                 <td>${statusBadge}</td>
                 <td>${tokenCell}</td>
+                <td>${allocTokenCell}</td>
                 <td>${callCell}</td>
+                <td>${allocCallCell}</td>
                 <td>${formatDate(p.created_at)}</td>
                 <td>
                     <div class="btn-group">
@@ -229,6 +233,8 @@ function openProviderModal(slug) {
         // Low-balance thresholds: empty = inherit global default (rendered as %).
         document.getElementById('prov-monthly-token-low-ratio').value = '';
         document.getElementById('prov-monthly-call-low-ratio').value = '';
+        // Cycle start date: empty = today (backend default).
+        document.getElementById('prov-cycle-start-date').value = '';
     }
     showModal('provider-modal');
 }
@@ -258,6 +264,8 @@ function editProvider(slug) {
         (p.monthly_token_low_ratio > 0) ? (p.monthly_token_low_ratio * 100) : '';
     document.getElementById('prov-monthly-call-low-ratio').value =
         (p.monthly_call_low_ratio > 0) ? (p.monthly_call_low_ratio * 100) : '';
+    // Cycle start date.
+    document.getElementById('prov-cycle-start-date').value = p.cycle_start_date || '';
     // Rebuild extra_headers rows from the stored JSON string.
     document.getElementById('prov-extra-headers').innerHTML = '';
     let extra = {};
@@ -315,6 +323,7 @@ async function saveProvider(e) {
     const clLowRaw = document.getElementById('prov-monthly-call-low-ratio').value.trim();
     const monthlyTokenLowRatio = tkLowRaw === '' ? 0 : (parseFloat(tkLowRaw) / 100);
     const monthlyCallLowRatio = clLowRaw === '' ? 0 : (parseFloat(clLowRaw) / 100);
+    const cycleStartDate = document.getElementById('prov-cycle-start-date').value;
 
     if (!name || !endpoint) { showToast('名称和端点为必填项', 'error'); return; }
     if (!isEdit && !slug) { showToast('Slug 为必填项', 'error'); return; }
@@ -324,6 +333,7 @@ async function saveProvider(e) {
             const body = { name, endpoint, allow_passthrough: allowPassthrough, auth_header: authHeader, auth_scheme: authScheme, extra_headers: extraHeaders,
                 monthly_token_limit: monthlyTokenLimit, monthly_call_limit: monthlyCallLimit,
                 monthly_token_low_ratio: monthlyTokenLowRatio, monthly_call_low_ratio: monthlyCallLowRatio };
+            if (cycleStartDate) body.cycle_start_date = cycleStartDate;
             if (apiKey) body.api_key = apiKey;
             if (isDefault) body.is_default = true;
             await apiFetch('api/providers/' + encodeURIComponent(editSlug), {
@@ -339,6 +349,7 @@ async function saveProvider(e) {
                     auth_scheme: authScheme, extra_headers: extraHeaders,
                     monthly_token_limit: monthlyTokenLimit, monthly_call_limit: monthlyCallLimit,
                     monthly_token_low_ratio: monthlyTokenLowRatio, monthly_call_low_ratio: monthlyCallLowRatio,
+                    cycle_start_date: cycleStartDate,
                 }),
             });
             showToast('上游已创建', 'success');
@@ -394,6 +405,22 @@ function renderUsageCell(used, limit, low, numFmt) {
     </div>`;
 }
 
+// renderAllocationCell renders an allocation column (allocated vs limit).
+// Simpler than renderUsageCell: shows the allocated number; red if allocation_low.
+function renderAllocationCell(allocated, limit, low, numFmt) {
+    numFmt = numFmt || formatToken;
+    allocated = Number(allocated) || 0;
+    if (!limit || limit <= 0) {
+        return `<div class="usage-cell"><span class="usage-unlimited">不限制</span></div>`;
+    }
+    const lowCls = low ? ' allocation-low' : '';
+    const pct = limit > 0 ? Math.round(allocated / limit * 100) : 0;
+    return `<div class="usage-cell${lowCls}">
+        <div class="usage-nums"><span>${numFmt(allocated)}</span> / <span>${numFmt(limit)}</span></div>
+        <div class="usage-meta">${pct}%</div>
+    </div>`;
+}
+
 // fetchProviderUsage pulls a single provider's rolling-window usage to show a
 // live hint in the account-creation form. It NEVER blocks form submission:
 // on any error it only displays "获取失败". `hintId` selects which hint block
@@ -413,9 +440,12 @@ async function fetchProviderUsage(slug, hintId) {
             return;
         }
         const localeFmt = n => (Number(n) || 0).toLocaleString();
+        const allocInfo = (u.allocated_tokens > 0 || u.allocated_calls > 0 || u.unlimited_user_count > 0)
+            ? `<div class="usage-hint-row"><span class="usage-hint-label">已分配</span><span class="usage-hint-text">Token ${localeFmt(u.allocated_tokens)} · 调用 ${localeFmt(u.allocated_calls)}${u.unlimited_user_count > 0 ? ' · 无限用户 ' + u.unlimited_user_count : ''}</span></div>`
+            : '';
         hintEl.innerHTML = `
             <div class="usage-hint-row"><span class="usage-hint-label">本月 Token</span>${renderUsageCell(u.token_used, u.monthly_token_limit, u.token_low)}</div>
-            <div class="usage-hint-row"><span class="usage-hint-label">本月 调用</span>${renderUsageCell(u.call_used, u.monthly_call_limit, u.call_low, localeFmt)}</div>`;
+            <div class="usage-hint-row"><span class="usage-hint-label">本月 调用</span>${renderUsageCell(u.call_used, u.monthly_call_limit, u.call_low, localeFmt)}</div>${allocInfo}`;
     } catch (err) {
         // Read-only hint only — must not block the create/edit submit.
         hintEl.innerHTML = '<span class="usage-hint-text">获取失败</span>';
@@ -439,15 +469,24 @@ async function loadProviderUsage() {
         grid.innerHTML = views.map(u => {
             const tokenCell = renderUsageCell(u.token_used, u.monthly_token_limit, u.token_low);
             const callCell = renderUsageCell(u.call_used, u.monthly_call_limit, u.call_low, localeFmt);
-            const lowCls = (u.token_low || u.call_low) ? ' usage-card-low' : '';
+            const allocTokenCell = renderAllocationCell(u.allocated_tokens, u.monthly_token_limit, u.allocation_low);
+            const allocCallCell = renderAllocationCell(u.allocated_calls, u.monthly_call_limit, u.allocation_low, localeFmt);
+            const lowCls = (u.token_low || u.call_low || u.allocation_low) ? ' usage-card-low' : '';
+            // Cycle info
+            const cycleDaysCls = (u.cycle_days_remaining >= 0 && u.cycle_days_remaining <= 3) ? ' cycle-expiring' : '';
+            const cycleInfo = u.cycle_start
+                ? `<span>周期 ${u.cycle_start} ~ ${u.cycle_end} · <span class="${cycleDaysCls ? 'cycle-expiring' : ''}">剩余 ${u.cycle_days_remaining} 天</span></span>`
+                : '';
             return `<div class="usage-card${lowCls}">
                 <div class="usage-card-head">
                     <span class="usage-card-name">${escapeHtml(u.name)}</span>
                     <code class="usage-card-slug">${escapeHtml(u.slug)}</code>
                 </div>
                 <div class="usage-card-row"><span class="usage-card-label">本月 Token</span>${tokenCell}</div>
+                <div class="usage-card-row"><span class="usage-card-label">已分配 Token</span>${allocTokenCell}</div>
                 <div class="usage-card-row"><span class="usage-card-label">本月 调用</span>${callCell}</div>
-                <div class="usage-card-foot">窗口起点 ${formatDate(u.window_start)} · 更新于 ${escapeHtml(now)}</div>
+                <div class="usage-card-row"><span class="usage-card-label">已分配 调用</span>${allocCallCell}</div>
+                <div class="usage-card-foot">${cycleInfo} · 更新于 ${escapeHtml(now)}</div>
             </div>`;
         }).join('');
     } catch (err) {

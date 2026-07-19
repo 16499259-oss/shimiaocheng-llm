@@ -14,6 +14,7 @@ import (
 	"llm_api_gateway/internal/config"
 	"llm_api_gateway/internal/models"
 	"llm_api_gateway/internal/security"
+	"llm_api_gateway/internal/timeutil"
 )
 
 // ProviderTable is an atomic snapshot of all enabled providers, their mappings,
@@ -62,6 +63,7 @@ func (s *ProviderStore) ListProviders() ([]models.ProviderRecord, error) {
 		        allow_passthrough, auth_header, auth_scheme, extra_headers,
 		        monthly_token_limit, monthly_call_limit,
 		        monthly_token_low_ratio, monthly_call_low_ratio,
+		        cycle_start_date,
 		        created_at, updated_at
 		 FROM providers ORDER BY id`)
 	if err != nil {
@@ -79,7 +81,8 @@ func (s *ProviderStore) ListProviders() ([]models.ProviderRecord, error) {
 		if err := rows.Scan(&p.ID, &p.Name, &p.Slug, &p.Endpoint, &p.EncryptedKey,
 			&isDef, &enabled, &allowPassthrough, &authHeader, &authScheme,
 			&extraHeaders, &monthlyTokenLimit, &monthlyCallLimit,
-			&monthlyTokenLowRatio, &monthlyCallLowRatio, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			&monthlyTokenLowRatio, &monthlyCallLowRatio, &p.CycleStartDate,
+			&p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan provider: %w", err)
 		}
 		p.IsDefault = isDef == 1
@@ -112,12 +115,14 @@ func (s *ProviderStore) GetProvider(slug string) (*models.ProviderRecord, error)
 		        allow_passthrough, auth_header, auth_scheme, extra_headers,
 		        monthly_token_limit, monthly_call_limit,
 		        monthly_token_low_ratio, monthly_call_low_ratio,
+		        cycle_start_date,
 		        created_at, updated_at
 		 FROM providers WHERE slug = ?`, slug,
 	).Scan(&p.ID, &p.Name, &p.Slug, &p.Endpoint, &p.EncryptedKey,
 		&isDef, &enabled, &allowPassthrough, &authHeader, &authScheme,
 		&extraHeaders, &monthlyTokenLimit, &monthlyCallLimit,
-		&monthlyTokenLowRatio, &monthlyCallLowRatio, &p.CreatedAt, &p.UpdatedAt)
+		&monthlyTokenLowRatio, &monthlyCallLowRatio, &p.CycleStartDate,
+		&p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -143,8 +148,13 @@ func (s *ProviderStore) GetProvider(slug string) (*models.ProviderRecord, error)
 // "no limit"). monthlyTokenLowRatio and monthlyCallLowRatio are the provider's
 // low-balance threshold overrides (remaining ratio; 0 = inherit the global
 // default configured in config.ProviderQuota).
-func (s *ProviderStore) CreateProvider(name, slug, endpoint, apiKey string, isDefault, allowPassthrough bool, authHeader, authScheme string, extraHeaders map[string]string, monthlyTokenLimit, monthlyCallLimit int64, monthlyTokenLowRatio, monthlyCallLowRatio float64) (*models.ProviderRecord, error) {
+func (s *ProviderStore) CreateProvider(name, slug, endpoint, apiKey string, isDefault, allowPassthrough bool, authHeader, authScheme string, extraHeaders map[string]string, monthlyTokenLimit, monthlyCallLimit int64, monthlyTokenLowRatio, monthlyCallLowRatio float64, cycleStartDate string) (*models.ProviderRecord, error) {
 	now := time.Now().Format(time.RFC3339)
+
+	// Default cycle_start_date to today if not provided.
+	if cycleStartDate == "" {
+		cycleStartDate = time.Now().In(timeutil.ShanghaiTZ).Format("2006-01-02")
+	}
 
 	// Encrypt the API key.
 	encryptedKey, err := security.Encrypt(apiKey, s.kek)
@@ -189,9 +199,10 @@ func (s *ProviderStore) CreateProvider(name, slug, endpoint, apiKey string, isDe
 		`INSERT INTO providers (name, slug, endpoint, encrypted_key, is_default, enabled,
 		        allow_passthrough, auth_header, auth_scheme, extra_headers,
 		        monthly_token_limit, monthly_call_limit,
-		        monthly_token_low_ratio, monthly_call_low_ratio, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		name, slug, endpoint, encryptedKey, isDefInt, allowInt, authHeader, authScheme, string(extraJSON), monthlyTokenLimit, monthlyCallLimit, monthlyTokenLowRatio, monthlyCallLowRatio, now, now,
+		        monthly_token_low_ratio, monthly_call_low_ratio,
+		        cycle_start_date, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		name, slug, endpoint, encryptedKey, isDefInt, allowInt, authHeader, authScheme, string(extraJSON), monthlyTokenLimit, monthlyCallLimit, monthlyTokenLowRatio, monthlyCallLowRatio, cycleStartDate, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert provider: %w", err)
@@ -225,6 +236,7 @@ func (s *ProviderStore) CreateProvider(name, slug, endpoint, apiKey string, isDe
 		MonthlyCallLimit:     monthlyCallLimit,
 		MonthlyTokenLowRatio: monthlyTokenLowRatio,
 		MonthlyCallLowRatio:  monthlyCallLowRatio,
+		CycleStartDate:       cycleStartDate,
 		CreatedAt:            now,
 		UpdatedAt:            now,
 	}, nil
@@ -349,6 +361,12 @@ func (s *ProviderStore) UpdateProvider(slug string, updates map[string]any) (*mo
 		if n, ok := v.(float64); ok {
 			setClauses = append(setClauses, "monthly_call_low_ratio = ?")
 			args = append(args, n)
+		}
+	}
+	if v, ok := updates["cycle_start_date"]; ok {
+		if s, ok := v.(string); ok {
+			setClauses = append(setClauses, "cycle_start_date = ?")
+			args = append(args, s)
 		}
 	}
 
@@ -739,13 +757,15 @@ func (s *ProviderStore) SeedFromConfig(cfg *config.Config) error {
 		}
 
 		now := time.Now().Format(time.RFC3339)
+		cycleStart := time.Now().In(timeutil.ShanghaiTZ).Format("2006-01-02")
 		if _, err := s.db.Exec(
 			`INSERT INTO providers (name, slug, endpoint, encrypted_key, is_default, enabled,
 			        allow_passthrough, auth_header, auth_scheme, extra_headers,
 			        monthly_token_limit, monthly_call_limit,
-			        monthly_token_low_ratio, monthly_call_low_ratio, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?)`,
-			p.ID, p.ID, p.Endpoint, encryptedKey, isDef, allow, authHeader, authScheme, string(extraJSON), now, now,
+			        monthly_token_low_ratio, monthly_call_low_ratio,
+			        cycle_start_date, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?, ?)`,
+			p.ID, p.ID, p.Endpoint, encryptedKey, isDef, allow, authHeader, authScheme, string(extraJSON), cycleStart, now, now,
 		); err != nil {
 			return fmt.Errorf("seed insert provider %s: %w", p.ID, err)
 		}
@@ -936,6 +956,7 @@ func (s *ProviderStore) BuildMaskedProviders() ([]models.ProviderWithMaskedKey, 
 			MonthlyCallLimit:     p.MonthlyCallLimit,
 			MonthlyTokenLowRatio: p.MonthlyTokenLowRatio,
 			MonthlyCallLowRatio:  p.MonthlyCallLowRatio,
+			CycleStartDate:       p.CycleStartDate,
 			CreatedAt:            p.CreatedAt,
 			UpdatedAt:            p.UpdatedAt,
 		})

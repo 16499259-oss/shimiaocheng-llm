@@ -367,6 +367,24 @@ func RunMigrations(conn *DB) error {
 		}
 	}
 
+	// ── Provider cycle start date (上游额度 V3: 固定30天周期) ──
+	// cycle_start_date marks the anchor date for fixed 30-day billing cycles.
+	// New providers default to today; existing rows are backfilled from
+	// DATE(created_at). The column is a "2006-01-02" DATE string.
+	if !columnExists(conn, "providers", "cycle_start_date") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE providers ADD COLUMN cycle_start_date TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("migration alter providers.cycle_start_date failed: %w", err)
+		}
+		// Backfill existing rows: cycle_start_date = DATE(created_at).
+		if _, err := conn.Conn.Exec(
+			`UPDATE providers SET cycle_start_date = DATE(created_at) WHERE cycle_start_date = ''`,
+		); err != nil {
+			return fmt.Errorf("migration backfill providers.cycle_start_date failed: %w", err)
+		}
+	}
+
 	log.Println("Database migrations completed successfully")
 	return nil
 }
