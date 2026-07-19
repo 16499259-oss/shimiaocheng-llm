@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"llm_api_gateway/internal/auth"
+	"llm_api_gateway/internal/config"
 	"llm_api_gateway/internal/provider"
 	"llm_api_gateway/internal/quota"
 	"llm_api_gateway/internal/router"
@@ -32,6 +33,11 @@ type Handler struct {
 	// Provider management (ADR-0007)
 	ProviderStore *provider.ProviderStore
 	Router        *router.Router
+
+	// Config is the loaded gateway configuration. It carries the global default
+	// low-balance thresholds (config.ProviderQuota) used by the provider-usage
+	// views. May be nil in tests; the helper methods fall back to 0.10.
+	Config *config.Config
 }
 
 // RegisterRoutes registers all admin routes on the given ServeMux.

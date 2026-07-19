@@ -161,7 +161,7 @@
                     <h2 class="tab-title">📡 上游额度</h2>
                     <button class="btn btn-sm" onclick="loadProviderUsage()">🔄 刷新</button>
                 </div>
-                <p class="cs-note">滚动 30 天窗口（now-30d，Asia/Shanghai）。剩余 &lt; 10% 时标红提醒（仅展示，不拦截请求）。</p>
+                <p class="cs-note">滚动 30 天窗口（now-30d，Asia/Shanghai）。剩余低于各自阈值时标红提醒（全局默认 &lt; 10%，可逐上游覆盖；仅展示，不拦截请求）。</p>
                 <div class="usage-grid" id="provider-usage-cards"></div>
             </section>
 
@@ -313,6 +313,16 @@
                     <label for="prov-monthly-call-limit">月度调用次数上限</label>
                     <input type="number" id="prov-monthly-call-limit" min="0" step="1" placeholder="0 = 不限制">
                     <small class="form-hint">滚动 30 天窗口内的调用次数上限；留空或 0 表示不限制。</small>
+                </div>
+                <div class="form-group">
+                    <label for="prov-monthly-token-low-ratio">Token 低余额阈值(%)</label>
+                    <input type="number" id="prov-monthly-token-low-ratio" min="0" max="100" step="1" placeholder="0 = 继承全局默认 10%">
+                    <small class="form-hint">滚动窗口内 Token 剩余低于该百分比时标红（仅展示，不拦截）；0 或留空 = 继承全局默认 10%。</small>
+                </div>
+                <div class="form-group">
+                    <label for="prov-monthly-call-low-ratio">调用低余额阈值(%)</label>
+                    <input type="number" id="prov-monthly-call-low-ratio" min="0" max="100" step="1" placeholder="0 = 继承全局默认 10%">
+                    <small class="form-hint">滚动窗口内调用次数剩余低于该百分比时标红（仅展示，不拦截）；0 或留空 = 继承全局默认 10%。</small>
                 </div>
                 <button type="submit" class="btn btn-primary btn-block">保存</button>
             </form>

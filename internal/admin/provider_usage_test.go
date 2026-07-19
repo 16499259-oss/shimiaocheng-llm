@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"llm_api_gateway/internal/config"
 	"llm_api_gateway/internal/db"
 	"llm_api_gateway/internal/models"
 	"llm_api_gateway/internal/provider"
@@ -43,7 +44,19 @@ func newUsageTestHandler(t *testing.T) (*http.ServeMux, *provider.ProviderStore,
 
 	store := provider.NewProviderStore(database.Conn, kek)
 	routerInst := router.NewRouter(database.Conn, store)
-	h := &Handler{DB: database.Conn, ProviderStore: store, Router: routerInst}
+	// Inject the global default thresholds (remaining ratio 0.10) so the
+	// provider-usage views resolve effective thresholds via the production path.
+	h := &Handler{
+		DB:            database.Conn,
+		ProviderStore: store,
+		Router:        routerInst,
+		Config: &config.Config{
+			ProviderQuota: config.ProviderQuotaConfig{
+				DefaultTokenLowRatio: 0.10,
+				DefaultCallLowRatio:  0.10,
+			},
+		},
+	}
 
 	// call_logs has a FK on users(id); seed a user so usage inserts are valid.
 	if _, err := database.Conn.Exec(
@@ -74,10 +87,10 @@ func insertInWindowLog(t *testing.T, conn *sql.DB, provider string, promptTokens
 func TestHandleListProviderUsage(t *testing.T) {
 	mux, store, conn := newUsageTestHandler(t)
 
-	if _, err := store.CreateProvider("OpenAI", "openai", "https://api.openai.com", "sk", false, false, "Authorization", "bearer", nil, 1000, 10); err != nil {
+	if _, err := store.CreateProvider("OpenAI", "openai", "https://api.openai.com", "sk", false, false, "Authorization", "bearer", nil, 1000, 10, 0, 0); err != nil {
 		t.Fatalf("create openai: %v", err)
 	}
-	if _, err := store.CreateProvider("Zhipu", "zhipu", "https://api.zhipu.com", "sk", false, false, "Authorization", "bearer", nil, 0, 0); err != nil {
+	if _, err := store.CreateProvider("Zhipu", "zhipu", "https://api.zhipu.com", "sk", false, false, "Authorization", "bearer", nil, 0, 0, 0, 0); err != nil {
 		t.Fatalf("create zhipu: %v", err)
 	}
 	// openai is over both limits in the window.
@@ -133,7 +146,7 @@ func TestHandleListProviderUsage(t *testing.T) {
 
 func TestHandleGetProviderUsage(t *testing.T) {
 	mux, store, conn := newUsageTestHandler(t)
-	if _, err := store.CreateProvider("OpenAI", "openai", "https://api.openai.com", "sk", false, false, "Authorization", "bearer", nil, 1000, 10); err != nil {
+	if _, err := store.CreateProvider("OpenAI", "openai", "https://api.openai.com", "sk", false, false, "Authorization", "bearer", nil, 1000, 10, 0, 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	insertInWindowLog(t, conn, "openai", 1500, 12)
@@ -161,5 +174,52 @@ func TestHandleGetProviderUsage(t *testing.T) {
 	mux.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for missing provider, got %d", rec2.Code)
+	}
+}
+
+// TestHandleListProviderUsage_PerProviderOverride verifies that a per-provider
+// low-balance threshold override is honoured by the usage view (effective
+// ratio resolution). Here the global default is 0.10 (flag at <10% remaining)
+// but the provider overrides token threshold to 0.20. Token usage 850/1000 =
+// 15% remaining would NOT be flagged by the global default, yet IS flagged by
+// the per-provider override.
+func TestHandleListProviderUsage_PerProviderOverride(t *testing.T) {
+	mux, store, conn := newUsageTestHandler(t)
+
+	// token override 0.20 (remaining<20% flags); call inherits global 0.10.
+	if _, err := store.CreateProvider("OpenAI", "openai", "https://api.openai.com", "sk", false, false, "Authorization", "bearer", nil, 1000, 100, 0.20, 0); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	insertInWindowLog(t, conn, "openai", 850, 20) // token 850/1000 = 15% remaining
+
+	req := httptest.NewRequest(http.MethodGet, "/api/provider-usage", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data []models.ProviderUsageView `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var a models.ProviderUsageView
+	found := false
+	for _, v := range resp.Data {
+		if v.Slug == "openai" {
+			a = v
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("openai missing from usage response")
+	}
+	if !a.TokenLow {
+		t.Errorf("expected per-provider token override (0.20) to flag 15%% remaining as low; got TokenLow=%v", a.TokenLow)
+	}
+	// Call limit 100 with 20 used = 80% remaining -> never low under global 0.10.
+	if a.CallLow {
+		t.Errorf("call should not be low (80%% remaining); got CallLow=%v", a.CallLow)
 	}
 }

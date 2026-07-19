@@ -62,3 +62,10 @@ debug: false
 # 详见 docs/design-mcp-passthrough.md。建议为 MCP 用途单独新建 provider（endpoint 填 base URL，如 https://api.anthropic.com）。
 proxy:
   passthrough_enabled: false
+
+# 上游低余额阈值（全局默认，比例值；0.10 =「剩余 < 10% 时标红」）。
+# token 与 调用次数 各自独立；每 provider 可在管理面板覆盖（填 0 / 留空 = 继承此处全局默认）。
+# 仅在 config.yaml 配置，不提供 UI 编辑入口。
+provider_quota:
+  default_token_low_ratio: 0.10
+  default_call_low_ratio: 0.10

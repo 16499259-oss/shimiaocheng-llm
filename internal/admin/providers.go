@@ -26,6 +26,9 @@ type createProviderRequest struct {
 	// ── Monthly quota (0 = unlimited) ──
 	MonthlyTokenLimit int64 `json:"monthly_token_limit"`
 	MonthlyCallLimit  int64 `json:"monthly_call_limit"`
+	// ── Low-balance thresholds (remaining ratio; 0 = inherit global default) ──
+	MonthlyTokenLowRatio float64 `json:"monthly_token_low_ratio"`
+	MonthlyCallLowRatio  float64 `json:"monthly_call_low_ratio"`
 }
 
 // updateProviderRequest is the JSON body for PUT /admin/api/providers/{slug}.
@@ -45,6 +48,9 @@ type updateProviderRequest struct {
 	// ── Monthly quota (0 = unlimited) ──
 	MonthlyTokenLimit *int64 `json:"monthly_token_limit"`
 	MonthlyCallLimit  *int64 `json:"monthly_call_limit"`
+	// ── Low-balance thresholds (remaining ratio; nil = do not change) ──
+	MonthlyTokenLowRatio *float64 `json:"monthly_token_low_ratio"`
+	MonthlyCallLowRatio  *float64 `json:"monthly_call_low_ratio"`
 }
 
 // HandleListProviders handles GET /admin/api/providers.
@@ -72,6 +78,15 @@ func (h *Handler) HandleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Defense: low-balance ratios must be a remaining ratio in [0, 1.0].
+	// Out-of-range values are rejected outright (the frontend constrains input
+	// via min/max but the backend must never trust the client).
+	if req.MonthlyTokenLowRatio < 0 || req.MonthlyTokenLowRatio > 1.0 ||
+		req.MonthlyCallLowRatio < 0 || req.MonthlyCallLowRatio > 1.0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid low ratio"})
+		return
+	}
+
 	authHeader := req.AuthHeader
 	if authHeader == "" {
 		authHeader = "Authorization"
@@ -85,6 +100,7 @@ func (h *Handler) HandleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		req.Name, req.Slug, req.Endpoint, req.APIKey, req.IsDefault,
 		req.AllowPassthrough, authHeader, authScheme, req.ExtraHeaders,
 		req.MonthlyTokenLimit, req.MonthlyCallLimit,
+		req.MonthlyTokenLowRatio, req.MonthlyCallLowRatio,
 	)
 	if err != nil {
 		log.Printf("ERROR: create provider: %v", err)
@@ -147,6 +163,21 @@ func (h *Handler) HandleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.MonthlyCallLimit != nil {
 		updates["monthly_call_limit"] = *req.MonthlyCallLimit
+	}
+	if req.MonthlyTokenLowRatio != nil {
+		// Defense: reject out-of-range ratios even on partial updates.
+		if *req.MonthlyTokenLowRatio < 0 || *req.MonthlyTokenLowRatio > 1.0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid low ratio"})
+			return
+		}
+		updates["monthly_token_low_ratio"] = *req.MonthlyTokenLowRatio
+	}
+	if req.MonthlyCallLowRatio != nil {
+		if *req.MonthlyCallLowRatio < 0 || *req.MonthlyCallLowRatio > 1.0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid low ratio"})
+			return
+		}
+		updates["monthly_call_low_ratio"] = *req.MonthlyCallLowRatio
 	}
 
 	if len(updates) == 0 {

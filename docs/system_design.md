@@ -1,299 +1,390 @@
-# 系统架构设计 + 任务分解：上游 Provider 月度额度可见性
+# 增量系统设计：上游 Provider 月度额度可见性 · P2 阈值可配置
 
-> 作者：高见远（software-architect）
-> 基于：产品经理许清楚输出的已确认 PRD（4 项用户决策 + P0/P1 功能池）
-> 代码事实：已阅读 `internal/models/provider.go`、`internal/db/migrations.go`、`internal/models/call_log.go`、`internal/models/user.go`、`internal/provider/store.go`、`internal/admin/handler.go`、`internal/admin/providers.go`、`main.go`、`web/admin/{index.html,app.js,style.css}`
-
----
-
-## Part A：系统设计
-
-### 1. 实现方案 + 框架选型
-
-**结论：不引入任何新框架。纯 Go（标准库 `net/http` + `database/sql`）+ 嵌入式静态前端（原生 HTML/JS/CSS，零前端框架），与现有代码风格 100% 一致。**
-
-**技术难点与选型理由**
-
-| 难点 | 方案 | 理由 |
-|------|------|------|
-| 滚动 30 天聚合 | 实时 SQL `SUM` 聚合 + 复合索引 `(provider_id, created_at)`（已存在 `idx_call_logs_provider_created`） | 现有 `call_logs` 已建该索引；PRD 默认假设"不预聚合/不缓存"，实时聚合响应达标；零新增依赖 |
-| 窗口口径（now-30d，非自然月） | `windowStart = now-30*24h` 在 `Asia/Shanghai` 计算为 RFC3339，`created_at >= ?` 文本比较 | `created_at` 全库统一存为 SH RFC3339（见 `call_log.go` D10 注释），同格式文本比较=时间序，与现有 `QueryCallLogs` 一致 |
-| 双口径（token 总量 + 调用次数） | 同一聚合语句 `SUM(prompt_tokens+completion_tokens)` 与 `SUM(effective_calls)` | 一次 `GROUP BY provider_id` 同时算出两口径，单查询 |
-| 三处展示 | 单批量端点 `GET /api/provider-usage` 复用于列表与仪表盘；单 provider 端点 `GET /api/providers/{slug}/usage` 用于开账号表单 | 后端即单一真相源，前端只渲染 |
-| 低余额仅提醒不拦截 | 后端算 `token_low`/`call_low` 布尔，前端仅标红 CSS class | 单一判定逻辑，三处统一；不触碰写操作 |
-
-**架构模式**：沿用现有分层 —— `models`（数据+查询）/ `provider.ProviderStore`（加密 CRUD）/ `admin.Handler`（HTTP 路由与聚合端点）/ 嵌入式 `web/admin`（前端渲染）。新增聚合逻辑放 `models` 查询层，HTTP 端点放 `admin` 包，遵循现有 `call_log.go` 聚合风格。
+> 范围：在既有「上游 Provider 月度额度可见性」功能上，将**低余额阈值**由硬编码常量
+> `LowBalanceRatio = 0.9` 改为「config 全局默认 + DB 每 provider 覆盖」，且
+> **token 与调用次数各自独立配置两个阈值比例**。
+> 本次**只改阈值可配置性**：不动用量聚合、不改三处前端渲染逻辑（仍只读 `token_low`/`call_low` 布尔）。
 
 ---
 
-### 2. 文件列表（新增 / 修改）
+## 1. 实现方案 + 框架选型
 
-**新增文件**
-- `internal/models/provider_usage.go` — 聚合查询函数、用量视图结构、低余额判定、窗口起点计算
-- `internal/admin/provider_usage.go` — 两个 admin API 端点 + 仪表盘页 serving 方法
-
-**修改文件**
-- `internal/db/migrations.go` — `providers` 表幂等新增 `monthly_token_limit` / `monthly_call_limit` 两列
-- `internal/models/provider.go` — `ProviderRecord` 与 `ProviderWithMaskedKey` 增加两字段
-- `internal/provider/store.go` — `ListProviders`/`GetProvider`/`CreateProvider`/`UpdateProvider`/`BuildMaskedProviders`/`SeedFromConfig` 读写新字段
-- `internal/admin/handler.go` — 注册 3 条新路由（2 个 API + 1 个页面）
-- `internal/admin/providers.go` — `createProviderRequest`/`updateProviderRequest` 增加额度字段；`HandleCreateProvider`/`HandleUpdateProvider` 透传
-- `web/admin/index.html` — 上游列表加 2 列；上游模态加 2 个额度输入；用户模态加"上游剩余额度"提示块；侧栏加"上游额度"导航；新增仪表盘 tab section
-- `web/admin/app.js` — `loadProviders` 合并用量渲染 2 列；provider 模态收发额度；`fetchProviderUsage`；`loadProviderUsage`；`formatToken`；fixed_provider 实时提示
-- `web/admin/style.css` — 低余额标红 class、用量卡片/进度条样式
-
-（另输出 `docs/class-diagram.mermaid`、`docs/sequence-diagram.mermaid` 供 Engineer 直接引用。）
+- **技术栈**：纯 Go（1.22）+ 嵌入式静态前端（原生 HTML/JS/CSS），**沿用现状，无新第三方依赖**。
+- **核心难点**：
+  1. 阈值来源从常量 → 配置 + DB 双源，且 token/call 各自独立。
+  2. `IsLowBalance` / `BuildProviderUsageView` 签名变更，波及全部调用方与单测（编译阻断）。
+  3. 比例单位一致性：config/DB/后端接口用**比例（0.10）**；前端输入用**百分比整数（10）**，提交时 `/100`。
+- **框架/库**：沿用 `gopkg.in/yaml.v3`（config 解析）、`database/sql` + SQLite（迁移用 `columnExists` 守卫保证幂等）。
+- **架构模式**：无新架构，仍沿用分层（models / provider store / admin handler / 静态前端）。阈值「单一真相源」收敛在 `models.BuildProviderUsageView`。
 
 ---
 
-### 3. 数据结构与接口
+## 2. 文件列表（新增 / 修改）
 
-#### 3.1 DB Schema（增量迁移，幂等）
+### 修改（后端）
+| 文件 | 改动 |
+|---|---|
+| `internal/config/config.go` | 新增 `ProviderQuotaConfig` 结构体（含 `DefaultTokenLowRatio`/`DefaultCallLowRatio`，默认 0.10）；`Config` 嵌入 `ProviderQuota`；`Load()` 设置默认并容错 |
+| `internal/db/migrations.go` | 末尾幂等加两列 `monthly_token_low_ratio REAL NOT NULL DEFAULT 0`、`monthly_call_low_ratio REAL NOT NULL DEFAULT 0`（`columnExists` 守卫） |
+| `internal/models/provider.go` | `ProviderRecord` 与 `ProviderWithMaskedKey` 增加 `MonthlyTokenLowRatio float64`、`MonthlyCallLowRatio float64`（json 含，`0=继承全局`） |
+| `internal/provider/store.go` | `ListProviders`/`GetProvider` SELECT+Scan 加两列；`CreateProvider` 签名加两 `float64` 参数并写入；`UpdateProvider` 动态更新两列；`BuildMaskedProviders` 透传两字段；`SeedFromConfig` 两列由 DB DEFAULT 0 落地（无需改 INSERT） |
+| `internal/models/provider_usage.go` | `IsLowBalance(used, limit int64, ratio float64) bool`；移除 `LowBalanceRatio` 常量；`BuildProviderUsageView` 增加 `globalTokenRatio, globalCallRatio float64` 两参并解析 effectiveRatio |
+| `internal/admin/provider_usage.go` | 两处 `BuildProviderUsageView` 调用注入全局比例；`Handler` 增加 `globalTokenLowRatio()/globalCallLowRatio()` 回退 helper（Config 为 nil 时回退 0.10） |
+| `internal/admin/providers.go` | `createProviderRequest`/`updateProviderRequest` 增加 `monthly_token_low_ratio`/`monthly_call_low_ratio`；`HandleCreateProvider`/`HandleUpdateProvider` 透传（0 合法=继承全局；update 仅非 nil 写入） |
+| `internal/admin/handler.go` | `Handler` 结构体增加 `Config *config.Config` 字段 |
+| `main.go` | 构造 `admin.Handler` 时接线 `Config: cfg` |
 
-`providers` 表新增两列（在 `RunMigrations` 末尾、`Passthrough` 段落之后追加）：
+### 修改（前端）
+| 文件 | 改动 |
+|---|---|
+| `web/admin/index.html` | provider 编辑模态「月度额度」段下加两个 number 输入：`prov-monthly-token-low-ratio`、`prov-monthly-call-low-ratio`，placeholder `0 = 继承全局默认 10%` |
+| `web/admin/app.js` | `openProviderModal`/`editProvider` 读写两输入（编辑时 ratio→百分比显示，0 显示为空白）；`saveProvider` 读取百分比并 `/100` 后以 ratio 提交 |
 
-```sql
--- 0 = 不限制 / 无限
-ALTER TABLE providers ADD COLUMN monthly_token_limit INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE providers ADD COLUMN monthly_call_limit  INTEGER NOT NULL DEFAULT 0;
-```
+### 配置（运维）
+| 文件 | 改动 |
+|---|---|
+| `config.yaml`（部署配置） | 新增 `provider_quota:` 段：`default_token_low_ratio: 0.10`、`default_call_low_ratio: 0.10` |
 
-守卫方式：复用现有 `columnExists(conn, "providers", "monthly_token_limit")` 判断，缺失才 ALTER。两列均为 `INTEGER`（token 可能上亿，SQLite INTEGER 为 64 位，足够；Go 侧用 `int64`）。
+### 修改（测试，须同步适配新签名）
+| 文件 | 改动 |
+|---|---|
+| `internal/models/provider_usage_test.go` | `TestIsLowBalance` 调用补第 3 参 ratio；`TestBuildProviderUsageView` 调用补两 ratio 参并改写断言以校验 effectiveRatio 解析 |
+| `internal/provider/store_test.go` | 7 处 `CreateProvider` 调用补两 `float64` 实参（传 `0`） |
+| `internal/provider/store_passthrough_test.go` | 2 处 `CreateProvider` 调用补两 `float64` 实参 |
+| `internal/proxy/passthrough_test.go`、`internal/proxy/passthrough_qa_test.go` | 各 1 处 `CreateProvider` 调用补两 `float64` 实参（**编译阻断项**） |
+| `internal/admin/provider_usage_test.go` | 构造 `&Handler{...}` 已含 `Config` 字段（nil→回退 0.10），断言不变仍成立；建议补一条注入 `Config.ProviderQuota` 验证 per-provider 覆盖生效 |
+| `internal/models/provider_usage_edge_test.go` | 仅聚合测试，不调用上述函数，**无需改动** |
 
-#### 3.2 Go 模型（`internal/models/provider.go` 增量）
+---
 
+## 3. 数据结构与接口变更（关键片段）
+
+### 3.1 config.go — 新增 `ProviderQuotaConfig`
 ```go
-// ProviderRecord 增加：
-MonthlyTokenLimit int64 `json:"monthly_token_limit"` // 0 = 无限
-MonthlyCallLimit  int64 `json:"monthly_call_limit"`  // 0 = 无限
+// ProviderQuotaConfig 低余额阈值全局默认（比例，0.10 = 10%）。
+// token 与 调用次数 各自独立；每 provider 可用 DB 列覆盖（0=继承全局）。
+type ProviderQuotaConfig struct {
+    DefaultTokenLowRatio float64 `yaml:"default_token_low_ratio"`
+    DefaultCallLowRatio  float64 `yaml:"default_call_low_ratio"`
+}
 
-// ProviderWithMaskedKey 同步增加同样两字段（列表 API 返回用）
+// Config 内嵌入：
+type Config struct {
+    // ... 既有字段 ...
+    ProviderQuota ProviderQuotaConfig `yaml:"provider_quota"`
+}
+
+// Load() 中，在 yaml.Unmarshal 之前设置默认（缺失段时保留默认）：
+cfg.ProviderQuota.DefaultTokenLowRatio = 0.10
+cfg.ProviderQuota.DefaultCallLowRatio  = 0.10
+// yaml.Unmarshal 仅覆盖 YAML 中存在的子字段，缺失段/字段则保留 0.10。
 ```
 
-#### 3.3 聚合查询与视图（`internal/models/provider_usage.go` 新增）
-
+### 3.2 migrations.go — 末尾幂等加两列
 ```go
-package models
-
-import (
-    "database/sql"
-    "time"
-    "llm_api_gateway/internal/timeutil"
-)
-
-// LowBalanceRatio 默认低余额阈值：剩余 < 10% 即标红（全局统一，token/次数共用）。
-const LowBalanceRatio = 0.9
-
-// RollingWindowStart 返回滚动窗口起点：now-30*24h，按 Asia/Shanghai 渲染为 RFC3339。
-// 与 call_logs.created_at 同格式，可直接文本比较。
-func RollingWindowStart() string {
-    return time.Now().Add(-30 * 24 * time.Hour).In(timeutil.ShanghaiTZ).Format(time.RFC3339)
+// ── Provider 低余额阈值（idempotent）──
+// 比例（0.10 = 10%）；0 = 继承全局默认。token 与 call 各自独立。
+if !columnExists(conn, "providers", "monthly_token_low_ratio") {
+    if _, err := conn.Conn.Exec(
+        `ALTER TABLE providers ADD COLUMN monthly_token_low_ratio REAL NOT NULL DEFAULT 0`,
+    ); err != nil {
+        return fmt.Errorf("migration alter providers.monthly_token_low_ratio failed: %w", err)
+    }
 }
-
-// ProviderMonthlyUsage 单 provider 滚动窗口内的原始聚合（已用）。
-type ProviderMonthlyUsage struct {
-    Slug      string `json:"slug"`
-    TokenUsed int64  `json:"token_used"`
-    CallUsed  int64  `json:"call_used"`
+if !columnExists(conn, "providers", "monthly_call_low_ratio") {
+    if _, err := conn.Conn.Exec(
+        `ALTER TABLE providers ADD COLUMN monthly_call_low_ratio REAL NOT NULL DEFAULT 0`,
+    ); err != nil {
+        return fmt.Errorf("migration alter providers.monthly_call_low_ratio failed: %w", err)
+    }
 }
-
-// AggregateProviderUsage 一次性 GROUP BY 聚合所有 provider 的窗口内用量。
-// 返回 map[slug]*ProviderMonthlyUsage；窗口内无调用的 provider 不在 map 中（前端按 0 处理）。
-func AggregateProviderUsage(db *sql.DB, windowStart string) (map[string]*ProviderMonthlyUsage, error)
-
-// GetProviderUsage 单 provider 窗口内用量（开账号表单实时提示用）。
-func GetProviderUsage(db *sql.DB, slug, windowStart string) (*ProviderMonthlyUsage, error)
-
-// ProviderUsageView 面向前端的完整视图（已算好剩余/无限/低余额）。
-type ProviderUsageView struct {
-    Slug              string `json:"slug"`
-    Name              string `json:"name"`
-    MonthlyTokenLimit int64  `json:"monthly_token_limit"` // 0 = 无限
-    MonthlyCallLimit  int64  `json:"monthly_call_limit"`  // 0 = 无限
-    TokenUsed         int64  `json:"token_used"`
-    TokenRemaining    int64  `json:"token_remaining"`   // 无限时为 -1；超限时可能为负
-    TokenUnlimited    bool   `json:"token_unlimited"`
-    CallUsed          int64  `json:"call_used"`
-    CallRemaining     int64  `json:"call_remaining"`
-    CallUnlimited     bool   `json:"call_unlimited"`
-    WindowStart       string `json:"window_start"` // SH RFC3339
-    TokenLow          bool   `json:"token_low"`    // 剩余 < 10% 标红
-    CallLow           bool   `json:"call_low"`
-}
-
-// IsLowBalance 低余额判定（单一真相源）：无限(limit==0)永不标红；否则 used/limit >= LowBalanceRatio。
-func IsLowBalance(used, limit int64) bool {
-    if limit <= 0 { return false }
-    return float64(used)/float64(limit) >= LowBalanceRatio
-}
-
-// BuildProviderUsageView 由 provider 记录 + 原始用量 + 窗口起点合成视图。
-// 空 provider：used=0，remaining=limit（无限时 -1）。
-func BuildProviderUsageView(p ProviderRecord, used *ProviderMonthlyUsage, windowStart string) ProviderUsageView
 ```
+> `SeedFromConfig` 的 INSERT 不列出这两列，由 DB `DEFAULT 0` 落地（即「写 0 = 继承全局」），无需改 INSERT。
 
-**聚合 SQL（批量）**
-```sql
-SELECT provider_id,
-       COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS token_used,
-       COALESCE(SUM(effective_calls), 0)                    AS call_used
-FROM call_logs
-WHERE created_at >= ?
-GROUP BY provider_id;
-```
-**聚合 SQL（单 provider）**
-```sql
-SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0),
-       COALESCE(SUM(effective_calls), 0)
-FROM call_logs
-WHERE provider_id = ? AND created_at >= ?;
-```
-
-#### 3.4 Admin API（`internal/admin/provider_usage.go` 新增）
-
+### 3.3 provider.go — 模型加两字段
 ```go
-// GET /admin/api/provider-usage
-// 返回 { "data": [ ProviderUsageView, ... ] }，覆盖全部 provider（含无限/空用量）。
-func (h *Handler) HandleListProviderUsage(w http.ResponseWriter, r *http.Request)
+type ProviderRecord struct {
+    // ... 既有字段 ...
+    MonthlyTokenLimit int64   `json:"monthly_token_limit"` // 0 = unlimited
+    MonthlyCallLimit  int64   `json:"monthly_call_limit"`  // 0 = unlimited
+    MonthlyTokenLowRatio float64 `json:"monthly_token_low_ratio"` // 0 = 继承全局
+    MonthlyCallLowRatio  float64 `json:"monthly_call_low_ratio"`  // 0 = 继承全局
+}
 
-// GET /admin/api/providers/{slug}/usage
-// 返回 { "data": ProviderUsageView }；provider 不存在返回 404 { "error": "..." }。
-func (h *Handler) HandleGetProviderUsage(w http.ResponseWriter, r *http.Request)
-
-// GET /admin/provider-usage
-// 复用 index.html（SPA），注入 window.__INIT_TAB__='provider-usage' 后返回，作为可直链的独立仪表盘页。
-func (h *Handler) ServeProviderUsagePage(w http.ResponseWriter, r *http.Request)
+type ProviderWithMaskedKey struct {
+    // ... 既有字段 ...
+    MonthlyTokenLimit int64   `json:"monthly_token_limit"`
+    MonthlyCallLimit  int64   `json:"monthly_call_limit"`
+    MonthlyTokenLowRatio float64 `json:"monthly_token_low_ratio"`
+    MonthlyCallLowRatio  float64 `json:"monthly_call_low_ratio"`
+}
 ```
 
-#### 3.5 Provider 额度配置接口（修改 `internal/admin/providers.go`）
+### 3.4 store.go — 读写两列 + 签名扩展
+```go
+// ListProviders / GetProvider SELECT 增加列：
+//   monthly_token_low_ratio, monthly_call_low_ratio
+// Scan 增加两个 float64：var monthlyTokenLowRatio, monthlyCallLowRatio float64
+// 并赋值 p.MonthlyTokenLowRatio = monthlyTokenLowRatio; p.MonthlyCallLimit...
 
+// CreateProvider 签名扩展（末尾加两参数）：
+func (s *ProviderStore) CreateProvider(name, slug, endpoint, apiKey string, isDefault, allowPassthrough bool,
+    authHeader, authScheme string, extraHeaders map[string]string,
+    monthlyTokenLimit, monthlyCallLimit int64,
+    monthlyTokenLowRatio, monthlyCallLowRatio float64) (*models.ProviderRecord, error) {
+    // INSERT 列增加 monthly_token_low_ratio, monthly_call_low_ratio
+    // VALUES 增加 ?, ? 并传 monthlyTokenLowRatio, monthlyCallLowRatio
+    // 返回 record 也填两字段
+}
+
+// UpdateProvider 动态更新（与 monthly_token_limit 同款写法）：
+if v, ok := updates["monthly_token_low_ratio"]; ok {
+    if n, ok := v.(float64); ok {
+        setClauses = append(setClauses, "monthly_token_low_ratio = ?")
+        args = append(args, n)
+    }
+}
+if v, ok := updates["monthly_call_low_ratio"]; ok {
+    if n, ok := v.(float64); ok {
+        setClauses = append(setClauses, "monthly_call_low_ratio = ?")
+        args = append(args, n)
+    }
+}
+
+// BuildMaskedProviders 透传：
+result = append(result, models.ProviderWithMaskedKey{
+    // ... 既有字段 ...
+    MonthlyTokenLowRatio: p.MonthlyTokenLowRatio,
+    MonthlyCallLowRatio:  p.MonthlyCallLowRatio,
+})
+```
+
+### 3.5 provider_usage.go — 阈值判定重构
+```go
+// 移除旧的 const LowBalanceRatio = 0.9（不再使用，避免死代码）。
+
+// IsLowBalance 现带 ratio 参数：limit<=0 永不标红；否则 used/limit >= ratio 即标红。
+func IsLowBalance(used, limit int64, ratio float64) bool {
+    if limit <= 0 {
+        return false
+    }
+    return float64(used)/float64(limit) >= ratio
+}
+
+// BuildProviderUsageView 增加全局比例两参，解析 effectiveRatio（单一真相源）。
+func BuildProviderUsageView(p ProviderRecord, used *ProviderMonthlyUsage, windowStart string,
+    globalTokenRatio, globalCallRatio float64) ProviderUsageView {
+    // ... 既有 remaining/unlimited 逻辑不变 ...
+
+    tokenRatio := globalTokenRatio
+    if p.MonthlyTokenLowRatio > 0 {
+        tokenRatio = p.MonthlyTokenLowRatio
+    }
+    callRatio := globalCallRatio
+    if p.MonthlyCallLowRatio > 0 {
+        callRatio = p.MonthlyCallLowRatio
+    }
+
+    view.TokenLow = IsLowBalance(tokenUsed, p.MonthlyTokenLimit, tokenRatio)
+    view.CallLow  = IsLowBalance(callUsed,  p.MonthlyCallLimit,  callRatio)
+    return view
+}
+```
+> 行为语义：limit>0 且 `used/limit >= effectiveRatio` 才标红；limit<=0 永不标红；超限仍仅可见不拦截（真实负值标红）。
+> effectiveRatio = 每 provider >0 ? 各自 : 全局默认；0 = 继承全局。
+
+### 3.6 admin/provider_usage.go — 注入全局比例 + Handler 回退 helper
+```go
+// Handler 在 handler.go 中增加字段：
+// Config *config.Config
+
+// 回退 helper（Config 为 nil 时回退 0.10，保证单测与缺省安全）：
+func (h *Handler) globalTokenLowRatio() float64 {
+    if h.Config != nil {
+        return h.Config.ProviderQuota.DefaultTokenLowRatio
+    }
+    return 0.10
+}
+func (h *Handler) globalCallLowRatio() float64 {
+    if h.Config != nil {
+        return h.Config.ProviderQuota.DefaultCallLowRatio
+    }
+    return 0.10
+}
+
+// HandleListProviderUsage：
+views = append(views, models.BuildProviderUsageView(p, usage[p.Slug], windowStart,
+    h.globalTokenLowRatio(), h.globalCallLowRatio()))
+
+// HandleGetProviderUsage：
+view := models.BuildProviderUsageView(*p, used, windowStart,
+    h.globalTokenLowRatio(), h.globalCallLowRatio())
+```
+
+### 3.7 admin/providers.go — 请求结构体 + 透传
 ```go
 type createProviderRequest struct {
-    // ... 现有字段 ...
-    MonthlyTokenLimit int64 `json:"monthly_token_limit"` // 0 = 无限，默认 0
-    MonthlyCallLimit  int64 `json:"monthly_call_limit"`  // 0 = 无限，默认 0
+    // ... 既有字段 ...
+    MonthlyTokenLimit int64   `json:"monthly_token_limit"`
+    MonthlyCallLimit  int64   `json:"monthly_call_limit"`
+    MonthlyTokenLowRatio float64 `json:"monthly_token_low_ratio"` // 比例；0 = 继承全局
+    MonthlyCallLowRatio  float64 `json:"monthly_call_low_ratio"`  // 比例；0 = 继承全局
 }
 type updateProviderRequest struct {
-    // ... 现有字段 ...
-    MonthlyTokenLimit *int64 `json:"monthly_token_limit"`
-    MonthlyCallLimit  *int64 `json:"monthly_call_limit"`
+    // ... 既有字段 ...
+    MonthlyTokenLimit *int64  `json:"monthly_token_limit"`
+    MonthlyCallLimit  *int64  `json:"monthly_call_limit"`
+    MonthlyTokenLowRatio *float64 `json:"monthly_token_low_ratio"`
+    MonthlyCallLowRatio  *float64 `json:"monthly_call_low_ratio"`
+}
+
+// HandleCreateProvider 调用 CreateProvider 末尾补两参：
+req.MonthlyTokenLowRatio, req.MonthlyCallLowRatio
+
+// HandleUpdateProvider 加入 updates（与 monthly_token_limit 同款；0 非 nil 会写入=继承全局，与现状一致）：
+if req.MonthlyTokenLowRatio != nil {
+    updates["monthly_token_low_ratio"] = *req.MonthlyTokenLowRatio
+}
+if req.MonthlyCallLowRatio != nil {
+    updates["monthly_call_low_ratio"] = *req.MonthlyCallLowRatio
 }
 ```
-`HandleCreateProvider` 透传两字段（0 合法）；`HandleUpdateProvider` 仅在非 nil 时写入 `updates` map。
 
-#### 3.6 前端数据结构（JS，约定字段名与后端 JSON 一致）
+### 3.8 前端 — index.html 模态输入
+在「月度额度（可选，0 = 不限制）」段、`prov-monthly-call-limit` 之后、`保存` 按钮之前插入：
+```html
+<div class="form-group">
+    <label for="prov-monthly-token-low-ratio">Token 低余额阈值(%)</label>
+    <input type="number" id="prov-monthly-token-low-ratio" min="0" max="100" step="1" placeholder="0 = 继承全局默认 10%">
+    <small class="form-hint">滚动窗口内 Token 用量达到该百分比即标红；0 或留空 = 继承全局默认 10%。</small>
+</div>
+<div class="form-group">
+    <label for="prov-monthly-call-low-ratio">调用低余额阈值(%)</label>
+    <input type="number" id="prov-monthly-call-low-ratio" min="0" max="100" step="1" placeholder="0 = 继承全局默认 10%">
+    <small class="form-hint">滚动窗口内调用次数达到该百分比即标红；0 或留空 = 继承全局默认 10%。</small>
+</div>
+```
 
-- `ProviderUsageView`（同后端字段）：开账号表单实时提示块与仪表盘卡片直接消费。
-- 上游列表行：`providerMap[slug]` + 并行拉取的 usage map 按 slug 合并。
+### 3.9 前端 — app.js 读写（百分比 ↔ 比例）
+```js
+// openProviderModal（新增分支，默认空白=继承）：
+document.getElementById('prov-monthly-token-low-ratio').value = '';
+document.getElementById('prov-monthly-call-low-ratio').value = '';
 
----
+// editProvider（编辑时 ratio→百分比；0 显示为空白）：
+const tkRatio = (p.monthly_token_low_ratio > 0) ? (p.monthly_token_low_ratio * 100) : '';
+const clRatio = (p.monthly_call_low_ratio  > 0) ? (p.monthly_call_low_ratio  * 100) : '';
+document.getElementById('prov-monthly-token-low-ratio').value = tkRatio;
+document.getElementById('prov-monthly-call-low-ratio').value  = clRatio;
 
-### 4. 程序调用流程（Mermaid 时序图）
-
-见 `docs/sequence-diagram.mermaid`（完整源码），三个核心流程：列表加载、开账号切换 provider、仪表盘加载。
-
----
-
-### 5. 待明确事项（PRD 待确认 + 我的默认假设）
-
-**需用户拍板（P2 范围外但建议尽早定）**
-1. 阈值是否要可配置（全局 / per-provider / token 与次数分别）？—— 本次默认 **全局统一 10%**，token 与次数共用，per-provider 阈值留 P2。
-2. 双口径是否允许"只配其一"？—— PRD 决策 1 已确认"可只配其一，未配=无限"，按此实现（另一条维度 `limit=0` ⇒ 无限）。
-3. 超限（已用 > 上限）时是否展示负数剩余？—— 本次**展示真实负值并标红**（仅可见性，不拦截），不做归零。
-
-**我的默认假设（已在设计中落实，如不符请指出）**
-- 低余额阈值 = 剩余 < 10%（`LowBalanceRatio = 0.9`），全局共用。
-- 独立仪表盘路由 = `/m-7xa2/provider-usage`（内部 `/admin/provider-usage`）。
-- 窗口 = 严格 `now - 30*24h` 滑动；实时 SQL 聚合，无预聚合/无缓存。
-- 提醒形式 = 仅界面标红，不含通知/邮件。
-- 单位：token 用 `K/M/亿` 缩写（<1e3 原值；<1e6 → K；<1e8 → M；≥1e8 → 亿）；次数千分位（`toLocaleString`）。
-- 粒度：仅 provider 级，不做 model 细分。
-- Provider 额度可在"新增/编辑上游"模态配置（满足 P0-1 "后台可配置"）。
-
----
-
-## Part B：任务分解
-
-### 6. 依赖包列表
-
-**无新增第三方依赖。** 沿用现有 `modernc.org/sqlite`、`golang.org/x/crypto`；聚合与路由均用标准库 + 现有包。`go.mod` 不变。
+// saveProvider（读取百分比并 /100 以比例提交）：
+const tkRaw = document.getElementById('prov-monthly-token-low-ratio').value.trim();
+const clRaw = document.getElementById('prov-monthly-call-low-ratio').value.trim();
+const monthlyTokenLowRatio = tkRaw === '' ? 0 : (parseFloat(tkRaw) / 100);
+const monthlyCallLowRatio  = clRaw === '' ? 0 : (parseFloat(clRaw) / 100);
+// PUT body 增加： monthly_token_low_ratio: monthlyTokenLowRatio, monthly_call_low_ratio: monthlyCallLowRatio
+// POST body 同样增加这两字段
+```
 
 ---
 
-### 7. 任务列表（按实现顺序，依赖链 ≤ 2 层）
+## 4. 程序调用流程（简述）
 
-> 规则适配说明：本任务为**存量 Go 项目**（非新建 React 应用），无新建配置文件/入口/依赖可放"T01 基础设施"。故"基础设施"任务适配为**数据层与迁移**——它是后续所有任务的根依赖，等价于模板中的 T01。
+```
+[启动] Load(config.yaml) ──► Config.ProviderQuota.DefaultTokenLowRatio/DefaultCallLowRatio = 0.10
+                              │
+[编辑/创建 provider] 前端模态填两 ratio(百分比)
+       ──POST/PUT /api/providers──► HandleCreate/UpdateProvider
+       ──► ProviderStore.Create/UpdateProvider ──► DB providers(monthly_*_low_ratio REAL)
+                              │
+[用量面板/列表加载] GET /api/provider-usage (或 /api/providers/{slug}/usage)
+       ──► HandleList/GetProviderUsage
+       ──► ListProviders/GetProvider 读出两 ratio 列
+       ──► models.BuildProviderUsageView(p, used, window, globalTokenRatio, globalCallRatio)
+              │  解析 effectiveRatio = p.ratio>0 ? p.ratio : global
+              │  TokenLow/CallLow = IsLowBalance(used, limit, effRatio)
+       ──► 返回 ProviderUsageView{token_low, call_low}
+       ──► 前端 renderUsageCell 读 token_low/call_low 布尔标红（不自算阈值）
+```
 
-#### T01 ｜ 数据层：DB 迁移 + Provider 模型字段 + 聚合查询 【P0】
-- **源文件**：`internal/db/migrations.go`、`internal/models/provider.go`、`internal/models/provider_usage.go`（新）、`internal/provider/store.go`
+---
+
+## 5. 任务列表（按实现顺序，依赖链清晰）
+
+> 约束：≤5 个任务；每组 ≥3 文件；T01 为基础设施。所有 `CreateProvider` 调用方须同步补两参（编译阻断）。
+
+### T01 · 配置段 + 数据库迁移（基础设施）
+- **源文件**：`internal/config/config.go`、`internal/db/migrations.go`、`config.yaml`
 - **依赖**：无
-- **要点**：
-  - 迁移：`providers` 表幂等新增 `monthly_token_limit`/`monthly_call_limit`（`columnExists` 守卫，DEFAULT 0）。
-  - 模型：`ProviderRecord` + `ProviderWithMaskedKey` 增加两 `int64` 字段（json 含 `monthly_*_limit`）。
-  - 新增 `provider_usage.go`：`RollingWindowStart`、`AggregateProviderUsage`、`GetProviderUsage`、`IsLowBalance`、`BuildProviderUsageView`、`ProviderUsageView`。
-  - `store.go`：`ListProviders`/`GetProvider` SELECT+Scan 加两列；`CreateProvider` 签名加两参数并写入；`UpdateProvider` 支持 `monthly_token_limit`/`monthly_call_limit` 动态更新；`BuildMaskedProviders` 透传；`SeedFromConfig` 写 0。
-  - 同步修改 `CreateProvider` 的全部调用方（`providers.go`、`store.go` 内部）及 `internal/provider/*_test.go` 中相关用例，保证 `go build ./...` 与 `go test` 通过。
+- **优先级**：P0
+- **改动**：新增 `ProviderQuotaConfig` 与 `Config.ProviderQuota`；`Load()` 设默认 0.10 并容错；迁移幂等加两 REAL 列。
 
-#### T02 ｜ 后端：聚合 API + Provider 额度配置接口 【P0】
-- **源文件**：`internal/admin/provider_usage.go`（新）、`internal/admin/handler.go`、`internal/admin/providers.go`
+### T02 · 数据模型 + Provider Store
+- **源文件**：`internal/models/provider.go`、`internal/provider/store.go`、`internal/provider/store_test.go`
 - **依赖**：T01
-- **要点**：
-  - 新增 `HandleListProviderUsage`（批量 `GROUP BY` 聚合 + 合并 provider 列表 → `[]ProviderUsageView`）、`HandleGetProviderUsage`（单 slug → `ProviderUsageView`）、`ServeProviderUsagePage`（注入 `window.__INIT_TAB__='provider-usage'` 后返回 `index.html`）。
-  - `handler.go` 注册：`GET /api/provider-usage`、`GET /api/providers/{slug}/usage`、`/provider-usage`（页面，置于 `adminMux` 鉴权分支）。
-  - `providers.go`：`createProviderRequest`/`updateProviderRequest` 增加额度字段；`HandleCreateProvider`/`HandleUpdateProvider` 透传（0 合法；update 仅非 nil 写入）。
-  - 返回统一沿用现有信封 `{ "data": ... }`（**不**用 `{code,data,message}`）。
+- **优先级**：P0
+- **改动**：模型加两字段；`ListProviders`/`GetProvider`/`CreateProvider`(签名扩展)/`UpdateProvider`/`BuildMaskedProviders` 读写两列；`store_test.go` 7 处 `CreateProvider` 补参（传 0）。
+- **注意**：`CreateProvider` 签名变更是**编译阻断**，须同步更新 `internal/proxy/passthrough_test.go`、`passthrough_qa_test.go`、`internal/provider/store_passthrough_test.go`（各 1~2 处，T05 收口，但需在 T02 后立即改以保 `go build ./...` 通过）。
 
-#### T03 ｜ 前端：上游列表列 + Provider 模态额度配置 + 公共渲染 【P0】
-- **源文件**：`web/admin/index.html`、`web/admin/app.js`、`web/admin/style.css`
+### T03 · 用量判定重构
+- **源文件**：`internal/models/provider_usage.go`、`internal/admin/provider_usage.go`、`internal/admin/handler.go`
 - **依赖**：T01、T02
-- **要点**：
-  - `index.html`：上游列表 `<thead>` 加「本月用量(Token)」「本月用量(次数)」两列；Provider 模态加 `monthly_token_limit`/`monthly_call_limit` 两个 `number` 输入（placeholder "0 = 不限制"）。
-  - `app.js`：
-    - `loadProviders` 内并行 `GET /api/provider-usage`，按 `slug` 合并渲染两列（已用/剩余 + 进度条 + 百分比；无限显示"不限制"；低余额加 `bad`/`low` class）。
-    - `saveProvider` 发送两额度字段；`editProvider` 回填；`openProviderModal` 重置为 0。
-    - 新增 `formatToken(n)`（K/M/亿 缩写）、`renderUsageCell(used, limit, low)`（进度条+百分比+标红复用 helper）。
-  - `style.css`：低余额 `.usage-low`（红色文字）、用量进度条 `.usage-progress`（复用现有 `.token-progress` good/warn/bad 语义）。
+- **优先级**：P0
+- **改动**：`IsLowBalance` 加 ratio 参、删 `LowBalanceRatio`；`BuildProviderUsageView` 加两全局比例参并解析 effectiveRatio；`Handler` 增 `Config` 字段 + `globalTokenLowRatio/globalCallLowRatio` 回退 helper；两处 handler 注入全局比例。
 
-#### T04 ｜ 前端：开账号表单实时提示 + 独立额度仪表盘页 【P0】
-- **源文件**：`web/admin/index.html`、`web/admin/app.js`、`web/admin/style.css`
+### T04 · 管理 API 透传
+- **源文件**：`internal/admin/providers.go`、`main.go`
 - **依赖**：T01、T02
-- **要点**：
-  - `index.html`：创建/编辑用户模态的 `fixed_provider` 选择框下方加「上游剩余额度」提示块（`<div id="new-provider-usage">` / `<div id="update-provider-usage">`）；侧栏加「上游额度」导航（`data-tab="provider-usage"`）；新增仪表盘 `<section id="tab-provider-usage">`（标题 + 窗口说明 div + `#provider-usage-grid` 卡片容器）。
-  - `app.js`：
-    - 新增 `fetchProviderUsage(slug)` → `GET /api/providers/{slug}/usage`；创建/编辑模态 `fixed_provider` 的 `change` 事件触发并渲染提示块（未指定显示"未指定/不限制"；低余额标红；**不拦截提交**）。
-    - 新增 `loadProviderUsage()`：拉 `GET /api/provider-usage`，渲染每 provider 卡片（token/call 已用/剩余/进度条/百分比/低余额标红 + 窗口起点 + 更新时间）；空 provider 已用=0。
-    - `switchTab('provider-usage')`、`VALID_TABS` 增加 `provider-usage`；`DOMContentLoaded` 尊重 `window.__INIT_TAB__`。
-  - `style.css`：`.usage-card` 卡片样式。
+- **优先级**：P0
+- **改动**：`create/updateProviderRequest` 加两 ratio 字段；`HandleCreate/UpdateProvider` 透传（0 合法=继承全局；update 仅非 nil 写入）；`main.go` 接线 `Config: cfg`。
 
----
+### T05 · 前端模态 + 测试适配
+- **源文件**：`web/admin/index.html`、`web/admin/app.js`、`internal/models/provider_usage_test.go`、`internal/models/provider_usage_edge_test.go`（无需改）、`internal/admin/provider_usage_test.go`、`internal/provider/store_passthrough_test.go`、`internal/proxy/passthrough_test.go`、`internal/proxy/passthrough_qa_test.go`
+- **依赖**：T03、T04
+- **优先级**：P1
+- **改动**：模态加两百分比输入；`app.js` 读写并 `/100` 提交；模型单测适配新签名（改写 `TestBuildProviderUsageView` 断言以校验 effectiveRatio）；proxy/passthrough 单测补 `CreateProvider` 两参；建议 admin 单测补一条注入 `Config.ProviderQuota` 验证 per-provider 覆盖。
 
-### 8. 共享知识（跨文件约定，供 Engineer 实现时统一）
-
-1. **响应信封**：admin API 沿用现有 `{ "data": ... }`（`writeJSON(w, status, map[string]any{"data": x})`）。列表类包数组、单对象类包对象。**不要**引入 `{code,data,message}`。
-2. **低余额判定单一真相源**：`models.IsLowBalance(used, limit)`（无限 limit==0 ⇒ false；`used/limit >= 0.9` ⇒ true）。前端**只读**后端返回的 `token_low`/`call_low` 布尔来标红，不自算阈值。
-3. **无限语义**：`limit == 0` ⇒ 无限；视图 `TokenUnlimited/CallUnlimited = true`，`TokenRemaining/CallRemaining = -1`；前端显示"不限制/无限"。
-4. **窗口起点**：一律用 `models.RollingWindowStart()`（SH RFC3339），前端不得自行计算窗口；`created_at >= windowStart` 文本比较即可（同格式）。
-5. **数字格式化 helper（前端）**：`formatToken(n)`：`<1e3` 原值；`<1e6` → `X.XK`；`<1e8` → `X.XXM`；`≥1e8` → `X.XX亿`（保留至多 2 位小数，去尾零）。次数一律 `.toLocaleString()` 千分位。
-6. **进度条 + 标红 CSS 约定**：百分比 `pct = min(100, round(used/limit*100))`；class 取 `pct>80?'bad':pct>50?'warn':'good'`，低余额额外加 `usage-low`（红字）。无限时不渲染进度条，显示"不限制"。
-7. **前端调 admin API 取额度**：
-   - 列表/仪表盘：`GET api/provider-usage`（相对路径，同 `apiFetch` 现有用法）。
-   - 开账号提示：`GET api/providers/<slug>/usage`。
-   - 这两个端点均受 `AdminSessionAuthAPI` 保护（`/api/` 前缀自动鉴权），与现有列表 API 一致。
-8. **不拦截原则**：开账号表单的额度提示只读展示，任何异常（如请求失败）都**不**阻止表单提交；失败时在提示块显示"获取失败"，不抛错阻断。
-
----
-
-### 9. 任务依赖图（Mermaid）
-
-见 `docs/sequence-diagram.mermaid` 同目录；依赖关系：T01 → {T02} → {T03, T04}，T03 与 T04 相互独立。
-
+### 依赖图（Mermaid）
 ```mermaid
 graph TD
-    T01["T01 数据层：迁移+模型+聚合查询 (P0)"]
-    T02["T02 后端：聚合API+额度配置接口 (P0)"]
-    T03["T03 前端：列表列+Provider模态配置+公共渲染 (P0)"]
-    T04["T04 前端：开账号提示+独立仪表盘页 (P0)"]
-    T01 --> T02
+    T01[T01 配置段+迁移] --> T02[T02 模型+Store]
+    T01 --> T03[T03 用量判定重构]
     T02 --> T03
+    T01 --> T04[T04 管理API透传]
     T02 --> T04
+    T03 --> T05[T05 前端模态+测试]
+    T04 --> T05
 ```
+
+---
+
+## 6. 依赖包
+**无新依赖**（沿用 `gopkg.in/yaml.v3`、`database/sql` + SQLite 驱动、`net/http`）。
+
+---
+
+## 7. 共享知识（跨文件约定）
+
+- **比例单位**：config / DB / 后端接口字段均存**比例**（如 `0.10` = 10%）。前端输入框用**百分比整数**（如 `10`）；提交时 `/100` 转比例。约定：`frontend% / 100 == backend ratio == DB REAL`。
+- **effectiveRatio 单一真相源**：只在 `models.BuildProviderUsageView` 内解析（`p.ratio>0 ? p.ratio : global`）；其余调用方（前端渲染、handler）一律不重算阈值。
+- **0 = 继承全局**：DB 列 `DEFAULT 0`；provider 记录 `MonthlyTokenLowRatio==0` 表示继承 `Config.ProviderQuota.DefaultTokenLowRatio`。`SeedFromConfig` 落 0 即继承。
+- **无限语义延续**：`limit<=0` 永不标红（`IsLowBalance` 直接 false）；超限仅可见不拦截（真实负值标红）。
+- **前后端字段名**：`monthly_token_low_ratio` / `monthly_call_low_ratio`（比例）。前端读 `providerDetail` JSON 同名（由 `ProviderWithMaskedKey` 序列化），编辑时 `*100` 显示、保存时 `/100` 提交。
+- **不拦截原则延续**：本次仅改变「何时标红」，不影响路由/配额拦截行为。
+- **全局默认仅 config.yaml（非 UI）**：`provider_quota` 段不提供前端编辑入口（按已确认决策）。
+
+---
+
+## 8. 待明确事项（PRD 待确认 + 我的默认假设）
+
+| # | 事项 | 我的默认假设（非阻塞，已按此设计） | 需用户拍板？ |
+|---|---|---|---|
+| 1 | 全局默认阈值是否提供 UI 编辑 | 否，仅 `config.yaml` 的 `provider_quota` 段（按确认决策） | 否（已确认） |
+| 2 | `REAL` 精度是否够 | 够；比例 0.001~1.0 远大于 float64/REAL 精度，无问题 | 否 |
+| 3 | 百分比↔比例转换点 | 前端输入百分比、提交 `/100`；后端/DB 全程比例 | 否 |
+| 4 | `ratio > 1` 是否拒绝 | 不拒绝（语义=「用量超过上限即标红」，如 1.5 表示 150% 才标红，合法且罕见）；前端 `max=100` 软约束，后端不做上限校验 | **建议确认**：是否要后端对 >1 返回 400 |
+| 5 | 负 ratio / 非数值 | 前端 `min=0` 拦截；后端收到负 REAL 时 `used/limit >= 负` 恒 true（即永远标红）——属异常配置，不在本次防护范围 | 否（异常输入） |
+| 6 | update 时传 `0` 的语义 | 与现状一致：`0` 非 nil **会写入**（即显式设为 0 = 继承全局）。前端「留空」才不传该字段（不覆盖） | 否（与现状一致） |
+| 7 | `LowBalanceRatio` 常量 | 移除（无引用，避免死代码）；如其他包另有引用需保留——已 grep 确认仅本文件使用 | 否 |
+
+> 唯一建议用户拍板项：**#4 是否对 `ratio > 1`（或 <0）做后端拒绝**。当前设计为「不拒绝、合法透传」；若需强校验，建议在 `HandleCreate/UpdateProvider` 增加 `if r > 1 { 400 }`。

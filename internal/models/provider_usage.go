@@ -8,11 +8,6 @@ import (
 	"llm_api_gateway/internal/timeutil"
 )
 
-// LowBalanceRatio is the default low-balance threshold: when used/limit >= this
-// ratio (i.e. remaining < 10%), the provider is flagged as "low balance".
-// Global and shared across token and call-count dimensions.
-const LowBalanceRatio = 0.9
-
 // RollingWindowStart returns the start of the rolling 30-day window as an
 // RFC3339 timestamp in Asia/Shanghai. It is now-30*24h, formatted in the same
 // timezone/layout as call_logs.created_at so the two can be compared directly
@@ -98,23 +93,32 @@ type ProviderUsageView struct {
 	CallRemaining     int64  `json:"call_remaining"` // -1 when unlimited; may be negative if over limit
 	CallUnlimited     bool   `json:"call_unlimited"`
 	WindowStart       string `json:"window_start"` // Asia/Shanghai RFC3339
-	TokenLow          bool   `json:"token_low"`    // remaining < 10% -> flag red
+	TokenLow          bool   `json:"token_low"`    // remaining < threshold -> flag red (threshold is configurable)
 	CallLow           bool   `json:"call_low"`
 }
 
 // IsLowBalance is the single source of truth for low-balance detection.
-// An unlimited provider (limit <= 0) is never low. Otherwise low when
-// used/limit >= LowBalanceRatio.
-func IsLowBalance(used, limit int64) bool {
+// remainingRatio is the "remaining threshold" (e.g. 0.10 = "flag red when
+// < 10% remains"). An unlimited provider (limit <= 0) is never low. Otherwise
+// low when used/limit >= (1 - remainingRatio), i.e. when the remaining
+// fraction drops below remainingRatio. (Over-limit usage is still flagged low,
+// but only for display — never used to block requests.)
+func IsLowBalance(used, limit int64, remainingRatio float64) bool {
 	if limit <= 0 {
 		return false
 	}
-	return float64(used)/float64(limit) >= LowBalanceRatio
+	usedRatio := float64(used) / float64(limit)
+	return usedRatio >= (1 - remainingRatio)
 }
 
 // BuildProviderUsageView synthesizes a ProviderUsageView from a provider record
 // and its raw usage. A nil/empty usage is treated as zero usage.
-func BuildProviderUsageView(p ProviderRecord, used *ProviderMonthlyUsage, windowStart string) ProviderUsageView {
+//
+// globalTokenRemainingRatio / globalCallRemainingRatio are the global default
+// thresholds (remaining ratio) from config.ProviderQuota. A per-provider
+// override (MonthlyTokenLowRatio / MonthlyCallLowRatio > 0) takes precedence
+// over the global default; 0 means "inherit the global default".
+func BuildProviderUsageView(p ProviderRecord, used *ProviderMonthlyUsage, windowStart string, globalTokenRemainingRatio, globalCallRemainingRatio float64) ProviderUsageView {
 	view := ProviderUsageView{
 		Slug:              p.Slug,
 		Name:              p.Name,
@@ -145,7 +149,17 @@ func BuildProviderUsageView(p ProviderRecord, used *ProviderMonthlyUsage, window
 		view.CallRemaining = p.MonthlyCallLimit - callUsed
 	}
 
-	view.TokenLow = IsLowBalance(tokenUsed, p.MonthlyTokenLimit)
-	view.CallLow = IsLowBalance(callUsed, p.MonthlyCallLimit)
+	// Resolve effective threshold: per-provider override wins over global default.
+	tokenRatio := globalTokenRemainingRatio
+	if p.MonthlyTokenLowRatio > 0 {
+		tokenRatio = p.MonthlyTokenLowRatio
+	}
+	callRatio := globalCallRemainingRatio
+	if p.MonthlyCallLowRatio > 0 {
+		callRatio = p.MonthlyCallLowRatio
+	}
+
+	view.TokenLow = IsLowBalance(tokenUsed, p.MonthlyTokenLimit, tokenRatio)
+	view.CallLow = IsLowBalance(callUsed, p.MonthlyCallLimit, callRatio)
 	return view
 }
