@@ -20,6 +20,7 @@ type ProviderRecord struct {
 	// ── Low-balance thresholds (remaining ratio; 0 = inherit global default) ──
 	MonthlyTokenLowRatio float64 `json:"monthly_token_low_ratio"` // 0 = 继承全局默认
 	MonthlyCallLowRatio  float64 `json:"monthly_call_low_ratio"`  // 0 = 继承全局默认
+	CycleStartDate       string  `json:"cycle_start_date"`        // "2006-01-02" DATE string, anchor for fixed 30-day cycles
 	CreatedAt            string  `json:"created_at"`
 	UpdatedAt            string  `json:"updated_at"`
 }
@@ -64,6 +65,7 @@ type ProviderWithMaskedKey struct {
 	// ── Low-balance thresholds (remaining ratio; 0 = inherit global default) ──
 	MonthlyTokenLowRatio float64 `json:"monthly_token_low_ratio"` // 0 = 继承全局默认
 	MonthlyCallLowRatio  float64 `json:"monthly_call_low_ratio"`  // 0 = 继承全局默认
+	CycleStartDate       string  `json:"cycle_start_date"`        // "2006-01-02" DATE string, anchor for fixed 30-day cycles
 	CreatedAt            string  `json:"created_at"`
 	UpdatedAt            string  `json:"updated_at"`
 }

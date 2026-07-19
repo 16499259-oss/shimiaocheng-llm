@@ -66,7 +66,7 @@ func TestIsLowBalance(t *testing.T) {
 
 func TestBuildProviderUsageView(t *testing.T) {
 	// Unlimited provider (limits == 0): never low regardless of global ratio.
-	v := BuildProviderUsageView(ProviderRecord{Slug: "p1", MonthlyTokenLimit: 0, MonthlyCallLimit: 0}, nil, "2026-01-01T00:00:00+08:00", 0.10, 0.10)
+	v := BuildProviderUsageView(ProviderRecord{Slug: "p1", MonthlyTokenLimit: 0, MonthlyCallLimit: 0}, nil, nil, 0.10, 0.10)
 	if !v.TokenUnlimited || !v.CallUnlimited {
 		t.Error("expected unlimited flags true")
 	}
@@ -79,7 +79,7 @@ func TestBuildProviderUsageView(t *testing.T) {
 
 	// Within limit, global remaining ratio 0.10.
 	v = BuildProviderUsageView(ProviderRecord{Slug: "p2", MonthlyTokenLimit: 1000, MonthlyCallLimit: 100},
-		&ProviderMonthlyUsage{Slug: "p2", TokenUsed: 500, CallUsed: 40}, "w", 0.10, 0.10)
+		&ProviderMonthlyUsage{Slug: "p2", TokenUsed: 500, CallUsed: 40}, nil, 0.10, 0.10)
 	if v.TokenRemaining != 500 || v.CallRemaining != 60 {
 		t.Errorf("remaining wrong: tok=%d call=%d", v.TokenRemaining, v.CallRemaining)
 	}
@@ -94,7 +94,7 @@ func TestBuildProviderUsageView(t *testing.T) {
 	// Token used 850/1000 = 15% remaining < 20% -> low. Call used 95/100 = 5% remaining <10% -> low.
 	v = BuildProviderUsageView(ProviderRecord{Slug: "p3", MonthlyTokenLimit: 1000, MonthlyCallLimit: 100,
 		MonthlyTokenLowRatio: 0.20, MonthlyCallLowRatio: 0.10},
-		&ProviderMonthlyUsage{Slug: "p3", TokenUsed: 850, CallUsed: 95}, "w", 0.10, 0.10)
+		&ProviderMonthlyUsage{Slug: "p3", TokenUsed: 850, CallUsed: 95}, nil, 0.10, 0.10)
 	if !v.TokenLow {
 		t.Error("p3 token should be low (15% remaining < 20% override)")
 	}
@@ -105,7 +105,7 @@ func TestBuildProviderUsageView(t *testing.T) {
 	// Per-provider independent: token low but call NOT low.
 	// Token used 920/1000 = 8% remaining (<10% global) -> low. Call used 50/100 = 50% remaining -> not low.
 	v = BuildProviderUsageView(ProviderRecord{Slug: "p4", MonthlyTokenLimit: 1000, MonthlyCallLimit: 100},
-		&ProviderMonthlyUsage{Slug: "p4", TokenUsed: 920, CallUsed: 50}, "w", 0.10, 0.10)
+		&ProviderMonthlyUsage{Slug: "p4", TokenUsed: 920, CallUsed: 50}, nil, 0.10, 0.10)
 	if !v.TokenLow {
 		t.Error("p4 token should be low (8% remaining)")
 	}
@@ -115,7 +115,7 @@ func TestBuildProviderUsageView(t *testing.T) {
 
 	// Over limit -> low + negative remaining.
 	v = BuildProviderUsageView(ProviderRecord{Slug: "p5", MonthlyTokenLimit: 1000, MonthlyCallLimit: 100},
-		&ProviderMonthlyUsage{Slug: "p5", TokenUsed: 1500, CallUsed: 120}, "w", 0.10, 0.10)
+		&ProviderMonthlyUsage{Slug: "p5", TokenUsed: 1500, CallUsed: 120}, nil, 0.10, 0.10)
 	if v.TokenRemaining != -500 || v.CallRemaining != -20 {
 		t.Errorf("over-limit remaining wrong: tok=%d call=%d", v.TokenRemaining, v.CallRemaining)
 	}
@@ -124,7 +124,7 @@ func TestBuildProviderUsageView(t *testing.T) {
 	}
 
 	// nil usage -> treats used as zero, remaining == limit.
-	v = BuildProviderUsageView(ProviderRecord{Slug: "p6", MonthlyTokenLimit: 100, MonthlyCallLimit: 10}, nil, "w", 0.10, 0.10)
+	v = BuildProviderUsageView(ProviderRecord{Slug: "p6", MonthlyTokenLimit: 100, MonthlyCallLimit: 10}, nil, nil, 0.10, 0.10)
 	if v.TokenUsed != 0 || v.CallUsed != 0 {
 		t.Error("nil usage should yield zero used")
 	}
@@ -149,7 +149,7 @@ func TestBuildProviderUsageView_PerProviderIndependence(t *testing.T) {
 	v := BuildProviderUsageView(ProviderRecord{
 		Slug: "a", MonthlyTokenLimit: 1000, MonthlyCallLimit: 100,
 		MonthlyTokenLowRatio: 0.10, MonthlyCallLowRatio: 0,
-	}, &ProviderMonthlyUsage{Slug: "a", TokenUsed: 920, CallUsed: 80}, "w", gTok, gCall)
+	}, &ProviderMonthlyUsage{Slug: "a", TokenUsed: 920, CallUsed: 80}, nil, gTok, gCall)
 	if !v.TokenLow {
 		t.Error("A: token should be low (8% remaining < 10% override)")
 	}
@@ -164,7 +164,7 @@ func TestBuildProviderUsageView_PerProviderIndependence(t *testing.T) {
 	v = BuildProviderUsageView(ProviderRecord{
 		Slug: "b", MonthlyTokenLimit: 1000, MonthlyCallLimit: 100,
 		MonthlyTokenLowRatio: 0.05, MonthlyCallLowRatio: 0,
-	}, &ProviderMonthlyUsage{Slug: "b", TokenUsed: 920, CallUsed: 80}, "w", gTok, gCall)
+	}, &ProviderMonthlyUsage{Slug: "b", TokenUsed: 920, CallUsed: 80}, nil, gTok, gCall)
 	if v.TokenLow {
 		t.Error("B: token should NOT be low (8% remaining > 5% override); proves override is honoured, not global")
 	}
@@ -179,7 +179,7 @@ func TestBuildProviderUsageView_PerProviderIndependence(t *testing.T) {
 	v = BuildProviderUsageView(ProviderRecord{
 		Slug: "c", MonthlyTokenLimit: 1000, MonthlyCallLimit: 100,
 		MonthlyTokenLowRatio: 0, MonthlyCallLowRatio: 0.05,
-	}, &ProviderMonthlyUsage{Slug: "c", TokenUsed: 920, CallUsed: 80}, "w", gTok, gCall)
+	}, &ProviderMonthlyUsage{Slug: "c", TokenUsed: 920, CallUsed: 80}, nil, gTok, gCall)
 	if !v.TokenLow {
 		t.Error("C: token should be low (8% remaining < 10% global)")
 	}
@@ -241,5 +241,227 @@ func TestGetProviderUsage(t *testing.T) {
 	}
 	if u.TokenUsed != 300 || u.CallUsed != 4 {
 		t.Errorf("got tok=%d call=%d want 300/4", u.TokenUsed, u.CallUsed)
+	}
+}
+
+// TestCurrentCycleWindow validates the fixed 30-day cycle window computation
+// for various cycleStartDate inputs.
+func TestCurrentCycleWindow(t *testing.T) {
+	now := time.Now().In(timeutil.ShanghaiTZ)
+	today := now.Format("2006-01-02")
+
+	tests := []struct {
+		name          string
+		cycleStart    string
+		wantStartSame bool // start == cycleStart when today is within first 30 days
+	}{
+		{"today", today, true},
+		{"31 days ago", now.AddDate(0, 0, -31).Format("2006-01-02"), false},
+		{"60 days ago", now.AddDate(0, 0, -60).Format("2006-01-02"), false},
+		{"empty fallback", "", true},
+		{"unparseable fallback", "not-a-date", false}, // fallback to today, won't match the bad input
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			start, end := CurrentCycleWindow(tt.cycleStart)
+			if start == "" || end == "" {
+				t.Fatal("empty start/end")
+			}
+			// start must be <= today < end
+			if start > today {
+				t.Errorf("start=%s > today=%s", start, today)
+			}
+			if today >= end {
+				t.Errorf("today=%s >= end=%s (should be within cycle)", today, end)
+			}
+			// end is exactly start + 30 days
+			st, _ := time.ParseInLocation("2006-01-02", start, timeutil.ShanghaiTZ)
+			en, _ := time.ParseInLocation("2006-01-02", end, timeutil.ShanghaiTZ)
+			if diff := en.Sub(st).Hours() / 24; diff != 30 {
+				t.Errorf("cycle span = %v days, want 30", diff)
+			}
+			if tt.wantStartSame && start != tt.cycleStart && tt.cycleStart != "" {
+				t.Errorf("expected start==cycleStart (%s), got %s", tt.cycleStart, start)
+			}
+		})
+	}
+
+	// Cross-month boundary: verify N increases after 30 days.
+	// With cycleStart = "2026-01-15", today is past that.
+	start, end := CurrentCycleWindow("2026-01-15")
+	st, _ := time.ParseInLocation("2006-01-02", start, timeutil.ShanghaiTZ)
+	en, _ := time.ParseInLocation("2006-01-02", end, timeutil.ShanghaiTZ)
+	// start should be a multiple of 30 days from 2026-01-15
+	anchor, _ := time.ParseInLocation("2006-01-02", "2026-01-15", timeutil.ShanghaiTZ)
+	offset := int(st.Sub(anchor).Hours() / 24)
+	if offset%30 != 0 {
+		t.Errorf("start offset %d days not a multiple of 30", offset)
+	}
+	if en.Sub(st).Hours()/24 != 30 {
+		t.Errorf("span not 30 days")
+	}
+}
+
+// allocationTestDB creates a test DB with users, quotas, providers, and call_logs
+// tables suitable for allocation tests.
+func allocationTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	conn := usageTestDB(t)
+
+	// Seed a provider so GetProviderAllocation has a fixed_provider to match.
+	if _, err := conn.Exec(
+		`INSERT INTO providers (name, slug, endpoint, encrypted_key, is_default, enabled, monthly_token_limit, monthly_call_limit, cycle_start_date, created_at, updated_at)
+		 VALUES ('test', 'test', 'https://test', X'00', 0, 1, 1000, 100, '2026-01-01', datetime('now'), datetime('now'))`,
+	); err != nil {
+		t.Fatalf("seed provider: %v", err)
+	}
+
+	return conn
+}
+
+// seedAllocUser inserts a user + quota pair for allocation testing.
+func seedAllocUser(t *testing.T, conn *sql.DB, username string, fixedProvider, status, expiresAt string, tokenLimit, callLimit int) {
+	t.Helper()
+	res, err := conn.Exec(
+		`INSERT INTO users (username, password_hash, sub_key_hash, sub_key_preview, role, status, fixed_provider, expires_at, created_at, updated_at)
+		 VALUES (?, 'x', ?, ?, 'user', ?, ?, ?, datetime('now'), datetime('now'))`,
+		username, "hash-"+username, "pre-"+username, status, fixedProvider, expiresAt,
+	)
+	if err != nil {
+		t.Fatalf("seed user %s: %v", username, err)
+	}
+	uid, _ := res.LastInsertId()
+	if _, err := conn.Exec(
+		`INSERT INTO quotas (user_id, quota_token_total_limit, quota_total_limit, window_start, updated_at)
+		 VALUES (?, ?, ?, datetime('now'), datetime('now'))`,
+		uid, tokenLimit, callLimit,
+	); err != nil {
+		t.Fatalf("seed quota for %s: %v", username, err)
+	}
+}
+
+// TestGetProviderAllocation verifies cross-table allocation aggregation with
+// proper 0-semantics (Token: 0=unlimited, Call: 0=locked).
+func TestGetProviderAllocation(t *testing.T) {
+	conn := allocationTestDB(t)
+
+	// User A: fixed_provider=test, active, not expired, token=1000, call=100.
+	seedAllocUser(t, conn, "a", "test", "active", "", 1000, 100)
+	// User B: fixed_provider=test, active, token=0 (unlimited), call=50.
+	seedAllocUser(t, conn, "b", "test", "active", "", 0, 50)
+	// User C: fixed_provider=other (should be excluded).
+	seedAllocUser(t, conn, "c", "other", "active", "", 500, 50)
+	// User D: fixed_provider=test, disabled (should be excluded).
+	seedAllocUser(t, conn, "d", "test", "disabled", "", 500, 50)
+	// User E: fixed_provider=test, active, expired yesterday.
+	yesterday := time.Now().Add(-24 * time.Hour).Format(time.RFC3339)
+	seedAllocUser(t, conn, "e", "test", "active", yesterday, 500, 50)
+	// User F: fixed_provider=test, active, token=0, call=0 (token=unlimited, call=locked).
+	seedAllocUser(t, conn, "f", "test", "active", "", 0, 0)
+
+	alloc, err := GetProviderAllocation(conn, "test")
+	if err != nil {
+		t.Fatalf("GetProviderAllocation: %v", err)
+	}
+
+	// allocated_tokens: A(1000) + B(0, excluded) + F(0, excluded) = 1000
+	if alloc.AllocatedTokens != 1000 {
+		t.Errorf("allocated_tokens=%d want 1000", alloc.AllocatedTokens)
+	}
+	// allocated_calls: A(100) + B(50) + F(0, excluded) = 150
+	if alloc.AllocatedCalls != 150 {
+		t.Errorf("allocated_calls=%d want 150", alloc.AllocatedCalls)
+	}
+	// unlimited_user_count: B(token=0) + F(token=0) = 2
+	if alloc.UnlimitedUserCount != 2 {
+		t.Errorf("unlimited_user_count=%d want 2", alloc.UnlimitedUserCount)
+	}
+}
+
+// TestGetProviderAllocation_NoUsers verifies that a provider with no fixed users
+// returns zeros across the board (not an error).
+func TestGetProviderAllocation_NoUsers(t *testing.T) {
+	conn := allocationTestDB(t)
+	alloc, err := GetProviderAllocation(conn, "test")
+	if err != nil {
+		t.Fatalf("GetProviderAllocation(no users): %v", err)
+	}
+	if alloc.AllocatedTokens != 0 || alloc.AllocatedCalls != 0 || alloc.UnlimitedUserCount != 0 {
+		t.Errorf("expected all-zero allocation, got %+v", alloc)
+	}
+}
+
+// TestAllocationLow verifies that AllocationLow is computed independently of
+// consumption low flags, using the same IsLowBalance logic.
+func TestAllocationLow(t *testing.T) {
+	// Provider with limit 1000, global threshold 0.10.
+	// Allocated 950 → 5% remaining → IsLowBalance(950, 1000, 0.10) = true.
+	p := ProviderRecord{
+		Slug: "test", Name: "Test",
+		MonthlyTokenLimit: 1000,
+		MonthlyCallLimit:  100,
+	}
+	alloc := &ProviderAllocation{
+		AllocatedTokens: 950,
+		AllocatedCalls:  10,
+	}
+	view := BuildProviderUsageView(p, nil, alloc, 0.10, 0.10)
+	if !view.AllocationLow {
+		t.Error("950/1000 tokens (5% remaining) should trigger AllocationLow")
+	}
+	if view.TokenLow || view.CallLow {
+		t.Error("nil usage should not trigger TokenLow/CallLow")
+	}
+
+	// Allocated within threshold: 500/1000 tokens (50% remaining) → not low.
+	alloc2 := &ProviderAllocation{AllocatedTokens: 500, AllocatedCalls: 10}
+	view2 := BuildProviderUsageView(p, nil, alloc2, 0.10, 0.10)
+	if view2.AllocationLow {
+		t.Error("500/1000 tokens should NOT trigger AllocationLow")
+	}
+
+	// Call dimension triggers AllocationLow: tokens fine but calls over.
+	alloc3 := &ProviderAllocation{AllocatedTokens: 500, AllocatedCalls: 95}
+	view3 := BuildProviderUsageView(p, nil, alloc3, 0.10, 0.10)
+	if !view3.AllocationLow {
+		t.Error("95/100 calls (5% remaining) should trigger AllocationLow via call dimension")
+	}
+
+	// Unlimited provider (limit <= 0): never low.
+	pUnlimited := ProviderRecord{Slug: "u", Name: "U", MonthlyTokenLimit: 0, MonthlyCallLimit: 0}
+	allocU := &ProviderAllocation{AllocatedTokens: 99999, AllocatedCalls: 99999}
+	viewU := BuildProviderUsageView(pUnlimited, nil, allocU, 0.10, 0.10)
+	if viewU.AllocationLow {
+		t.Error("unlimited provider must never be flagged allocation-low")
+	}
+}
+
+// TestBuildProviderUsageView_CycleInfo verifies that cycle start/end and
+// days remaining are populated correctly.
+func TestBuildProviderUsageView_CycleInfo(t *testing.T) {
+	now := time.Now().In(timeutil.ShanghaiTZ)
+	today := now.Format("2006-01-02")
+
+	p := ProviderRecord{
+		Slug: "test", Name: "Test",
+		CycleStartDate:    today,
+		MonthlyTokenLimit: 1000,
+		MonthlyCallLimit:  100,
+	}
+	view := BuildProviderUsageView(p, nil, nil, 0.10, 0.10)
+
+	if view.CycleStart != today {
+		t.Errorf("CycleStart=%s want %s", view.CycleStart, today)
+	}
+	if view.CycleEnd == "" || view.CycleEnd <= today {
+		t.Errorf("CycleEnd=%s should be after today %s", view.CycleEnd, today)
+	}
+	if view.CycleDaysRemaining < 0 || view.CycleDaysRemaining > 30 {
+		t.Errorf("CycleDaysRemaining=%d out of range [0,30]", view.CycleDaysRemaining)
+	}
+	// WindowStart should match CycleStart.
+	if view.WindowStart != view.CycleStart {
+		t.Errorf("WindowStart=%s != CycleStart=%s", view.WindowStart, view.CycleStart)
 	}
 }

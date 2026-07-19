@@ -104,8 +104,8 @@
                     <button class="btn btn-primary" onclick="openProviderModal()">+ 新增上游</button>
                 </div>
                 <table class="table" id="providers-table">
-                    <thead><tr><th>ID</th><th>名称</th><th>Slug</th><th>端点</th><th>Key</th><th>默认</th><th>透传</th><th>状态</th><th>本月 Token</th><th>本月 调用</th><th>创建时间</th><th>操作</th></tr></thead>
-                    <tbody id="providers-tbody"><tr><td colspan="12" class="text-center">加载中...</td></tr></tbody>
+                    <thead><tr><th>ID</th><th>名称</th><th>Slug</th><th>端点</th><th>Key</th><th>默认</th><th>透传</th><th>状态</th><th>本月 Token</th><th>已分配 Token</th><th>本月 调用</th><th>已分配 调用</th><th>创建时间</th><th>操作</th></tr></thead>
+                    <tbody id="providers-tbody"><tr><td colspan="14" class="text-center">加载中...</td></tr></tbody>
                 </table>
             </section>
 
@@ -161,7 +161,7 @@
                     <h2 class="tab-title">📡 上游额度</h2>
                     <button class="btn btn-sm" onclick="loadProviderUsage()">🔄 刷新</button>
                 </div>
-                <p class="cs-note">滚动 30 天窗口（now-30d，Asia/Shanghai）。剩余低于各自阈值时标红提醒（全局默认 &lt; 10%，可逐上游覆盖；仅展示，不拦截请求）。</p>
+                <p class="cs-note">固定 30 天周期（基于 cycle_start_date 锚点，Asia/Shanghai）。剩余低于各自阈值时标红提醒（全局默认 &lt; 10%，可逐上游覆盖；仅展示，不拦截请求）。</p>
                 <div class="usage-grid" id="provider-usage-cards"></div>
             </section>
 
@@ -304,6 +304,11 @@
                 </div>
                 <hr class="form-divider">
                 <p class="form-section-title">月度额度（可选，0 = 不限制）</p>
+                <div class="form-group">
+                    <label for="prov-cycle-start-date">周期起始日期</label>
+                    <input type="date" id="prov-cycle-start-date">
+                    <small class="form-hint">固定 30 天周期的起始锚点日期；新建默认当天，编辑可改。</small>
+                </div>
                 <div class="form-group">
                     <label for="prov-monthly-token-limit">月度 Token 上限</label>
                     <input type="number" id="prov-monthly-token-limit" min="0" step="1" placeholder="0 = 不限制">

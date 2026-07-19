@@ -12,8 +12,41 @@ import (
 // RFC3339 timestamp in Asia/Shanghai. It is now-30*24h, formatted in the same
 // timezone/layout as call_logs.created_at so the two can be compared directly
 // as text (created_at >= windowStart).
+//
+// Deprecated: Use CurrentCycleWindow for fixed 30-day cycle windows (V3).
+// Kept for backward compatibility with external callers.
 func RollingWindowStart() string {
 	return time.Now().Add(-30 * 24 * time.Hour).In(timeutil.ShanghaiTZ).Format(time.RFC3339)
+}
+
+// CurrentCycleWindow computes the current 30-day fixed cycle [start, end)
+// anchored on cycleStartDate. Both returned strings are "2006-01-02" DATE
+// values in Asia/Shanghai.
+//
+//	N = FLOOR(DATEDIFF(NOW(), cycleStart) / 30)
+//	start = cycleStart + N*30d
+//	end   = cycleStart + (N+1)*30d
+//
+// If cycleStartDate is empty or unparseable, it falls back to today's date.
+func CurrentCycleWindow(cycleStartDate string) (start, end string) {
+	now := time.Now().In(timeutil.ShanghaiTZ)
+
+	cycleStart, err := time.ParseInLocation("2006-01-02", cycleStartDate, timeutil.ShanghaiTZ)
+	if err != nil {
+		// Fallback: anchor on today.
+		cycleStart = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, timeutil.ShanghaiTZ)
+	}
+
+	days := int(now.Sub(cycleStart).Hours() / 24)
+	n := days / 30
+	if n < 0 {
+		n = 0
+	}
+
+	startTime := cycleStart.AddDate(0, 0, n*30)
+	endTime := cycleStart.AddDate(0, 0, (n+1)*30)
+
+	return startTime.Format("2006-01-02"), endTime.Format("2006-01-02")
 }
 
 // ProviderMonthlyUsage is the raw aggregated usage (within the rolling window)
@@ -25,7 +58,10 @@ type ProviderMonthlyUsage struct {
 }
 
 // AggregateProviderUsage aggregates token and call usage for every provider
-// within the rolling window in a single GROUP BY query.
+// within the given window in a single GROUP BY query.
+//
+// windowStart should be an RFC3339 timestamp (e.g. "2026-01-01T00:00:00+08:00")
+// for comparison against call_logs.created_at.
 //
 // Providers with no calls in the window are simply absent from the returned
 // map; callers should treat a missing entry as zero usage.
@@ -61,7 +97,8 @@ func AggregateProviderUsage(db *sql.DB, windowStart string) (map[string]*Provide
 }
 
 // GetProviderUsage returns the token and call usage for a single provider
-// within the rolling window. Used by the account-creation form hint.
+// within the given window. Used by the account-creation form hint.
+// windowStart should be an RFC3339 timestamp.
 func GetProviderUsage(db *sql.DB, slug, windowStart string) (*ProviderMonthlyUsage, error) {
 	var u ProviderMonthlyUsage
 	u.Slug = slug
@@ -78,6 +115,49 @@ func GetProviderUsage(db *sql.DB, slug, windowStart string) (*ProviderMonthlyUsa
 	return &u, nil
 }
 
+// ── Allocation aggregation (V3) ──
+
+// ProviderAllocation is the aggregated allocated quota for a single provider,
+// computed by cross-table JOIN of users and quotas filtered by fixed_provider.
+type ProviderAllocation struct {
+	AllocatedTokens    int64 `json:"allocated_tokens"`
+	AllocatedCalls     int64 `json:"allocated_calls"`
+	UnlimitedUserCount int64 `json:"unlimited_user_count"` // Token-dimension unlimited users
+}
+
+// GetProviderAllocation cross-table aggregates allocated quota for the given
+// provider. It SUMs quota_token_total_limit (>0 only) and quota_total_limit
+// (>0 only) from all active, non-expired users whose fixed_provider matches.
+//
+// 0-semantics (PR #14, intentionally different between dimensions):
+//   - Token: quota_token_total_limit = 0 → unlimited (excluded from
+//     allocated_tokens SUM, counted in unlimited_user_count).
+//   - Call:  quota_total_limit = 0 → invalid/locked (excluded from
+//     allocated_calls SUM, NOT counted in unlimited_user_count).
+func GetProviderAllocation(db *sql.DB, providerSlug string) (*ProviderAllocation, error) {
+	var a ProviderAllocation
+	err := db.QueryRow(`
+		SELECT
+			COALESCE(SUM(CASE WHEN q.quota_token_total_limit > 0
+			                  THEN q.quota_token_total_limit END), 0),
+			COALESCE(SUM(CASE WHEN q.quota_total_limit > 0
+			                  THEN q.quota_total_limit END), 0),
+			COUNT(CASE WHEN q.quota_token_total_limit = 0
+			           THEN 1 END)
+		FROM users u
+		JOIN quotas q ON u.id = q.user_id
+		WHERE u.fixed_provider = ?
+		  AND u.status = 'active'
+		  AND (u.expires_at = '' OR u.expires_at > datetime('now'))
+	`, providerSlug).Scan(&a.AllocatedTokens, &a.AllocatedCalls, &a.UnlimitedUserCount)
+	if err != nil {
+		return nil, fmt.Errorf("get provider allocation %s: %w", providerSlug, err)
+	}
+	return &a, nil
+}
+
+// ── Provider usage view (V3: dual-column allocation) ──
+
 // ProviderUsageView is the fully computed, frontend-ready view for a single
 // provider: it already folds in remaining/infinite/low-balance decisions so the
 // frontend only renders (never recomputes thresholds).
@@ -92,9 +172,17 @@ type ProviderUsageView struct {
 	CallUsed          int64  `json:"call_used"`
 	CallRemaining     int64  `json:"call_remaining"` // -1 when unlimited; may be negative if over limit
 	CallUnlimited     bool   `json:"call_unlimited"`
-	WindowStart       string `json:"window_start"` // Asia/Shanghai RFC3339
-	TokenLow          bool   `json:"token_low"`    // remaining < threshold -> flag red (threshold is configurable)
+	WindowStart       string `json:"window_start"` // cycle start DATE string (V3)
+	TokenLow          bool   `json:"token_low"`    // remaining < threshold -> flag red
 	CallLow           bool   `json:"call_low"`
+	// ── V3: Allocation (dual-column) ──
+	AllocatedTokens    int64  `json:"allocated_tokens"`
+	AllocatedCalls     int64  `json:"allocated_calls"`
+	UnlimitedUserCount int64  `json:"unlimited_user_count"`
+	AllocationLow      bool   `json:"allocation_low"`       // allocated exceeds threshold
+	CycleStart         string `json:"cycle_start"`          // current cycle start DATE
+	CycleEnd           string `json:"cycle_end"`            // current cycle end DATE (exclusive)
+	CycleDaysRemaining int    `json:"cycle_days_remaining"` // days left in cycle
 }
 
 // IsLowBalance is the single source of truth for low-balance detection.
@@ -114,17 +202,22 @@ func IsLowBalance(used, limit int64, remainingRatio float64) bool {
 // BuildProviderUsageView synthesizes a ProviderUsageView from a provider record
 // and its raw usage. A nil/empty usage is treated as zero usage.
 //
+// alloc is the cross-table allocation aggregate (may be nil if unavailable).
 // globalTokenRemainingRatio / globalCallRemainingRatio are the global default
 // thresholds (remaining ratio) from config.ProviderQuota. A per-provider
 // override (MonthlyTokenLowRatio / MonthlyCallLowRatio > 0) takes precedence
 // over the global default; 0 means "inherit the global default".
-func BuildProviderUsageView(p ProviderRecord, used *ProviderMonthlyUsage, windowStart string, globalTokenRemainingRatio, globalCallRemainingRatio float64) ProviderUsageView {
+func BuildProviderUsageView(p ProviderRecord, used *ProviderMonthlyUsage, alloc *ProviderAllocation, globalTokenRemainingRatio, globalCallRemainingRatio float64) ProviderUsageView {
+	cycleStart, cycleEnd := CurrentCycleWindow(p.CycleStartDate)
+
 	view := ProviderUsageView{
 		Slug:              p.Slug,
 		Name:              p.Name,
 		MonthlyTokenLimit: p.MonthlyTokenLimit,
 		MonthlyCallLimit:  p.MonthlyCallLimit,
-		WindowStart:       windowStart,
+		WindowStart:       cycleStart,
+		CycleStart:        cycleStart,
+		CycleEnd:          cycleEnd,
 	}
 
 	tokenUsed := int64(0)
@@ -161,5 +254,28 @@ func BuildProviderUsageView(p ProviderRecord, used *ProviderMonthlyUsage, window
 
 	view.TokenLow = IsLowBalance(tokenUsed, p.MonthlyTokenLimit, tokenRatio)
 	view.CallLow = IsLowBalance(callUsed, p.MonthlyCallLimit, callRatio)
+
+	// ── V3: Allocation fields ──
+	if alloc != nil {
+		view.AllocatedTokens = alloc.AllocatedTokens
+		view.AllocatedCalls = alloc.AllocatedCalls
+		view.UnlimitedUserCount = alloc.UnlimitedUserCount
+		// AllocationLow: uses same IsLowBalance logic, just with allocated instead of used.
+		view.AllocationLow = IsLowBalance(alloc.AllocatedTokens, p.MonthlyTokenLimit, tokenRatio) ||
+			IsLowBalance(alloc.AllocatedCalls, p.MonthlyCallLimit, callRatio)
+	}
+
+	// ── Cycle days remaining ──
+	endTime, err := time.ParseInLocation("2006-01-02", cycleEnd, timeutil.ShanghaiTZ)
+	if err == nil {
+		now := time.Now().In(timeutil.ShanghaiTZ)
+		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, timeutil.ShanghaiTZ)
+		remaining := int(endTime.Sub(today).Hours() / 24)
+		if remaining < 0 {
+			remaining = 0
+		}
+		view.CycleDaysRemaining = remaining
+	}
+
 	return view
 }
