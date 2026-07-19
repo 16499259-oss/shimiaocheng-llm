@@ -1,46 +1,40 @@
 sequenceDiagram
-    participant C as Client
-    participant M as SubKeyAuth
-    participant DB as SQLite
-    participant H as ProxyHandler
-    participant R as Router
-    participant Q as QuotaChecker
-    participant U as Upstream
+    participant UI as Admin Web (app.js)
+    participant API as Admin Handler (Go)
+    participant Store as ProviderStore
+    participant DB as SQLite (call_logs / providers)
 
-    C->>M: POST /v1/chat/completions<br/>Authorization: Bearer sk-xxx
-    M->>DB: GetUserBySubKeyHash(hash)
-    DB-->>M: User{RouteMode, FixedProvider}
-    M->>M: ctx: user_id, route_mode, fixed_provider
-    M->>H: ServeHTTP
+    Note over UI,DB: ① 上游管理列表加载（P0-3）
+    UI->>API: GET /admin/api/providers
+    API->>Store: ListProviders()
+    Store->>DB: SELECT ... FROM providers (含 monthly_*_limit)
+    DB-->>Store: rows
+    Store-->>API: []ProviderRecord
+    API-->>UI: { data: [ ProviderWithMaskedKey... ] }
+    UI->>API: GET /admin/api/provider-usage
+    API->>DB: SELECT provider_id, SUM(prompt_tokens+completion_tokens), SUM(effective_calls) FROM call_logs WHERE created_at >= ? GROUP BY provider_id
+    DB-->>API: 各 provider 已用
+    API->>Store: ListProviders() (拿 name + 限额)
+    Store-->>API: providers
+    API->>API: BuildProviderUsageView() + IsLowBalance() 逐 provider 合成
+    API-->>UI: { data: [ ProviderUsageView... ] } (含 token_low / call_low)
+    UI->>UI: 按 slug 合并，渲染两列（已用/剩余 + 进度条 + 标红）
 
-    Note over H: === 路由决策 ===
-    alt route_mode == "fixed" AND fixed_provider != ""
-        H->>R: GetProviderBySlug(fixed_provider)
-        alt not found (disabled/deleted)
-            H-->>C: 503 Provider not available
-        else found
-            R-->>H: Provider{ID, Endpoint, APIKey}
-        end
-    else route_mode == "auto" | empty
-        H->>R: ResolveProvider(now)
-        R-->>H: Provider{ID, Endpoint, APIKey}
-    end
+    Note over UI,DB: ② 开账号表单切换 fixed_provider（P0-4，仅提示不拦截）
+    UI->>UI: 用户选择 fixed_provider = slug
+    UI->>API: GET /admin/api/providers/{slug}/usage
+    API->>Store: GetProvider(slug)
+    Store-->>API: ProviderRecord
+    API->>DB: SELECT SUM(...) FROM call_logs WHERE provider_id = ? AND created_at >= ?
+    DB-->>API: token_used, call_used
+    API->>API: BuildProviderUsageView()
+    API-->>UI: { data: ProviderUsageView }
+    UI->>UI: 渲染「上游剩余额度」块（已用/剩余/进度条/标红）<br/>失败也【不】拦截表单提交
 
-    Note over H: === 倍率决策 ===
-    H->>DB: GetFixedMultiplier(userID) FROM quotas
-    alt fixed_multiplier IS NOT NULL
-        DB-->>H: 2.5
-        H->>H: effectiveCalls = ceil(2.5) = 3
-    else fixed_multiplier IS NULL
-        H->>H: multiplier = MultiplierEng.GetEffectiveMultiplier(now)<br/>effectiveCalls = ceil(multiplier)
-    end
-
-    Note over H: === 配额扣减 ===
-    H->>Q: CheckAndDeduct(userID, effectiveCalls)
-    alt quota exceeded
-        H-->>C: 429 Quota exceeded
-    else OK
-        H->>U: Forward request
-        U-->>H: Response
-        H-->>C: Stream / Sync response
-    end
+    Note over UI,DB: ③ 独立额度仪表盘页加载（P1-1）
+    UI->>API: GET /admin/provider-usage (页面)
+    API-->>UI: index.html + window.__INIT_TAB__='provider-usage'
+    UI->>UI: switchTab('provider-usage')
+    UI->>API: GET /admin/api/provider-usage
+    API-->>UI: { data: [ ProviderUsageView... ] }
+    UI->>UI: 渲染每 provider 卡片（进度条 + 低余额标红 + 窗口起点 + 更新时间）

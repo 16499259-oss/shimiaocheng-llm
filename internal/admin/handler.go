@@ -84,6 +84,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("POST /api/mappings", h.HandleCreateMapping)
 	adminMux.HandleFunc("DELETE /api/mappings/{id}", h.HandleDeleteMapping)
 
+	// Provider monthly usage (ADR: upstream monthly quota visibility)
+	adminMux.HandleFunc("GET /api/provider-usage", h.HandleListProviderUsage)
+	adminMux.HandleFunc("GET /api/providers/{slug}/usage", h.HandleGetProviderUsage)
+	adminMux.HandleFunc("GET /provider-usage", h.ServeProviderUsagePage)
+
 	// Routing rules routes
 	adminMux.HandleFunc("GET /api/routing-rules", h.HandleListRoutingRules)
 	adminMux.HandleFunc("POST /api/routing-rules", h.HandleCreateRoutingRule)

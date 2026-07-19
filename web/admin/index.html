@@ -43,6 +43,7 @@
                 <a class="nav-item" data-tab="users" onclick="switchTab('users')">👥 用户管理</a>
                 <a class="nav-item" data-tab="callstats" onclick="switchTab('callstats')">📈 调用记录</a>
                 <a class="nav-item" data-tab="providers" onclick="switchTab('providers')">🔌 上游管理</a>
+                <a class="nav-item" data-tab="provider-usage" onclick="switchTab('provider-usage')">📡 上游额度</a>
                 <a class="nav-item" data-tab="mappings" onclick="switchTab('mappings')">🔗 模型映射</a>
                 <a class="nav-item" data-tab="routing" onclick="switchTab('routing')">🕐 路由规则</a>
                 <a class="nav-item" data-tab="multipliers" onclick="switchTab('multipliers')">⚡ 倍率规则</a>
@@ -103,8 +104,8 @@
                     <button class="btn btn-primary" onclick="openProviderModal()">+ 新增上游</button>
                 </div>
                 <table class="table" id="providers-table">
-                    <thead><tr><th>ID</th><th>名称</th><th>Slug</th><th>端点</th><th>Key</th><th>默认</th><th>透传</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
-                    <tbody id="providers-tbody"><tr><td colspan="10" class="text-center">加载中...</td></tr></tbody>
+                    <thead><tr><th>ID</th><th>名称</th><th>Slug</th><th>端点</th><th>Key</th><th>默认</th><th>透传</th><th>状态</th><th>本月 Token</th><th>本月 调用</th><th>创建时间</th><th>操作</th></tr></thead>
+                    <tbody id="providers-tbody"><tr><td colspan="12" class="text-center">加载中...</td></tr></tbody>
                 </table>
             </section>
 
@@ -152,6 +153,16 @@
                     <tbody id="audit-tbody"><tr><td colspan="6" class="text-center">加载中...</td></tr></tbody>
                 </table>
                 <div class="pagination" id="audit-pagination"></div>
+            </section>
+
+            <!-- Provider Usage Tab (上游额度仪表盘) -->
+            <section class="tab-content" id="tab-provider-usage">
+                <div class="section-header">
+                    <h2 class="tab-title">📡 上游额度</h2>
+                    <button class="btn btn-sm" onclick="loadProviderUsage()">🔄 刷新</button>
+                </div>
+                <p class="cs-note">滚动 30 天窗口（now-30d，Asia/Shanghai）。剩余 &lt; 10% 时标红提醒（仅展示，不拦截请求）。</p>
+                <div class="usage-grid" id="provider-usage-cards"></div>
             </section>
 
             <!-- Call Stats Tab (调用记录汇总面板) -->
@@ -291,6 +302,18 @@
                     <button type="button" class="btn btn-outline btn-sm" onclick="addExtraHeaderRow()">+ 添加请求头</button>
                     <small class="form-hint">如 anthropic-version / 2023-06-01</small>
                 </div>
+                <hr class="form-divider">
+                <p class="form-section-title">月度额度（可选，0 = 不限制）</p>
+                <div class="form-group">
+                    <label for="prov-monthly-token-limit">月度 Token 上限</label>
+                    <input type="number" id="prov-monthly-token-limit" min="0" step="1" placeholder="0 = 不限制">
+                    <small class="form-hint">滚动 30 天窗口内的 Token 总用量上限；留空或 0 表示不限制。</small>
+                </div>
+                <div class="form-group">
+                    <label for="prov-monthly-call-limit">月度调用次数上限</label>
+                    <input type="number" id="prov-monthly-call-limit" min="0" step="1" placeholder="0 = 不限制">
+                    <small class="form-hint">滚动 30 天窗口内的调用次数上限；留空或 0 表示不限制。</small>
+                </div>
                 <button type="submit" class="btn btn-primary btn-block">保存</button>
             </form>
         </div>
@@ -394,6 +417,10 @@
                     <label for="new-fixed-provider">固定上游</label>
                     <select id="new-fixed-provider"></select>
                 </div>
+                <div class="form-group" id="new-provider-usage-group">
+                    <label>上游剩余额度（实时提示，仅供查看）</label>
+                    <div id="new-provider-usage" class="usage-hint"></div>
+                </div>
                 <div class="form-group">
                     <label for="new-fixed-multiplier">固定倍率（留空=全局）</label>
                     <input type="number" id="new-fixed-multiplier" min="0.1" max="100.0" step="0.1" placeholder="留空使用全局倍率">
@@ -459,6 +486,10 @@
                 <div class="form-group" id="update-fixed-provider-group" style="display:none">
                     <label for="update-fixed-provider">固定上游</label>
                     <select id="update-fixed-provider"></select>
+                </div>
+                <div class="form-group" id="update-provider-usage-group">
+                    <label>上游剩余额度（实时提示，仅供查看）</label>
+                    <div id="update-provider-usage" class="usage-hint"></div>
                 </div>
                 <div class="form-group">
                     <label for="update-fixed-multiplier">固定倍率（不填=不修改，0=清除）</label>

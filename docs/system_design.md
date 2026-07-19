@@ -1,699 +1,299 @@
-# 系统设计：用户路由模式与倍率解耦
+# 系统架构设计 + 任务分解：上游 Provider 月度额度可见性
 
-| 字段 | 内容 |
-|------|------|
-| 架构师 | Bob（高见远） |
-| 日期 | 2025-07-13 |
-| 基于 | PRD: 用户路由模式与倍率解耦 |
+> 作者：高见远（software-architect）
+> 基于：产品经理许清楚输出的已确认 PRD（4 项用户决策 + P0/P1 功能池）
+> 代码事实：已阅读 `internal/models/provider.go`、`internal/db/migrations.go`、`internal/models/call_log.go`、`internal/models/user.go`、`internal/provider/store.go`、`internal/admin/handler.go`、`internal/admin/providers.go`、`main.go`、`web/admin/{index.html,app.js,style.css}`
 
 ---
 
-## Part A: 系统设计
+## Part A：系统设计
 
-### 1. 实现方案
+### 1. 实现方案 + 框架选型
 
-#### 1.1 核心技术挑战
+**结论：不引入任何新框架。纯 Go（标准库 `net/http` + `database/sql`）+ 嵌入式静态前端（原生 HTML/JS/CSS，零前端框架），与现有代码风格 100% 一致。**
 
-| 挑战 | 分析 |
-|------|------|
-| **热路径零额外 DB 查询** | `route_mode` / `fixed_provider` 由中间件在认证时从 User 表一并加载并注入 context；`fixed_multiplier` 需额外查 quotas 表（1次索引查询，可接受） |
-| **Router 快照即权限检查** | `ProviderTable.Providers` 仅含 `enabled=1` 的上游 —— 禁用/删除的 provider 天然不在快照中，`GetProviderBySlug` 返回 false → 503 |
-| **Admin 强制约束** | 写入时 `role=admin` → `route_mode='auto'` + `fixed_provider=''`；读取时不校验 `fixed_multiplier` |
-| **Provider 删除保护** | `DeleteProvider` 新增检查：`SELECT username FROM users WHERE fixed_provider=?`，有结果则阻止并列出用户名 |
-| **幂等迁移** | 复用已有 `columnExists()` 辅助函数，3 条 ALTER TABLE 均 idempotent |
+**技术难点与选型理由**
 
-#### 1.2 技术栈与架构
+| 难点 | 方案 | 理由 |
+|------|------|------|
+| 滚动 30 天聚合 | 实时 SQL `SUM` 聚合 + 复合索引 `(provider_id, created_at)`（已存在 `idx_call_logs_provider_created`） | 现有 `call_logs` 已建该索引；PRD 默认假设"不预聚合/不缓存"，实时聚合响应达标；零新增依赖 |
+| 窗口口径（now-30d，非自然月） | `windowStart = now-30*24h` 在 `Asia/Shanghai` 计算为 RFC3339，`created_at >= ?` 文本比较 | `created_at` 全库统一存为 SH RFC3339（见 `call_log.go` D10 注释），同格式文本比较=时间序，与现有 `QueryCallLogs` 一致 |
+| 双口径（token 总量 + 调用次数） | 同一聚合语句 `SUM(prompt_tokens+completion_tokens)` 与 `SUM(effective_calls)` | 一次 `GROUP BY provider_id` 同时算出两口径，单查询 |
+| 三处展示 | 单批量端点 `GET /api/provider-usage` 复用于列表与仪表盘；单 provider 端点 `GET /api/providers/{slug}/usage` 用于开账号表单 | 后端即单一真相源，前端只渲染 |
+| 低余额仅提醒不拦截 | 后端算 `token_low`/`call_low` 布尔，前端仅标红 CSS class | 单一判定逻辑，三处统一；不触碰写操作 |
 
-- **后端**：Go 1.22, 零 CGO, SQLite (`modernc.org/sqlite`), 标准库 `net/http` (Go 1.22 路由)
-- **前端**：Vanilla HTML/CSS/JS，Go embed 内嵌
-- **路由决策**：`proxy.Handler.ServeHTTP` 中新增 "fixed" 分支，绕过 `Router.ResolveProvider`
-- **倍率决策**：`ServeHTTP` 中优先检查 `fixed_multiplier`，为 NULL 时回退 `MultiplierEng.GetEffectiveMultiplier`
-- **审计日志**：复用已有 `audit_logs` 表，`action="user.route_update"`, `target_type="user"`
-
-#### 1.3 模块改动清单
-
-```
-internal/db/migrations.go        → +3 ALTER TABLE (idempotent via columnExists)
-internal/models/user.go          → User +RouteMode/+FixedProvider, 全部 query/scan, +GetUsersByFixedProvider()
-internal/models/quota.go         → Quota +FixedMultiplier, +GetFixedMultiplier()
-internal/auth/middleware.go      → SubKeyAuth 注入 route_mode/fixed_provider 到 context
-internal/proxy/handler.go        → ServeHTTP: fixed 路由分支 + fixed 倍率分支
-internal/router/selector.go      → +GetProviderBySlug() 公开方法
-internal/provider/store.go       → DeleteProvider: 检查 fixed 用户引用
-internal/admin/users.go          → Create/Update 请求结构体 + 处理逻辑 + audit 写入
-internal/admin/handler.go        → RegisterRoutes 无需新增路由（复用现有 PUT /api/users/{id}）
-web/admin/index.html             → 创建/编辑弹窗增加路由模式、固定上游、倍率字段
-web/admin/app.js                 → createUser/loadUsers/editUser/updateUser 更新
-web/admin/style.css              → 无需大改（复用现有样式体系）
-```
+**架构模式**：沿用现有分层 —— `models`（数据+查询）/ `provider.ProviderStore`（加密 CRUD）/ `admin.Handler`（HTTP 路由与聚合端点）/ 嵌入式 `web/admin`（前端渲染）。新增聚合逻辑放 `models` 查询层，HTTP 端点放 `admin` 包，遵循现有 `call_log.go` 聚合风格。
 
 ---
 
-### 2. 文件列表
+### 2. 文件列表（新增 / 修改）
 
-```
-internal/db/migrations.go          # 修改：ALTER TABLE users +route_mode, +fixed_provider; ALTER TABLE quotas +fixed_multiplier
-internal/models/user.go            # 修改：User struct +RouteMode/FixedProvider, 全部 SQL query/scan 更新, +GetUsersByFixedProvider()
-internal/models/quota.go           # 修改：Quota struct +FixedMultiplier, +GetFixedMultiplier()
-internal/auth/middleware.go        # 修改：SubKeyAuth 注入 CtxKeyRouteMode/CtxKeyFixedProvider, GetUserBySubKeyHash SQL 增加 route_mode/fixed_provider
-internal/proxy/handler.go          # 修改：ServeHTTP 增加 fixed 路由分支 + fixed 倍率分支
-internal/router/selector.go        # 修改：+GetProviderBySlug() 公开方法
-internal/provider/store.go         # 修改：DeleteProvider 增加 fixed 用户引用检查
-internal/admin/users.go            # 修改：createUserRequest/updateUserRequest 增加新字段, CreateUser/UpdateUser/ListUsers 处理新字段, audit 写入
-internal/admin/handler.go          # 无需新增路由（复用现有 PUT /api/users/{id}）
-web/admin/index.html               # 修改：创建用户弹窗 + 编辑用户弹窗 增加路由模式/固定上游/倍率
-web/admin/app.js                   # 修改：createUser/loadUsers/editUser/updateUser 支持新字段
-```
+**新增文件**
+- `internal/models/provider_usage.go` — 聚合查询函数、用量视图结构、低余额判定、窗口起点计算
+- `internal/admin/provider_usage.go` — 两个 admin API 端点 + 仪表盘页 serving 方法
+
+**修改文件**
+- `internal/db/migrations.go` — `providers` 表幂等新增 `monthly_token_limit` / `monthly_call_limit` 两列
+- `internal/models/provider.go` — `ProviderRecord` 与 `ProviderWithMaskedKey` 增加两字段
+- `internal/provider/store.go` — `ListProviders`/`GetProvider`/`CreateProvider`/`UpdateProvider`/`BuildMaskedProviders`/`SeedFromConfig` 读写新字段
+- `internal/admin/handler.go` — 注册 3 条新路由（2 个 API + 1 个页面）
+- `internal/admin/providers.go` — `createProviderRequest`/`updateProviderRequest` 增加额度字段；`HandleCreateProvider`/`HandleUpdateProvider` 透传
+- `web/admin/index.html` — 上游列表加 2 列；上游模态加 2 个额度输入；用户模态加"上游剩余额度"提示块；侧栏加"上游额度"导航；新增仪表盘 tab section
+- `web/admin/app.js` — `loadProviders` 合并用量渲染 2 列；provider 模态收发额度；`fetchProviderUsage`；`loadProviderUsage`；`formatToken`；fixed_provider 实时提示
+- `web/admin/style.css` — 低余额标红 class、用量卡片/进度条样式
+
+（另输出 `docs/class-diagram.mermaid`、`docs/sequence-diagram.mermaid` 供 Engineer 直接引用。）
 
 ---
 
 ### 3. 数据结构与接口
 
-```mermaid
-classDiagram
-    class User {
-        +int64 ID
-        +string Username
-        +string PasswordHash
-        +string SubKeyHash
-        +string SubKeyPreview
-        +string Role
-        +string Status
-        +string CreatedAt
-        +string UpdatedAt
-        +string ExpiresAt
-        +string RouteMode
-        +string FixedProvider
-    }
+#### 3.1 DB Schema（增量迁移，幂等）
 
-    class UserWithQuota {
-        +User User
-        +int Quota5hLimit
-        +int Quota5hUsed
-        +int QuotaTotalLimit
-        +int QuotaTotalUsed
-        +int64 TotalTokens
-        +string SubKey
-        +sql.NullFloat64 FixedMultiplier
-    }
+`providers` 表新增两列（在 `RunMigrations` 末尾、`Passthrough` 段落之后追加）：
 
-    class Quota {
-        +int64 ID
-        +int64 UserID
-        +int Quota5hLimit
-        +int Quota5hUsed
-        +int QuotaTotalLimit
-        +int QuotaTotalUsed
-        +string WindowStart
-        +string UpdatedAt
-        +sql.NullFloat64 FixedMultiplier
-    }
-
-    class createUserRequest {
-        +string Username
-        +int Quota5hLimit
-        +int QuotaTotalLimit
-        +string ExpiresAt
-        +string RouteMode
-        +string FixedProvider
-        +float64 FixedMultiplier
-    }
-
-    class updateUserRequest {
-        +int Quota5hLimit
-        +int QuotaTotalLimit
-        +string Status
-        +bool RegenerateKey
-        +string RouteMode
-        +string FixedProvider
-        +float64 FixedMultiplier
-    }
-
-    class Router {
-        +ResolveProvider(now time.Time) Provider, error
-        +RewriteModel(external, providerID string) string
-        +Reload() error
-        +GetProviderBySlug(slug string) Provider, bool
-    }
-
-    class Provider {
-        +string ID
-        +string Endpoint
-        +string APIKey
-    }
-
-    class ProviderTable {
-        +map~string,ProviderEntry~ Providers
-        +map~string,map~string,string~ Mappings
-        +RoutingRule[] Rules
-        +string Default
-    }
-
-    class ProviderEntry {
-        +string Slug
-        +string Endpoint
-        +string APIKey
-    }
-
-    class authMiddleware {
-        +SubKeyAuth(http.Handler) http.Handler
-        +CtxKeyUserID
-        +CtxKeyUserRole
-        +CtxKeyRouteMode
-        +CtxKeyFixedProvider
-    }
-
-    class Handler {
-        +ServeHTTP(w, r)
-        +handleSync(...)
-        +handleStream(...)
-        +Router *Router
-        +MultiplierEng *MultiplierEngine
-        +QuotaChecker *Checker
-    }
-
-    class adminHandler {
-        +CreateUser(w, r)
-        +UpdateUser(w, r)
-        +ListUsers(w, r)
-        +DeleteUser(w, r)
-        +ProviderStore *ProviderStore
-        +Router *Router
-    }
-
-    class ProviderStore {
-        +DeleteProvider(slug string) error
-        +GetProvider(slug string) *ProviderRecord
-    }
-
-    class QuotaModel {
-        +GetFixedMultiplier(db, userID) sql.NullFloat64
-        +UpdateFixedMultiplier(db, userID, multiplier)
-    }
-
-    UserWithQuota --|> User : embeds
-    Handler --> Router : uses
-    Handler --> authMiddleware : GetUserID/GetRouteMode
-    Router --> ProviderTable : atomic snapshot
-    adminHandler --> ProviderStore : uses
-    adminHandler ..> createUserRequest : decodes
-    adminHandler ..> updateUserRequest : decodes
-    Quota ..> QuotaModel : CRUD
-    User ..> UserModel : CRUD
+```sql
+-- 0 = 不限制 / 无限
+ALTER TABLE providers ADD COLUMN monthly_token_limit INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE providers ADD COLUMN monthly_call_limit  INTEGER NOT NULL DEFAULT 0;
 ```
 
-#### 3.1 API 契约
+守卫方式：复用现有 `columnExists(conn, "providers", "monthly_token_limit")` 判断，缺失才 ALTER。两列均为 `INTEGER`（token 可能上亿，SQLite INTEGER 为 64 位，足够；Go 侧用 `int64`）。
 
-**POST /admin/api/users** (修改)
-```json
-Request: {
-  "username": "alice",
-  "quota_5h_limit": 100,
-  "quota_total_limit": 10000,
-  "expires_at": "2026-01-15T00:00:00+08:00",
-  "route_mode": "fixed",
-  "fixed_provider": "openai",
-  "fixed_multiplier": 2.5
+#### 3.2 Go 模型（`internal/models/provider.go` 增量）
+
+```go
+// ProviderRecord 增加：
+MonthlyTokenLimit int64 `json:"monthly_token_limit"` // 0 = 无限
+MonthlyCallLimit  int64 `json:"monthly_call_limit"`  // 0 = 无限
+
+// ProviderWithMaskedKey 同步增加同样两字段（列表 API 返回用）
+```
+
+#### 3.3 聚合查询与视图（`internal/models/provider_usage.go` 新增）
+
+```go
+package models
+
+import (
+    "database/sql"
+    "time"
+    "llm_api_gateway/internal/timeutil"
+)
+
+// LowBalanceRatio 默认低余额阈值：剩余 < 10% 即标红（全局统一，token/次数共用）。
+const LowBalanceRatio = 0.9
+
+// RollingWindowStart 返回滚动窗口起点：now-30*24h，按 Asia/Shanghai 渲染为 RFC3339。
+// 与 call_logs.created_at 同格式，可直接文本比较。
+func RollingWindowStart() string {
+    return time.Now().Add(-30 * 24 * time.Hour).In(timeutil.ShanghaiTZ).Format(time.RFC3339)
+}
+
+// ProviderMonthlyUsage 单 provider 滚动窗口内的原始聚合（已用）。
+type ProviderMonthlyUsage struct {
+    Slug      string `json:"slug"`
+    TokenUsed int64  `json:"token_used"`
+    CallUsed  int64  `json:"call_used"`
+}
+
+// AggregateProviderUsage 一次性 GROUP BY 聚合所有 provider 的窗口内用量。
+// 返回 map[slug]*ProviderMonthlyUsage；窗口内无调用的 provider 不在 map 中（前端按 0 处理）。
+func AggregateProviderUsage(db *sql.DB, windowStart string) (map[string]*ProviderMonthlyUsage, error)
+
+// GetProviderUsage 单 provider 窗口内用量（开账号表单实时提示用）。
+func GetProviderUsage(db *sql.DB, slug, windowStart string) (*ProviderMonthlyUsage, error)
+
+// ProviderUsageView 面向前端的完整视图（已算好剩余/无限/低余额）。
+type ProviderUsageView struct {
+    Slug              string `json:"slug"`
+    Name              string `json:"name"`
+    MonthlyTokenLimit int64  `json:"monthly_token_limit"` // 0 = 无限
+    MonthlyCallLimit  int64  `json:"monthly_call_limit"`  // 0 = 无限
+    TokenUsed         int64  `json:"token_used"`
+    TokenRemaining    int64  `json:"token_remaining"`   // 无限时为 -1；超限时可能为负
+    TokenUnlimited    bool   `json:"token_unlimited"`
+    CallUsed          int64  `json:"call_used"`
+    CallRemaining     int64  `json:"call_remaining"`
+    CallUnlimited     bool   `json:"call_unlimited"`
+    WindowStart       string `json:"window_start"` // SH RFC3339
+    TokenLow          bool   `json:"token_low"`    // 剩余 < 10% 标红
+    CallLow           bool   `json:"call_low"`
+}
+
+// IsLowBalance 低余额判定（单一真相源）：无限(limit==0)永不标红；否则 used/limit >= LowBalanceRatio。
+func IsLowBalance(used, limit int64) bool {
+    if limit <= 0 { return false }
+    return float64(used)/float64(limit) >= LowBalanceRatio
+}
+
+// BuildProviderUsageView 由 provider 记录 + 原始用量 + 窗口起点合成视图。
+// 空 provider：used=0，remaining=limit（无限时 -1）。
+func BuildProviderUsageView(p ProviderRecord, used *ProviderMonthlyUsage, windowStart string) ProviderUsageView
+```
+
+**聚合 SQL（批量）**
+```sql
+SELECT provider_id,
+       COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS token_used,
+       COALESCE(SUM(effective_calls), 0)                    AS call_used
+FROM call_logs
+WHERE created_at >= ?
+GROUP BY provider_id;
+```
+**聚合 SQL（单 provider）**
+```sql
+SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0),
+       COALESCE(SUM(effective_calls), 0)
+FROM call_logs
+WHERE provider_id = ? AND created_at >= ?;
+```
+
+#### 3.4 Admin API（`internal/admin/provider_usage.go` 新增）
+
+```go
+// GET /admin/api/provider-usage
+// 返回 { "data": [ ProviderUsageView, ... ] }，覆盖全部 provider（含无限/空用量）。
+func (h *Handler) HandleListProviderUsage(w http.ResponseWriter, r *http.Request)
+
+// GET /admin/api/providers/{slug}/usage
+// 返回 { "data": ProviderUsageView }；provider 不存在返回 404 { "error": "..." }。
+func (h *Handler) HandleGetProviderUsage(w http.ResponseWriter, r *http.Request)
+
+// GET /admin/provider-usage
+// 复用 index.html（SPA），注入 window.__INIT_TAB__='provider-usage' 后返回，作为可直链的独立仪表盘页。
+func (h *Handler) ServeProviderUsagePage(w http.ResponseWriter, r *http.Request)
+```
+
+#### 3.5 Provider 额度配置接口（修改 `internal/admin/providers.go`）
+
+```go
+type createProviderRequest struct {
+    // ... 现有字段 ...
+    MonthlyTokenLimit int64 `json:"monthly_token_limit"` // 0 = 无限，默认 0
+    MonthlyCallLimit  int64 `json:"monthly_call_limit"`  // 0 = 无限，默认 0
+}
+type updateProviderRequest struct {
+    // ... 现有字段 ...
+    MonthlyTokenLimit *int64 `json:"monthly_token_limit"`
+    MonthlyCallLimit  *int64 `json:"monthly_call_limit"`
 }
 ```
-- `route_mode`: 可选，默认 `"auto"`。若 `role=admin` → 强制 `"auto"`
-- `fixed_provider`: 可选，默认 `""`。若 `role=admin` → 强制 `""`
-- `fixed_multiplier`: 可选，默认 `null`（走全局倍率）。范围 `0.1~100.0`
+`HandleCreateProvider` 透传两字段（0 合法）；`HandleUpdateProvider` 仅在非 nil 时写入 `updates` map。
 
-**PUT /admin/api/users/{id}** (修改)
-```json
-Request: {
-  "route_mode": "auto",
-  "fixed_provider": "",
-  "fixed_multiplier": null
-}
-```
-- 新增三个可选字段。若 `role=admin` → route_mode/fixed_provider 忽略
+#### 3.6 前端数据结构（JS，约定字段名与后端 JSON 一致）
 
-**GET /admin/api/users** (修改)
-```json
-Response: {
-  "data": [{
-    "id": 1, "username": "alice", ...,
-    "route_mode": "fixed",
-    "fixed_provider": "openai",
-    "fixed_multiplier": 2.5
-  }, ...]
-}
-```
-- `fixed_multiplier` 为 null 时 JSON 序列化为 `null`
-
-**DELETE /admin/api/providers/{slug}** (修改)
-```json
-Response 409: {
-  "error": "cannot delete provider \"openai\": referenced by 2 user(s) as fixed provider: alice, bob"
-}
-```
-
-**503 错误响应格式**（proxy handler — 新增）
-```json
-{"error":{"message":"Provider not available","type":"provider_not_available","code":"provider_not_available"}}
-```
+- `ProviderUsageView`（同后端字段）：开账号表单实时提示块与仪表盘卡片直接消费。
+- 上游列表行：`providerMap[slug]` + 并行拉取的 usage map 按 slug 合并。
 
 ---
 
-### 4. 程序调用流
+### 4. 程序调用流程（Mermaid 时序图）
 
-#### 4.1 请求主流程（fixed 路由 + fixed 倍率）
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant M as SubKeyAuth
-    participant DB as SQLite
-    participant H as ProxyHandler
-    participant R as Router
-    participant Q as QuotaChecker
-    participant U as Upstream
-
-    C->>M: POST /v1/chat/completions<br/>Authorization: Bearer sk-xxx
-    M->>DB: GetUserBySubKeyHash(hash)
-    DB-->>M: User{RouteMode, FixedProvider}
-    M->>M: ctx: user_id, route_mode, fixed_provider
-    M->>H: ServeHTTP
-
-    Note over H: === 路由决策 ===
-    alt route_mode == "fixed" AND fixed_provider != ""
-        H->>R: GetProviderBySlug(fixed_provider)
-        alt not found (disabled/deleted)
-            H-->>C: 503 Provider not available
-        else found
-            R-->>H: Provider{ID, Endpoint, APIKey}
-        end
-    else route_mode == "auto" | empty
-        H->>R: ResolveProvider(now)
-        R-->>H: Provider{ID, Endpoint, APIKey}
-    end
-
-    Note over H: === 倍率决策 ===
-    H->>DB: GetFixedMultiplier(userID) FROM quotas
-    alt fixed_multiplier IS NOT NULL
-        DB-->>H: 2.5
-        H->>H: effectiveCalls = ceil(2.5) = 3
-    else fixed_multiplier IS NULL
-        H->>H: multiplier = MultiplierEng.GetEffectiveMultiplier(now)<br/>effectiveCalls = ceil(multiplier)
-    end
-
-    Note over H: === 配额扣减 ===
-    H->>Q: CheckAndDeduct(userID, effectiveCalls)
-    alt quota exceeded
-        H-->>C: 429 Quota exceeded
-    else OK
-        H->>U: Forward request
-        U-->>H: Response
-        H-->>C: Stream / Sync response
-    end
-```
-
-#### 4.2 管理员创建用户（含路由模式 + 固定倍率）
-
-```mermaid
-sequenceDiagram
-    participant A as Admin Browser
-    participant API as Admin API
-    participant M as UserModel
-    participant DB as SQLite
-    participant AL as AuditLogs
-
-    A->>API: POST /admin/api/users<br/>{username, route_mode, fixed_provider, fixed_multiplier, ...}
-    API->>API: role="user" → fields preserved
-    API->>M: CreateUser(..., routeMode, fixedProvider)
-    M->>DB: BEGIN<br/>INSERT users (..., route_mode, fixed_provider)<br/>INSERT quotas (..., fixed_multiplier)<br/>COMMIT
-    DB-->>M: userID
-    M-->>API: UserWithQuota
-    API->>DB: INSERT INTO audit_logs<br/>(action='user.create', target_type='user', ...)
-    API-->>A: {id, sub_key, ...}
-
-    Note over A: === 编辑用户路由/倍率 ===
-    A->>API: PUT /admin/api/users/2<br/>{route_mode:"fixed", fixed_provider:"openai", fixed_multiplier:2.0}
-    API->>M: GetUserByID(2)
-    M->>DB: SELECT ... FROM users WHERE id=2
-    DB-->>M: User{RouteMode:"auto", FixedProvider:""}
-    API->>API: role!="admin" → accept fields
-    API->>DB: UPDATE users SET route_mode=?, fixed_provider=?
-    API->>DB: UPDATE quotas SET fixed_multiplier=?
-    API->>DB: INSERT INTO audit_logs<br/>(action='user.route_update', target_type='user', ...)
-    API-->>A: {route_mode:"fixed", fixed_provider:"openai", fixed_multiplier:2.0}
-```
-
-#### 4.3 删除 Provider 前检查 fixed 用户引用
-
-```mermaid
-sequenceDiagram
-    participant A as Admin Browser
-    participant API as Admin API
-    participant PS as ProviderStore
-    participant DB as SQLite
-
-    A->>API: DELETE /admin/api/providers/openai
-    API->>PS: DeleteProvider("openai")
-    PS->>DB: SELECT COUNT(*) FROM provider_routing_rules WHERE provider_id='openai'
-    DB-->>PS: 0 (existing check)
-    PS->>DB: SELECT COUNT(*) FROM model_mappings WHERE provider_id='openai'
-    DB-->>PS: 0 (existing check)
-    PS->>DB: SELECT username FROM users WHERE fixed_provider='openai' AND status!='deleted'
-    DB-->>PS: ["alice", "bob"] (NEW check)
-    alt count > 0
-        PS-->>API: error "referenced by 2 user(s): alice, bob"
-        API-->>A: 409 {error: "cannot delete: ..."}
-    else count == 0
-        PS->>DB: DELETE FROM providers WHERE slug='openai'
-        PS->>DB: INSERT INTO audit_logs (action='provider.delete', ...)
-        PS-->>API: nil
-        API-->>A: 204 No Content
-    end
-```
+见 `docs/sequence-diagram.mermaid`（完整源码），三个核心流程：列表加载、开账号切换 provider、仪表盘加载。
 
 ---
 
-### 5. 待明确事项
+### 5. 待明确事项（PRD 待确认 + 我的默认假设）
 
-无。所有关键决策已锁定：
+**需用户拍板（P2 范围外但建议尽早定）**
+1. 阈值是否要可配置（全局 / per-provider / token 与次数分别）？—— 本次默认 **全局统一 10%**，token 与次数共用，per-provider 阈值留 P2。
+2. 双口径是否允许"只配其一"？—— PRD 决策 1 已确认"可只配其一，未配=无限"，按此实现（另一条维度 `limit=0` ⇒ 无限）。
+3. 超限（已用 > 上限）时是否展示负数剩余？—— 本次**展示真实负值并标红**（仅可见性，不拦截），不做归零。
 
-| Q | 决策 | 实现方式 |
-|---|------|---------|
-| Q1 | admin 强制约束 | 写入时 role=admin → route_mode='auto', fixed_provider=''；不校验 fixed_multiplier |
-| Q2 | fixed provider 不可用 → 503 | 禁用/删除的 provider 不在 ProviderTable 快照中，`GetProviderBySlug` 返回 false |
-| Q3 | 删除 provider 阻止 | `DeleteProvider` 新增 `SELECT username FROM users WHERE fixed_provider=?` 检查 |
-| Q4 | 不暴露给自助面板 | /user/ 路由不变，返回数据不含新字段 |
-| Q5 | Router 为 nil 时 fixed 路由 | 直接返回 503（fixed 路由依赖 Router 快照） |
-| Q6 | fixed_multiplier NULL→全局 | `sql.NullFloat64`，Valid=false 时走 `MultiplierEng.GetEffectiveMultiplier` |
-
----
-
-## Part B: 任务分解
-
-### 6. 所需依赖包
-
-无新增第三方依赖。`database/sql` 的 `sql.NullFloat64` 已在标准库中。
+**我的默认假设（已在设计中落实，如不符请指出）**
+- 低余额阈值 = 剩余 < 10%（`LowBalanceRatio = 0.9`），全局共用。
+- 独立仪表盘路由 = `/m-7xa2/provider-usage`（内部 `/admin/provider-usage`）。
+- 窗口 = 严格 `now - 30*24h` 滑动；实时 SQL 聚合，无预聚合/无缓存。
+- 提醒形式 = 仅界面标红，不含通知/邮件。
+- 单位：token 用 `K/M/亿` 缩写（<1e3 原值；<1e6 → K；<1e8 → M；≥1e8 → 亿）；次数千分位（`toLocaleString`）。
+- 粒度：仅 provider 级，不做 model 细分。
+- Provider 额度可在"新增/编辑上游"模态配置（满足 P0-1 "后台可配置"）。
 
 ---
 
-### 7. 任务列表
+## Part B：任务分解
 
-| Task ID | 任务名称 | 源文件 | 依赖 | 优先级 |
-|---------|---------|--------|------|--------|
-| **T01** | 数据库迁移 + 数据模型层 | `internal/db/migrations.go`, `internal/models/user.go`, `internal/models/quota.go` | 无 | P0 |
-| **T02** | 认证中间件 + 代理热路径 + 路由扩展 | `internal/auth/middleware.go`, `internal/proxy/handler.go`, `internal/router/selector.go` | T01 | P0 |
-| **T03** | Provider 安全约束 + Admin API | `internal/provider/store.go`, `internal/admin/users.go`, `internal/admin/handler.go` | T01 | P0 |
-| **T04** | 前端页面与交互 | `web/admin/index.html`, `web/admin/app.js`, `web/admin/style.css` | T03 | P0 |
-| **T05** | 集成验证 | `make ci` + 手动功能验证 | T02, T03, T04 | P0 |
+### 6. 依赖包列表
 
-#### T01 详情：数据库迁移 + 数据模型层
-
-**范围**：
-
-- **`migrations.go`**：在 `RunMigrations()` 末尾（`expires_at` 迁移之后）添加 3 条幂等迁移：
-  ```go
-  // route_mode (user routing mode: "auto" | "fixed")
-  if !columnExists(conn, "users", "route_mode") {
-      _, err := conn.Conn.Exec(`ALTER TABLE users ADD COLUMN route_mode TEXT NOT NULL DEFAULT 'auto'`)
-  }
-  // fixed_provider (target provider slug when route_mode=fixed)
-  if !columnExists(conn, "users", "fixed_provider") {
-      _, err := conn.Conn.Exec(`ALTER TABLE users ADD COLUMN fixed_provider TEXT NOT NULL DEFAULT ''`)
-  }
-  // fixed_multiplier (per-user multiplier override, NULL=global)
-  if !columnExists(conn, "quotas", "fixed_multiplier") {
-      _, err := conn.Conn.Exec(`ALTER TABLE quotas ADD COLUMN fixed_multiplier REAL`)
-  }
-  ```
-
-- **`user.go`**：
-  - `User` struct 新增：
-    ```go
-    RouteMode     string `json:"route_mode"`     // "auto" | "fixed"
-    FixedProvider string `json:"fixed_provider"`  // provider slug
-    ```
-  - `UserWithQuota` struct 新增：
-    ```go
-    FixedMultiplier *float64 `json:"fixed_multiplier"` // nil = global
-    ```
-  - **所有 SQL 查询和 Scan 更新**：
-    - `GetUserBySubKeyHash()`: SELECT 增加 `u.route_mode, u.fixed_provider`，Scan 增加 `&u.RouteMode, &u.FixedProvider`
-    - `GetUserByID()`: 同上
-    - `GetUserByUsername()`: 同上
-    - `ListUsers()`: SELECT 增加 `u.route_mode, u.fixed_provider, q.fixed_multiplier`，Scan 增加对应字段
-  - `CreateUser()`: 签名增加 `routeMode, fixedProvider string`；INSERT users 增加 `route_mode, fixed_provider`；INSERT quotas 增加 `fixed_multiplier` 列（传入值或 NULL）；若 `role="admin"` → 强写 `route_mode='auto', fixed_provider=''`
-  - 新增 `GetUsersByFixedProvider(db *sql.DB, providerSlug string) ([]string, error)`:
-    ```sql
-    SELECT username FROM users WHERE fixed_provider = ? AND status != 'deleted'
-    ```
-  - 新增 `UpdateUserRoute(db *sql.DB, userID int64, routeMode, fixedProvider string) error`
-  - 新增 `UpdateFixedMultiplier(db *sql.DB, userID int64, multiplier *float64) error`:
-    ```sql
-    UPDATE quotas SET fixed_multiplier = ? WHERE user_id = ?
-    ```
-
-- **`quota.go`**：
-  - `Quota` struct 新增：
-    ```go
-    FixedMultiplier sql.NullFloat64 `json:"fixed_multiplier"`
-    ```
-  - `GetQuota()`: SELECT/Scan 增加 `fixed_multiplier`
-  - 新增 `GetFixedMultiplier(db *sql.DB, userID int64) (sql.NullFloat64, error)`:
-    ```sql
-    SELECT fixed_multiplier FROM quotas WHERE user_id = ?
-    ```
-
-**产出物**：`make test` 通过（已有 user_test.go 需适配新签名）。
-
-#### T02 详情：认证中间件 + 代理热路径 + 路由扩展
-
-**范围**：
-
-- **`middleware.go`**：
-  - 新增 context keys：
-    ```go
-    CtxKeyRouteMode     contextKey = "route_mode"
-    CtxKeyFixedProvider contextKey = "fixed_provider"
-    ```
-  - `SubKeyAuth()` 中，在 context 注入 user_id/user_role 之后，增加：
-    ```go
-    ctx = context.WithValue(ctx, CtxKeyRouteMode, user.RouteMode)
-    ctx = context.WithValue(ctx, CtxKeyFixedProvider, user.FixedProvider)
-    ```
-  - 新增辅助函数：
-    ```go
-    func GetRouteMode(r *http.Request) string { ... }
-    func GetFixedProvider(r *http.Request) string { ... }
-    ```
-
-- **`handler.go`** (`internal/proxy/handler.go`)：
-  - `ServeHTTP` 方法改造 —— 在解析请求体之后、路由决策之前，修改路由逻辑：
-    ```go
-    routeMode := auth.GetRouteMode(r)
-    fixedProvider := auth.GetFixedProvider(r)
-
-    if routeMode == "fixed" && fixedProvider != "" {
-        if h.Router == nil {
-            writeProxyError(w, 503, "Provider not available", "provider_not_available")
-            return
-        }
-        prov, ok := h.Router.GetProviderBySlug(fixedProvider)
-        if !ok {
-            writeProxyError(w, 503, "Provider not available", "provider_not_available")
-            return
-        }
-        providerID = prov.ID
-        endpoint = prov.Endpoint
-        apiKey = prov.APIKey
-    } else {
-        // 原有 Router.ResolveProvider 逻辑
-    }
-    ```
-  - 倍率决策改造（在 quota check 之前）：
-    ```go
-    // Get effective multiplier
-    var effectiveCalls int
-    fixedMult, _ := models.GetFixedMultiplier(h.QuotaChecker.DB(), userID)
-    if fixedMult.Valid {
-        effectiveCalls = int(math.Ceil(fixedMult.Float64))
-    } else {
-        multiplier := h.MultiplierEng.GetEffectiveMultiplier(time.Now())
-        effectiveCalls = int(math.Ceil(1.0 * multiplier))
-    }
-    ```
-  - 注意：重构现有 multiplier 变量为有效倍率值（用于 call_log 记录）
-
-- **`selector.go`** (`internal/router/selector.go`)：
-  - 新增公开方法 `GetProviderBySlug`:
-    ```go
-    func (r *Router) GetProviderBySlug(slug string) (Provider, bool) {
-        table := r.table.Load().(*provider.ProviderTable)
-        prov, ok := table.Providers[slug]
-        if !ok {
-            return Provider{}, false
-        }
-        return Provider{
-            ID:       prov.Slug,
-            Endpoint: prov.Endpoint,
-            APIKey:   prov.APIKey,
-        }, true
-    }
-    ```
-
-**产出物**：固定路由 + 固定倍率热路径可用，`make vet` 通过。
-
-#### T03 详情：Provider 安全约束 + Admin API
-
-**范围**：
-
-- **`store.go`** (`internal/provider/store.go`)：
-  - `DeleteProvider()` 方法：在现有 routing rules + model mappings 检查之后、实际 DELETE 之前，新增：
-    ```go
-    // Check fixed-provider user references.
-    usernames, err := models.GetUsersByFixedProvider(s.db, slug)
-    if err != nil {
-        return fmt.Errorf("check fixed users: %w", err)
-    }
-    if len(usernames) > 0 {
-        return fmt.Errorf("cannot delete provider %q: referenced by %d user(s) as fixed provider: %s",
-            slug, len(usernames), strings.Join(usernames, ", "))
-    }
-    ```
-
-- **`users.go`** (`internal/admin/users.go`)：
-  - `createUserRequest` struct 新增：
-    ```go
-    RouteMode       string   `json:"route_mode"`
-    FixedProvider   string   `json:"fixed_provider"`
-    FixedMultiplier *float64 `json:"fixed_multiplier"`
-    ```
-  - `updateUserRequest` struct 新增（使用指针以区分"不传"和"传0"）：
-    ```go
-    RouteMode       *string  `json:"route_mode"`
-    FixedProvider   *string  `json:"fixed_provider"`
-    FixedMultiplier *float64 `json:"fixed_multiplier"`
-    ```
-  - `CreateUser()`: 
-    - 默认 `route_mode` 为 `"auto"` 当为空时
-    - 传入新字段给 `models.CreateUser()`
-    - 若 `route_mode != "auto" || fixed_provider != "" || fixed_multiplier != nil`，写入 audit log
-  - `UpdateUser()`:
-    - 若 `user.Role == "admin"` → 忽略 `route_mode` / `fixed_provider`（WARNING 日志但不报错）
-    - 更新 `route_mode` / `fixed_provider` 时调用 `models.UpdateUserRoute()`
-    - 更新 `fixed_multiplier` 时调用 `models.UpdateFixedMultiplier()`
-    - 写入 audit log：`action="user.route_update"`, `target_type="user"`, detail=变化的字段
-  - `ListUsers()`: 响应已由 T01 的 `UserWithQuota` 结构自动包含新字段
-
-- **`handler.go`** (`internal/admin/handler.go`)：
-  - 无需新增路由 — 复用现有 `PUT /admin/api/users/{id}` 和 `POST /admin/api/users`
-
-**产出物**：Admin API 完整支持新字段，provider 删除保护生效。
-
-#### T04 详情：前端页面与交互
-
-**范围**：
-
-- **`index.html`**：
-  - **创建用户弹窗**（`#create-user-modal`）：在有效期选择器之后、提交按钮之前，增加：
-    ```html
-    <div class="form-group">
-        <label for="new-route-mode">路由模式</label>
-        <select id="new-route-mode">
-            <option value="auto">自动（全局路由）</option>
-            <option value="fixed">固定上游</option>
-        </select>
-    </div>
-    <div class="form-group" id="new-fixed-provider-group" style="display:none">
-        <label for="new-fixed-provider">固定上游</label>
-        <select id="new-fixed-provider"></select>
-    </div>
-    <div class="form-group">
-        <label for="new-fixed-multiplier">固定倍率（留空=全局）</label>
-        <input type="number" id="new-fixed-multiplier" min="0.1" max="100.0" step="0.1" placeholder="留空使用全局倍率">
-    </div>
-    ```
-  - **编辑用户弹窗**（`#update-user-modal`）：在现有字段之后、提交按钮之前，增加：
-    ```html
-    <div class="form-group">
-        <label for="update-route-mode">路由模式</label>
-        <select id="update-route-mode">
-            <option value="">不修改</option>
-            <option value="auto">自动（全局路由）</option>
-            <option value="fixed">固定上游</option>
-        </select>
-    </div>
-    <div class="form-group" id="update-fixed-provider-group" style="display:none">
-        <label for="update-fixed-provider">固定上游</label>
-        <select id="update-fixed-provider"></select>
-    </div>
-    <div class="form-group">
-        <label for="update-fixed-multiplier">固定倍率（不填=不修改，0=清除）</label>
-        <input type="number" id="update-fixed-multiplier" min="0" max="100.0" step="0.1" placeholder="不填则不修改">
-    </div>
-    ```
-
-- **`app.js`**：
-  - `createUser()`: 读取 `#new-route-mode`, `#new-fixed-provider`, `#new-fixed-multiplier`，加入 request body
-  - `editUser()`: 从行数据读取 `route_mode`, `fixed_provider`, `fixed_multiplier` 并填入编辑弹窗
-  - `updateUser()`: 读取 `#update-route-mode`, `#update-fixed-provider`, `#update-fixed-multiplier`，加入 request body
-  - `loadUsers()`: 表格增加"路由/倍率"列，显示 `route_mode` + `fixed_multiplier` 缩略信息
-  - 新增事件处理：`#new-route-mode` change → 选 `fixed` 时显示 `#new-fixed-provider-group`
-  - 新增事件处理：`#update-route-mode` change → 选 `fixed` 时显示 `#update-fixed-provider-group`
-  - `loadProviders()` 后更新所有 provider 下拉选项（复用现有 `providerMap`）
-
-- **`style.css`**：无需新增样式（复用现有 `.form-group`, `select`, `input` 体系）
-
-**产出物**：前端完整支持路由模式 + 倍率配置。
-
-#### T05 详情：集成验证
-
-**范围**：
-- 运行 `make ci`（fmt + vet + test + build-linux + shellcheck），确保无回归
-- 手动验证关键路径：
-  1. 创建 fixed 路由用户 → API 请求走到指定上游
-  2. 创建 fixed 倍率用户 → 配额扣除按固定倍率计算
-  3. 禁用 fixed_provider 指向的上游 → 用户请求返回 503
-  4. 删除有 fixed 用户的 provider → 阻止并提示用户名
-  5. admin 用户创建/编辑时 route_mode 强制 auto
-  6. 审计日志记录 route_mode/fixed_provider/fixed_multiplier 变更
-
-**产出物**：`make ci` 通过，手动验证清单完成。
+**无新增第三方依赖。** 沿用现有 `modernc.org/sqlite`、`golang.org/x/crypto`；聚合与路由均用标准库 + 现有包。`go.mod` 不变。
 
 ---
 
-### 8. 共享约定
+### 7. 任务列表（按实现顺序，依赖链 ≤ 2 层）
 
-```
-- 路由模式值："auto" | "fixed"，默认 "auto"
-- 固定上游值：空字符串 "" 表示未设置
-- 固定倍率：sql.NullFloat64 — Valid=false 时走全局 GetEffectiveMultiplier
-- 倍率范围：0.1 ~ 100.0（与全局 time_multipliers 保持一致的语义）
-- admin 角色保护：两处 — 写入时强写 route_mode='auto', fixed_provider=''；读取时 role=admin 忽略 route check
-- 审计日志 action：
-  - 创建时含路由/倍率 → action="user.create"，detail 包含 JSON
-  - 修改路由/倍率 → action="user.route_update"，detail 描述变化字段
-- 时间格式：统一使用 RFC3339 (time.RFC3339)
-- 时区：所有服务器时间比较使用 time.Now().In(timeutil.ShanghaiTZ)
-- 503 code：provider_not_available（在 error.code 和 error.type 中返回）
-- 热路径：route_mode/fixed_provider 从 context 读取（零额外 DB 查询）；fixed_multiplier 1次 索引查询
-- 前端日期计算：使用客户端 Date 对象
-- 现有测试：T01/T02 完成后必须 make test 通过，不引入回归
-- Router nil 保护：fixed 路由需要 Router 实例，nil 时直接返回 503
-```
+> 规则适配说明：本任务为**存量 Go 项目**（非新建 React 应用），无新建配置文件/入口/依赖可放"T01 基础设施"。故"基础设施"任务适配为**数据层与迁移**——它是后续所有任务的根依赖，等价于模板中的 T01。
+
+#### T01 ｜ 数据层：DB 迁移 + Provider 模型字段 + 聚合查询 【P0】
+- **源文件**：`internal/db/migrations.go`、`internal/models/provider.go`、`internal/models/provider_usage.go`（新）、`internal/provider/store.go`
+- **依赖**：无
+- **要点**：
+  - 迁移：`providers` 表幂等新增 `monthly_token_limit`/`monthly_call_limit`（`columnExists` 守卫，DEFAULT 0）。
+  - 模型：`ProviderRecord` + `ProviderWithMaskedKey` 增加两 `int64` 字段（json 含 `monthly_*_limit`）。
+  - 新增 `provider_usage.go`：`RollingWindowStart`、`AggregateProviderUsage`、`GetProviderUsage`、`IsLowBalance`、`BuildProviderUsageView`、`ProviderUsageView`。
+  - `store.go`：`ListProviders`/`GetProvider` SELECT+Scan 加两列；`CreateProvider` 签名加两参数并写入；`UpdateProvider` 支持 `monthly_token_limit`/`monthly_call_limit` 动态更新；`BuildMaskedProviders` 透传；`SeedFromConfig` 写 0。
+  - 同步修改 `CreateProvider` 的全部调用方（`providers.go`、`store.go` 内部）及 `internal/provider/*_test.go` 中相关用例，保证 `go build ./...` 与 `go test` 通过。
+
+#### T02 ｜ 后端：聚合 API + Provider 额度配置接口 【P0】
+- **源文件**：`internal/admin/provider_usage.go`（新）、`internal/admin/handler.go`、`internal/admin/providers.go`
+- **依赖**：T01
+- **要点**：
+  - 新增 `HandleListProviderUsage`（批量 `GROUP BY` 聚合 + 合并 provider 列表 → `[]ProviderUsageView`）、`HandleGetProviderUsage`（单 slug → `ProviderUsageView`）、`ServeProviderUsagePage`（注入 `window.__INIT_TAB__='provider-usage'` 后返回 `index.html`）。
+  - `handler.go` 注册：`GET /api/provider-usage`、`GET /api/providers/{slug}/usage`、`/provider-usage`（页面，置于 `adminMux` 鉴权分支）。
+  - `providers.go`：`createProviderRequest`/`updateProviderRequest` 增加额度字段；`HandleCreateProvider`/`HandleUpdateProvider` 透传（0 合法；update 仅非 nil 写入）。
+  - 返回统一沿用现有信封 `{ "data": ... }`（**不**用 `{code,data,message}`）。
+
+#### T03 ｜ 前端：上游列表列 + Provider 模态额度配置 + 公共渲染 【P0】
+- **源文件**：`web/admin/index.html`、`web/admin/app.js`、`web/admin/style.css`
+- **依赖**：T01、T02
+- **要点**：
+  - `index.html`：上游列表 `<thead>` 加「本月用量(Token)」「本月用量(次数)」两列；Provider 模态加 `monthly_token_limit`/`monthly_call_limit` 两个 `number` 输入（placeholder "0 = 不限制"）。
+  - `app.js`：
+    - `loadProviders` 内并行 `GET /api/provider-usage`，按 `slug` 合并渲染两列（已用/剩余 + 进度条 + 百分比；无限显示"不限制"；低余额加 `bad`/`low` class）。
+    - `saveProvider` 发送两额度字段；`editProvider` 回填；`openProviderModal` 重置为 0。
+    - 新增 `formatToken(n)`（K/M/亿 缩写）、`renderUsageCell(used, limit, low)`（进度条+百分比+标红复用 helper）。
+  - `style.css`：低余额 `.usage-low`（红色文字）、用量进度条 `.usage-progress`（复用现有 `.token-progress` good/warn/bad 语义）。
+
+#### T04 ｜ 前端：开账号表单实时提示 + 独立额度仪表盘页 【P0】
+- **源文件**：`web/admin/index.html`、`web/admin/app.js`、`web/admin/style.css`
+- **依赖**：T01、T02
+- **要点**：
+  - `index.html`：创建/编辑用户模态的 `fixed_provider` 选择框下方加「上游剩余额度」提示块（`<div id="new-provider-usage">` / `<div id="update-provider-usage">`）；侧栏加「上游额度」导航（`data-tab="provider-usage"`）；新增仪表盘 `<section id="tab-provider-usage">`（标题 + 窗口说明 div + `#provider-usage-grid` 卡片容器）。
+  - `app.js`：
+    - 新增 `fetchProviderUsage(slug)` → `GET /api/providers/{slug}/usage`；创建/编辑模态 `fixed_provider` 的 `change` 事件触发并渲染提示块（未指定显示"未指定/不限制"；低余额标红；**不拦截提交**）。
+    - 新增 `loadProviderUsage()`：拉 `GET /api/provider-usage`，渲染每 provider 卡片（token/call 已用/剩余/进度条/百分比/低余额标红 + 窗口起点 + 更新时间）；空 provider 已用=0。
+    - `switchTab('provider-usage')`、`VALID_TABS` 增加 `provider-usage`；`DOMContentLoaded` 尊重 `window.__INIT_TAB__`。
+  - `style.css`：`.usage-card` 卡片样式。
 
 ---
 
-### 9. 任务依赖图
+### 8. 共享知识（跨文件约定，供 Engineer 实现时统一）
+
+1. **响应信封**：admin API 沿用现有 `{ "data": ... }`（`writeJSON(w, status, map[string]any{"data": x})`）。列表类包数组、单对象类包对象。**不要**引入 `{code,data,message}`。
+2. **低余额判定单一真相源**：`models.IsLowBalance(used, limit)`（无限 limit==0 ⇒ false；`used/limit >= 0.9` ⇒ true）。前端**只读**后端返回的 `token_low`/`call_low` 布尔来标红，不自算阈值。
+3. **无限语义**：`limit == 0` ⇒ 无限；视图 `TokenUnlimited/CallUnlimited = true`，`TokenRemaining/CallRemaining = -1`；前端显示"不限制/无限"。
+4. **窗口起点**：一律用 `models.RollingWindowStart()`（SH RFC3339），前端不得自行计算窗口；`created_at >= windowStart` 文本比较即可（同格式）。
+5. **数字格式化 helper（前端）**：`formatToken(n)`：`<1e3` 原值；`<1e6` → `X.XK`；`<1e8` → `X.XXM`；`≥1e8` → `X.XX亿`（保留至多 2 位小数，去尾零）。次数一律 `.toLocaleString()` 千分位。
+6. **进度条 + 标红 CSS 约定**：百分比 `pct = min(100, round(used/limit*100))`；class 取 `pct>80?'bad':pct>50?'warn':'good'`，低余额额外加 `usage-low`（红字）。无限时不渲染进度条，显示"不限制"。
+7. **前端调 admin API 取额度**：
+   - 列表/仪表盘：`GET api/provider-usage`（相对路径，同 `apiFetch` 现有用法）。
+   - 开账号提示：`GET api/providers/<slug>/usage`。
+   - 这两个端点均受 `AdminSessionAuthAPI` 保护（`/api/` 前缀自动鉴权），与现有列表 API 一致。
+8. **不拦截原则**：开账号表单的额度提示只读展示，任何异常（如请求失败）都**不**阻止表单提交；失败时在提示块显示"获取失败"，不抛错阻断。
+
+---
+
+### 9. 任务依赖图（Mermaid）
+
+见 `docs/sequence-diagram.mermaid` 同目录；依赖关系：T01 → {T02} → {T03, T04}，T03 与 T04 相互独立。
 
 ```mermaid
 graph TD
-    T01["T01: 数据库迁移 + 数据模型层<br/>migrations.go + user.go + quota.go"]
-    T02["T02: 认证中间件 + 代理热路径 + 路由扩展<br/>middleware.go + handler.go + selector.go"]
-    T03["T03: Provider安全约束 + Admin API<br/>store.go + users.go + handler.go"]
-    T04["T04: 前端页面与交互<br/>index.html + app.js + style.css"]
-    T05["T05: 集成验证<br/>make ci + 手动验证"]
-
+    T01["T01 数据层：迁移+模型+聚合查询 (P0)"]
+    T02["T02 后端：聚合API+额度配置接口 (P0)"]
+    T03["T03 前端：列表列+Provider模态配置+公共渲染 (P0)"]
+    T04["T04 前端：开账号提示+独立仪表盘页 (P0)"]
     T01 --> T02
-    T01 --> T03
-    T02 --> T05
-    T03 --> T04
-    T04 --> T05
+    T02 --> T03
+    T02 --> T04
 ```

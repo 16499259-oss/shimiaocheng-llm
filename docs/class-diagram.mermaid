@@ -1,138 +1,109 @@
 classDiagram
-    class User {
+    %% ===== 数据模型层 (internal/models) =====
+    class ProviderRecord {
         +int64 ID
-        +string Username
-        +string PasswordHash
-        +string SubKeyHash
-        +string SubKeyPreview
-        +string Role
-        +string Status
-        +string CreatedAt
-        +string UpdatedAt
-        +string ExpiresAt
-        +string RouteMode
-        +string FixedProvider
-    }
-
-    class UserWithQuota {
-        +User User
-        +int Quota5hLimit
-        +int Quota5hUsed
-        +int QuotaTotalLimit
-        +int QuotaTotalUsed
-        +int64 TotalTokens
-        +string SubKey
-        +sql.NullFloat64 FixedMultiplier
-    }
-
-    class Quota {
-        +int64 ID
-        +int64 UserID
-        +int Quota5hLimit
-        +int Quota5hUsed
-        +int QuotaTotalLimit
-        +int QuotaTotalUsed
-        +string WindowStart
-        +string UpdatedAt
-        +sql.NullFloat64 FixedMultiplier
-    }
-
-    class createUserRequest {
-        +string Username
-        +int Quota5hLimit
-        +int QuotaTotalLimit
-        +string ExpiresAt
-        +string RouteMode
-        +string FixedProvider
-        +float64 FixedMultiplier
-    }
-
-    class updateUserRequest {
-        +int Quota5hLimit
-        +int QuotaTotalLimit
-        +string Status
-        +bool RegenerateKey
-        +string RouteMode
-        +string FixedProvider
-        +float64 FixedMultiplier
-    }
-
-    class Router {
-        +ResolveProvider(now time.Time) Provider, error
-        +RewriteModel(external, providerID string) string
-        +Reload() error
-        +GetProviderBySlug(slug string) Provider, bool
-    }
-
-    class Provider {
-        +string ID
-        +string Endpoint
-        +string APIKey
-    }
-
-    class ProviderTable {
-        +map~string,ProviderEntry~ Providers
-        +map~string,map~string,string~ Mappings
-        +RoutingRule[] Rules
-        +string Default
-    }
-
-    class ProviderEntry {
+        +string Name
         +string Slug
         +string Endpoint
-        +string APIKey
+        +[]byte EncryptedKey
+        +bool IsDefault
+        +bool Enabled
+        +bool AllowPassthrough
+        +string AuthHeader
+        +string AuthScheme
+        +string ExtraHeaders
+        +int64 MonthlyTokenLimit
+        +int64 MonthlyCallLimit
+        +string CreatedAt
+        +string UpdatedAt
     }
 
-    class authMiddleware {
-        +SubKeyAuth(http.Handler) http.Handler
-        +CtxKeyUserID
-        +CtxKeyUserRole
-        +CtxKeyRouteMode
-        +CtxKeyFixedProvider
+    class ProviderWithMaskedKey {
+        +int64 ID
+        +string Name
+        +string Slug
+        +string Endpoint
+        +string MaskedKey
+        +bool IsDefault
+        +bool Enabled
+        +bool AllowPassthrough
+        +string AuthHeader
+        +string AuthScheme
+        +string ExtraHeaders
+        +int64 MonthlyTokenLimit
+        +int64 MonthlyCallLimit
+        +string CreatedAt
+        +string UpdatedAt
+    }
+    ProviderRecord <|-- ProviderWithMaskedKey
+
+    class ProviderMonthlyUsage {
+        +string Slug
+        +int64 TokenUsed
+        +int64 CallUsed
     }
 
-    class ProxyHandler {
-        +ServeHTTP(w, r)
-        +handleSync(...)
-        +handleStream(...)
-        +Router *Router
-        +MultiplierEng *MultiplierEngine
-        +QuotaChecker *Checker
+    class ProviderUsageView {
+        +string Slug
+        +string Name
+        +int64 MonthlyTokenLimit
+        +int64 MonthlyCallLimit
+        +int64 TokenUsed
+        +int64 TokenRemaining
+        +bool TokenUnlimited
+        +int64 CallUsed
+        +int64 CallRemaining
+        +bool CallUnlimited
+        +string WindowStart
+        +bool TokenLow
+        +bool CallLow
+    }
+    ProviderMonthlyUsage ..> ProviderUsageView : BuildProviderUsageView(p, used, window)
+
+    class ModelsUsage {
+        <<package functions>>
+        +RollingWindowStart() string
+        +AggregateProviderUsage(db, windowStart) map~string,ProviderMonthlyUsage~
+        +GetProviderUsage(db, slug, windowStart) *ProviderMonthlyUsage
+        +IsLowBalance(used, limit) bool
+        +BuildProviderUsageView(p, used, window) ProviderUsageView
     }
 
-    class AdminHandler {
-        +CreateUser(w, r)
-        +UpdateUser(w, r)
-        +ListUsers(w, r)
-        +DeleteUser(w, r)
-        +ProviderStore *ProviderStore
-        +Router *Router
-    }
-
+    %% ===== 存储层 (internal/provider) =====
     class ProviderStore {
-        +DeleteProvider(slug string) error
-        +GetProvider(slug string) *ProviderRecord
+        -db *sql.DB
+        -kek []byte
+        +ListProviders() []ProviderRecord
+        +GetProvider(slug) *ProviderRecord
+        +CreateProvider(name, slug, endpoint, apiKey, isDefault, allowPassthrough, authHeader, authScheme, extraHeaders, monthlyTokenLimit, monthlyCallLimit) *ProviderRecord
+        +UpdateProvider(slug, updates) *ProviderRecord
+        +BuildMaskedProviders() []ProviderWithMaskedKey
+        +SeedFromConfig(cfg) error
     }
+    ProviderStore --> ProviderRecord : 读写
+    ProviderStore --> ProviderWithMaskedKey : 构造
 
-    class QuotaModel {
-        +GetFixedMultiplier(db, userID) sql.NullFloat64
-        +UpdateFixedMultiplier(db, userID, multiplier)
+    %% ===== 后端 API 层 (internal/admin) =====
+    class AdminHandler {
+        +DB *sql.DB
+        +ProviderStore *ProviderStore
+        +HandleListProviderUsage(w, r)
+        +HandleGetProviderUsage(w, r)
+        +ServeProviderUsagePage(w, r)
     }
+    AdminHandler --> ProviderStore : 取 providers + 限额
+    AdminHandler --> ModelsUsage : 调聚合/低余额
+    AdminHandler ..> ProviderUsageView : 返回 data
 
-    class UserModel {
-        +CreateUser(...)
-        +GetUserBySubKeyHash(db, hash) User
-        +GetUserByID(db, id) User
-        +GetUsersByFixedProvider(db, slug) []string
-        +UpdateUserRoute(db, id, mode, provider) error
+    %% ===== 前端 (web/admin) =====
+    class FrontendState {
+        +providerMap: slug->name
+        +usageMap: slug->ProviderUsageView
+        +loadProviders()
+        +fetchProviderUsage(slug)
+        +loadProviderUsage()
+        +formatToken(n)
+        +renderUsageCell(used, limit, low)
     }
-
-    UserWithQuota --|> User : embeds
-    ProxyHandler --> Router : uses
-    ProxyHandler --> authMiddleware : GetUserID/GetRouteMode
-    Router --> ProviderTable : atomic snapshot
-    AdminHandler --> ProviderStore : uses
-    AdminHandler ..> createUserRequest : decodes
-    AdminHandler ..> updateUserRequest : decodes
-    Quota ..> QuotaModel : CRUD
-    User ..> UserModel : CRUD
+    FrontendState ..> ProviderUsageView : 消费 data
+    FrontendState ..> AdminHandler : GET /api/provider-usage , /api/providers/{slug}/usage

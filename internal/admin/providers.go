@@ -23,6 +23,9 @@ type createProviderRequest struct {
 	AuthHeader       string            `json:"auth_header"`
 	AuthScheme       string            `json:"auth_scheme"`
 	ExtraHeaders     map[string]string `json:"extra_headers"`
+	// ── Monthly quota (0 = unlimited) ──
+	MonthlyTokenLimit int64 `json:"monthly_token_limit"`
+	MonthlyCallLimit  int64 `json:"monthly_call_limit"`
 }
 
 // updateProviderRequest is the JSON body for PUT /admin/api/providers/{slug}.
@@ -39,6 +42,9 @@ type updateProviderRequest struct {
 	AuthHeader       *string            `json:"auth_header"`
 	AuthScheme       *string            `json:"auth_scheme"`
 	ExtraHeaders     *map[string]string `json:"extra_headers"`
+	// ── Monthly quota (0 = unlimited) ──
+	MonthlyTokenLimit *int64 `json:"monthly_token_limit"`
+	MonthlyCallLimit  *int64 `json:"monthly_call_limit"`
 }
 
 // HandleListProviders handles GET /admin/api/providers.
@@ -78,6 +84,7 @@ func (h *Handler) HandleCreateProvider(w http.ResponseWriter, r *http.Request) {
 	prov, err := h.ProviderStore.CreateProvider(
 		req.Name, req.Slug, req.Endpoint, req.APIKey, req.IsDefault,
 		req.AllowPassthrough, authHeader, authScheme, req.ExtraHeaders,
+		req.MonthlyTokenLimit, req.MonthlyCallLimit,
 	)
 	if err != nil {
 		log.Printf("ERROR: create provider: %v", err)
@@ -134,6 +141,12 @@ func (h *Handler) HandleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ExtraHeaders != nil {
 		updates["extra_headers"] = *req.ExtraHeaders
+	}
+	if req.MonthlyTokenLimit != nil {
+		updates["monthly_token_limit"] = *req.MonthlyTokenLimit
+	}
+	if req.MonthlyCallLimit != nil {
+		updates["monthly_call_limit"] = *req.MonthlyCallLimit
 	}
 
 	if len(updates) == 0 {

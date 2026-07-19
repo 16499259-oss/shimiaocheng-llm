@@ -11,12 +11,14 @@ type ProviderRecord struct {
 	IsDefault    bool   `json:"is_default"`
 	Enabled      bool   `json:"enabled"`
 	// ── Passthrough / MCP support ──
-	AllowPassthrough bool   `json:"allow_passthrough"` // provider may be used as a passthrough target
-	AuthHeader       string `json:"auth_header"`       // upstream auth header name
-	AuthScheme       string `json:"auth_scheme"`       // "bearer" | "x-api-key" | "none"
-	ExtraHeaders     string `json:"extra_headers"`     // JSON object string, e.g. {"anthropic-version":"2023-06-01"}
-	CreatedAt        string `json:"created_at"`
-	UpdatedAt        string `json:"updated_at"`
+	AllowPassthrough  bool   `json:"allow_passthrough"`   // provider may be used as a passthrough target
+	AuthHeader        string `json:"auth_header"`         // upstream auth header name
+	AuthScheme        string `json:"auth_scheme"`         // "bearer" | "x-api-key" | "none"
+	ExtraHeaders      string `json:"extra_headers"`       // JSON object string, e.g. {"anthropic-version":"2023-06-01"}
+	MonthlyTokenLimit int64  `json:"monthly_token_limit"` // 0 = unlimited
+	MonthlyCallLimit  int64  `json:"monthly_call_limit"`  // 0 = unlimited
+	CreatedAt         string `json:"created_at"`
+	UpdatedAt         string `json:"updated_at"`
 }
 
 // ModelMappingRecord is a row from the model_mappings table.
@@ -50,12 +52,14 @@ type ProviderWithMaskedKey struct {
 	IsDefault bool   `json:"is_default"`
 	Enabled   bool   `json:"enabled"`
 	// ── Passthrough / MCP support ──
-	AllowPassthrough bool   `json:"allow_passthrough"`
-	AuthHeader       string `json:"auth_header"`
-	AuthScheme       string `json:"auth_scheme"`
-	ExtraHeaders     string `json:"extra_headers"`
-	CreatedAt        string `json:"created_at"`
-	UpdatedAt        string `json:"updated_at"`
+	AllowPassthrough  bool   `json:"allow_passthrough"`
+	AuthHeader        string `json:"auth_header"`
+	AuthScheme        string `json:"auth_scheme"`
+	ExtraHeaders      string `json:"extra_headers"`
+	MonthlyTokenLimit int64  `json:"monthly_token_limit"` // 0 = unlimited
+	MonthlyCallLimit  int64  `json:"monthly_call_limit"`  // 0 = unlimited
+	CreatedAt         string `json:"created_at"`
+	UpdatedAt         string `json:"updated_at"`
 }
 
 // RoutingRule mirrors a row in the provider_routing_rules table.

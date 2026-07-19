@@ -12,10 +12,13 @@ document.addEventListener('DOMContentLoaded', () => {
     loadProviders(); // preload provider map for route mode dropdowns
     setupEventListeners();
 
-    // Restore tab from URL hash, default to dashboard
+    // Restore tab from URL hash (or the injected __INIT_TAB__ on the deep-link
+    // dashboard page /admin/provider-usage), default to dashboard.
     const hash = location.hash.replace(/^#/, '');
-    const initialTab = VALID_TABS.includes(hash) ? hash : 'dashboard';
-    switchTab(initialTab);
+    const initTab = (window.__INIT_TAB__ && VALID_TABS.includes(window.__INIT_TAB__))
+        ? window.__INIT_TAB__
+        : (VALID_TABS.includes(hash) ? hash : 'dashboard');
+    switchTab(initTab);
 });
 
 // ===== Event Listeners =====
@@ -40,10 +43,23 @@ function setupEventListeners() {
     });
     // Route mode toggle: show/hide fixed provider selector
     document.getElementById('new-route-mode').addEventListener('change', function() {
-        document.getElementById('new-fixed-provider-group').style.display = this.value === 'fixed' ? '' : 'none';
+        const isFixed = this.value === 'fixed';
+        document.getElementById('new-fixed-provider-group').style.display = isFixed ? '' : 'none';
+        if (isFixed) fetchProviderUsage(this.form.querySelector('#new-fixed-provider').value, 'new-provider-usage');
+        else { const h = document.getElementById('new-provider-usage'); if (h) h.innerHTML = ''; }
     });
     document.getElementById('update-route-mode').addEventListener('change', function() {
-        document.getElementById('update-fixed-provider-group').style.display = this.value === 'fixed' ? '' : 'none';
+        const isFixed = this.value === 'fixed';
+        document.getElementById('update-fixed-provider-group').style.display = isFixed ? '' : 'none';
+        if (isFixed) fetchProviderUsage(this.form.querySelector('#update-fixed-provider').value, 'update-provider-usage');
+        else { const h = document.getElementById('update-provider-usage'); if (h) h.innerHTML = ''; }
+    });
+    // Live quota hint when the fixed provider selection changes.
+    document.getElementById('new-fixed-provider').addEventListener('change', function() {
+        fetchProviderUsage(this.value, 'new-provider-usage');
+    });
+    document.getElementById('update-fixed-provider').addEventListener('change', function() {
+        fetchProviderUsage(this.value, 'update-provider-usage');
     });
 
     // Call-stats panel filter bar (bound once; elements live in the DOM at load).
@@ -58,7 +74,7 @@ function setupEventListeners() {
 }
 
 // ===== Tab Switching =====
-const VALID_TABS = ['dashboard', 'users', 'providers', 'mappings', 'routing', 'multipliers', 'audit', 'callstats'];
+const VALID_TABS = ['dashboard', 'users', 'providers', 'provider-usage', 'mappings', 'routing', 'multipliers', 'audit', 'callstats'];
 
 function switchTab(tabName) {
     // Update nav active state
@@ -80,6 +96,7 @@ function switchTab(tabName) {
         case 'routing': loadRoutingRules(); break;
         case 'multipliers': loadMultipliers(); break;
         case 'audit': loadAuditLogs(); break;
+        case 'provider-usage': loadProviderUsage(); break;
         case 'callstats': initCallStatsTab(); break;
     }
 
@@ -123,17 +140,28 @@ async function loadOverview() {
 // ===== Providers =====
 async function loadProviders() {
     try {
-        const data = await apiFetch('api/providers');
+        // Parallel fetch: provider list + rolling-window usage, merged by slug.
+        const [provData, usageData] = await Promise.all([
+            apiFetch('api/providers'),
+            apiFetch('api/provider-usage').catch(() => ({ data: [] })),
+        ]);
         const tbody = document.getElementById('providers-tbody');
-        if (!data || !data.data || data.data.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="10" class="text-center">暂无上游</td></tr>';
+        const provs = (provData && provData.data) || [];
+        if (provs.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="12" class="text-center">暂无上游</td></tr>';
             return;
         }
+
+        // Merge usage by slug (usage may be empty for providers with no calls).
+        const usageMap = {};
+        ((usageData && usageData.data) || []).forEach(u => { usageMap[u.slug] = u; });
+
         providerMap = {};
         providerDetail = {};
-        data.data.forEach(p => { providerMap[p.slug] = p.name; providerDetail[p.slug] = p; });
+        provs.forEach(p => { providerMap[p.slug] = p.name; providerDetail[p.slug] = p; });
 
-        tbody.innerHTML = data.data.map(p => {
+        const localeFmt = n => (Number(n) || 0).toLocaleString();
+        tbody.innerHTML = provs.map(p => {
             const defBadge = p.is_default ? ' <span class="badge badge-success">默认</span>' : '';
             const statusBadge = p.enabled
                 ? '<span class="badge badge-active">启用</span>'
@@ -141,6 +169,9 @@ async function loadProviders() {
             const passBadge = p.allow_passthrough
                 ? '<span class="badge badge-success">✅</span>'
                 : '<span class="badge badge-disabled">-</span>';
+            const u = usageMap[p.slug];
+            const tokenCell = u ? renderUsageCell(u.token_used, u.monthly_token_limit, u.token_low) : '<span class="usage-unlimited">不限制</span>';
+            const callCell = u ? renderUsageCell(u.call_used, u.monthly_call_limit, u.call_low, localeFmt) : '<span class="usage-unlimited">不限制</span>';
             return `<tr>
                 <td>${p.id}</td>
                 <td>${escapeHtml(p.name)}${defBadge}</td>
@@ -150,6 +181,8 @@ async function loadProviders() {
                 <td>${p.is_default ? '✅' : '-'}</td>
                 <td>${passBadge}</td>
                 <td>${statusBadge}</td>
+                <td>${tokenCell}</td>
+                <td>${callCell}</td>
                 <td>${formatDate(p.created_at)}</td>
                 <td>
                     <div class="btn-group">
@@ -190,6 +223,9 @@ function openProviderModal(slug) {
         document.getElementById('prov-auth-header').value = '';
         document.getElementById('prov-auth-scheme').value = 'bearer';
         document.getElementById('prov-extra-headers').innerHTML = '';
+        // Monthly quota defaults (0 = unlimited).
+        document.getElementById('prov-monthly-token-limit').value = '0';
+        document.getElementById('prov-monthly-call-limit').value = '0';
     }
     showModal('provider-modal');
 }
@@ -210,6 +246,9 @@ function editProvider(slug) {
     document.getElementById('prov-allow-passthrough').checked = !!p.allow_passthrough;
     document.getElementById('prov-auth-header').value = p.auth_header || '';
     document.getElementById('prov-auth-scheme').value = p.auth_scheme || 'bearer';
+    // Monthly quota fields.
+    document.getElementById('prov-monthly-token-limit').value = (p.monthly_token_limit != null) ? p.monthly_token_limit : 0;
+    document.getElementById('prov-monthly-call-limit').value = (p.monthly_call_limit != null) ? p.monthly_call_limit : 0;
     // Rebuild extra_headers rows from the stored JSON string.
     document.getElementById('prov-extra-headers').innerHTML = '';
     let extra = {};
@@ -259,13 +298,16 @@ async function saveProvider(e) {
     const authHeader = document.getElementById('prov-auth-header').value.trim();
     const authScheme = document.getElementById('prov-auth-scheme').value;
     const extraHeaders = collectExtraHeaders();
+    const monthlyTokenLimit = parseInt(document.getElementById('prov-monthly-token-limit').value, 10) || 0;
+    const monthlyCallLimit = parseInt(document.getElementById('prov-monthly-call-limit').value, 10) || 0;
 
     if (!name || !endpoint) { showToast('名称和端点为必填项', 'error'); return; }
     if (!isEdit && !slug) { showToast('Slug 为必填项', 'error'); return; }
 
     try {
         if (isEdit) {
-            const body = { name, endpoint, allow_passthrough: allowPassthrough, auth_header: authHeader, auth_scheme: authScheme, extra_headers: extraHeaders };
+            const body = { name, endpoint, allow_passthrough: allowPassthrough, auth_header: authHeader, auth_scheme: authScheme, extra_headers: extraHeaders,
+                monthly_token_limit: monthlyTokenLimit, monthly_call_limit: monthlyCallLimit };
             if (apiKey) body.api_key = apiKey;
             if (isDefault) body.is_default = true;
             await apiFetch('api/providers/' + encodeURIComponent(editSlug), {
@@ -279,6 +321,7 @@ async function saveProvider(e) {
                     name, slug, endpoint, api_key: apiKey, is_default: isDefault,
                     allow_passthrough: allowPassthrough, auth_header: authHeader,
                     auth_scheme: authScheme, extra_headers: extraHeaders,
+                    monthly_token_limit: monthlyTokenLimit, monthly_call_limit: monthlyCallLimit,
                 }),
             });
             showToast('上游已创建', 'success');
@@ -295,6 +338,105 @@ async function deleteProvider(slug, name) {
         showToast('上游已删除', 'success');
         loadProviders();
     } catch (err) { showToast('删除失败: ' + err.message, 'error'); }
+}
+
+// ===== Provider Monthly Usage (上游额度可见性) =====
+
+// formatToken abbreviates large token counts: K/M/亿 with up to 2 decimals
+// (trailing zeros removed). Mirrors the backend's human-readable convention.
+function trimTrailingZeros(s) {
+    return s.indexOf('.') >= 0 ? s.replace(/\.?0+$/, '') : s;
+}
+function formatToken(n) {
+    n = Number(n) || 0;
+    if (n < 1000) return String(n);
+    if (n < 1e6) return trimTrailingZeros((n / 1e3).toFixed(1)) + 'K';
+    if (n < 1e8) return trimTrailingZeros((n / 1e6).toFixed(2)) + 'M';
+    return trimTrailingZeros((n / 1e8).toFixed(2)) + '亿';
+}
+
+// renderUsageCell renders a single usage column (token or call). It shows
+// used/limit, a progress bar, and the remaining percentage; an unlimited
+// limit (limit<=0) shows "不限制" with no bar. `low` adds the red class.
+// `numFmt` formats the numbers (defaults to formatToken; pass toLocaleString
+// for call counts).
+function renderUsageCell(used, limit, low, numFmt) {
+    numFmt = numFmt || formatToken;
+    used = Number(used) || 0;
+    if (!limit || limit <= 0) {
+        return `<div class="usage-cell${low ? ' usage-low' : ''}"><span class="usage-unlimited">不限制</span></div>`;
+    }
+    const remaining = limit - used;
+    const pct = Math.min(100, Math.round(used / limit * 100));
+    const barCls = pct > 80 ? 'bad' : (pct > 50 ? 'warn' : 'good');
+    const lowCls = low ? ' usage-low' : '';
+    return `<div class="usage-cell${lowCls}">
+        <div class="usage-nums"><span>${numFmt(used)}</span> / <span>${numFmt(limit)}</span></div>
+        <div class="usage-bar"><div class="usage-fill ${barCls}" style="width:${pct}%"></div></div>
+        <div class="usage-meta">剩余 ${numFmt(remaining)} · ${pct}%</div>
+    </div>`;
+}
+
+// fetchProviderUsage pulls a single provider's rolling-window usage to show a
+// live hint in the account-creation form. It NEVER blocks form submission:
+// on any error it only displays "获取失败". `hintId` selects which hint block
+// (create vs edit modal) to populate.
+async function fetchProviderUsage(slug, hintId) {
+    const hintEl = document.getElementById(hintId);
+    if (!hintEl) return;
+    if (!slug) {
+        hintEl.innerHTML = '<span class="usage-hint-text">未指定固定上游（全局路由，无额度提示）</span>';
+        return;
+    }
+    try {
+        const data = await apiFetch('api/providers/' + encodeURIComponent(slug) + '/usage');
+        const u = data && data.data;
+        if (!u) {
+            hintEl.innerHTML = '<span class="usage-hint-text">获取失败</span>';
+            return;
+        }
+        const localeFmt = n => (Number(n) || 0).toLocaleString();
+        hintEl.innerHTML = `
+            <div class="usage-hint-row"><span class="usage-hint-label">本月 Token</span>${renderUsageCell(u.token_used, u.monthly_token_limit, u.token_low)}</div>
+            <div class="usage-hint-row"><span class="usage-hint-label">本月 调用</span>${renderUsageCell(u.call_used, u.monthly_call_limit, u.call_low, localeFmt)}</div>`;
+    } catch (err) {
+        // Read-only hint only — must not block the create/edit submit.
+        hintEl.innerHTML = '<span class="usage-hint-text">获取失败</span>';
+        console.error('fetch provider usage failed:', err);
+    }
+}
+
+// loadProviderUsage renders the standalone quota dashboard cards.
+async function loadProviderUsage() {
+    const grid = document.getElementById('provider-usage-cards');
+    if (!grid) return;
+    try {
+        const data = await apiFetch('api/provider-usage');
+        const views = (data && data.data) || [];
+        if (views.length === 0) {
+            grid.innerHTML = '<p class="text-center">暂无上游</p>';
+            return;
+        }
+        const localeFmt = n => (Number(n) || 0).toLocaleString();
+        const now = new Date().toLocaleString('zh-CN');
+        grid.innerHTML = views.map(u => {
+            const tokenCell = renderUsageCell(u.token_used, u.monthly_token_limit, u.token_low);
+            const callCell = renderUsageCell(u.call_used, u.monthly_call_limit, u.call_low, localeFmt);
+            const lowCls = (u.token_low || u.call_low) ? ' usage-card-low' : '';
+            return `<div class="usage-card${lowCls}">
+                <div class="usage-card-head">
+                    <span class="usage-card-name">${escapeHtml(u.name)}</span>
+                    <code class="usage-card-slug">${escapeHtml(u.slug)}</code>
+                </div>
+                <div class="usage-card-row"><span class="usage-card-label">本月 Token</span>${tokenCell}</div>
+                <div class="usage-card-row"><span class="usage-card-label">本月 调用</span>${callCell}</div>
+                <div class="usage-card-foot">窗口起点 ${formatDate(u.window_start)} · 更新于 ${escapeHtml(now)}</div>
+            </div>`;
+        }).join('');
+    } catch (err) {
+        console.error('Failed to load provider usage:', err);
+        grid.innerHTML = '<p class="text-center">加载失败</p>';
+    }
 }
 
 // ===== Model Mappings =====
@@ -653,6 +795,7 @@ function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier,
             document.getElementById('update-fixed-provider-group').style.display = '';
             if (fixedProvider && fixedProvider !== 'null' && fixedProvider !== '') {
                 document.getElementById('update-fixed-provider').value = fixedProvider;
+                fetchProviderUsage(fixedProvider, 'update-provider-usage');
             }
         }
     }
