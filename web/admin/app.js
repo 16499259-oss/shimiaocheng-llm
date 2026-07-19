@@ -178,15 +178,15 @@ async function loadProviders() {
                 <td>${p.id}</td>
                 <td>${escapeHtml(p.name)}${defBadge}</td>
                 <td><code>${escapeHtml(p.slug)}</code></td>
-                <td><span class="endpoint-text" title="${escapeHtml(p.endpoint)}">${escapeHtml(truncateUrl(p.endpoint))}</span></td>
-                <td><span class="key-masked">${escapeHtml(p.masked_key)}</span></td>
-                <td>${p.is_default ? '✅' : '-'}</td>
-                <td>${passBadge}</td>
-                <td>${statusBadge}</td>
+                <td>${p.cycle_start_date ? formatDate(p.cycle_start_date) : '-'}</td>
                 <td>${tokenCell}</td>
                 <td>${allocTokenCell}</td>
                 <td>${callCell}</td>
                 <td>${allocCallCell}</td>
+                <td>${statusBadge}</td>
+                <td>${passBadge}</td>
+                <td><span class="endpoint-text" title="${escapeHtml(p.endpoint)}">${escapeHtml(truncateUrl(p.endpoint))}</span></td>
+                <td><span class="key-masked">${escapeHtml(p.masked_key)}</span></td>
                 <td>${formatDate(p.created_at)}</td>
                 <td>
                     <div class="btn-group">
