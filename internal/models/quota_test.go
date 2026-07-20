@@ -178,3 +178,86 @@ func TestAtomicDeductQuota_TokenSoftGatePermitsSingleOverage(t *testing.T) {
 		t.Fatalf("expected next request blocked once used >= limit")
 	}
 }
+
+// TestResetTokenStats verifies the three Token-usage buckets (5h / week / month)
+// are zeroed, the Token-only window anchors (week_start, month_start) are bumped
+// to now, and the call-count columns (window_start, quota_5h_used, quota_total_used)
+// are NOT touched.
+func TestResetTokenStats(t *testing.T) {
+	database := newModelsTestDB(t)
+	userID := newQuotaUser(t, database, 100, 10000)
+
+	// Seed token-usage buckets to non-zero values.
+	if err := models.AddTokenUsage(database.Conn, userID, 50); err != nil {
+		t.Fatalf("seed token usage: %v", err)
+	}
+	// Also seed call-count columns.
+	if _, err := database.Conn.Exec(
+		`UPDATE quotas SET quota_5h_used = 7, quota_total_used = 42 WHERE user_id = ?`, userID,
+	); err != nil {
+		t.Fatalf("seed call-count cols: %v", err)
+	}
+
+	// Force week_start and month_start to known old values so the bump is
+	// detectable (the reset writes time.Now() which may equal CreateUser's
+	// initial value at second granularity).
+	if _, err := database.Conn.Exec(
+		`UPDATE quotas SET week_start = '2020-01-01T00:00:00Z', month_start = '2020-01-01T00:00:00Z' WHERE user_id = ?`, userID,
+	); err != nil {
+		t.Fatalf("set old anchors: %v", err)
+	}
+
+	// Capture pre-reset state.
+	qBefore, err := models.GetQuota(database.Conn, userID)
+	if err != nil || qBefore == nil {
+		t.Fatalf("GetQuota before: %v", err)
+	}
+	oldWeekStart := qBefore.WeekStart
+	oldMonthStart := qBefore.MonthStart
+	oldWindowStart := qBefore.WindowStart
+
+	// Sanity: token buckets are non-zero.
+	if qBefore.QuotaToken5hUsed == 0 || qBefore.QuotaTokenWeekUsed == 0 || qBefore.QuotaTokenTotalUsed == 0 {
+		t.Fatalf("expected token buckets to be non-zero after seeding")
+	}
+
+	// Reset.
+	if err := models.ResetTokenStats(database.Conn, userID, ""); err != nil {
+		t.Fatalf("ResetTokenStats: %v", err)
+	}
+
+	qAfter, err := models.GetQuota(database.Conn, userID)
+	if err != nil || qAfter == nil {
+		t.Fatalf("GetQuota after: %v", err)
+	}
+
+	// Token buckets MUST be zero.
+	if qAfter.QuotaToken5hUsed != 0 {
+		t.Fatalf("quota_token_5h_used expected 0, got %d", qAfter.QuotaToken5hUsed)
+	}
+	if qAfter.QuotaTokenWeekUsed != 0 {
+		t.Fatalf("quota_token_week_used expected 0, got %d", qAfter.QuotaTokenWeekUsed)
+	}
+	if qAfter.QuotaTokenTotalUsed != 0 {
+		t.Fatalf("quota_token_total_used expected 0, got %d", qAfter.QuotaTokenTotalUsed)
+	}
+
+	// Call-count columns MUST be unchanged.
+	if qAfter.Quota5hUsed != 7 {
+		t.Fatalf("quota_5h_used expected 7 (unchanged), got %d", qAfter.Quota5hUsed)
+	}
+	if qAfter.QuotaTotalUsed != 42 {
+		t.Fatalf("quota_total_used expected 42 (unchanged), got %d", qAfter.QuotaTotalUsed)
+	}
+	if qAfter.WindowStart != oldWindowStart {
+		t.Fatalf("window_start expected %q (unchanged), got %q", oldWindowStart, qAfter.WindowStart)
+	}
+
+	// Token-only window anchors MUST be bumped forward.
+	if qAfter.WeekStart == oldWeekStart {
+		t.Fatalf("week_start expected to be bumped, but still %q", qAfter.WeekStart)
+	}
+	if qAfter.MonthStart == oldMonthStart {
+		t.Fatalf("month_start expected to be bumped, but still %q", qAfter.MonthStart)
+	}
+}

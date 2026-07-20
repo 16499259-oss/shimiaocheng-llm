@@ -21,6 +21,7 @@ type Quota struct {
 	QuotaTokenWeekLimit  int             `json:"quota_token_week_limit"`  // 0 = unlimited (Token cap within rolling 7d)
 	QuotaTokenWeekUsed   int             `json:"quota_token_week_used"`   // Token used within rolling 7d bucket
 	WeekStart            string          `json:"week_start"`              // rolling-7d bucket anchor
+	MonthStart           string          `json:"month_start"`             // rolling-30d (month) Token bucket anchor
 	WindowStart          string          `json:"window_start"`
 	UpdatedAt            string          `json:"updated_at"`
 	FixedMultiplier      sql.NullFloat64 `json:"fixed_multiplier"`
@@ -46,6 +47,7 @@ type QuotaStatus struct {
 	TotalTokens              int64  `json:"total_tokens"`
 	TotalTokensToday         int64  `json:"total_tokens_today"`
 	WindowResetAt            string `json:"window_reset_at"`
+	MonthResetAt             string `json:"month_reset_at"` // month_start + 30d (rolling-30d Token bucket next reset)
 	Status                   string `json:"status"`
 	ExpiresAt                string `json:"expires_at"` // user account expiry; "" means permanent (no expiry)
 }
@@ -57,12 +59,12 @@ func GetQuota(db *sql.DB, userID int64) (*Quota, error) {
 		`SELECT id, user_id, quota_5h_limit, quota_5h_used, quota_total_limit, quota_total_used,
 		        quota_token_total_limit, quota_token_total_used,
 		        quota_token_5h_limit, quota_token_5h_used, quota_token_week_limit, quota_token_week_used, week_start,
-		        window_start, updated_at, fixed_multiplier
+		        month_start, window_start, updated_at, fixed_multiplier
 		 FROM quotas WHERE user_id = ?`, userID,
 	).Scan(&q.ID, &q.UserID, &q.Quota5hLimit, &q.Quota5hUsed, &q.QuotaTotalLimit, &q.QuotaTotalUsed,
 		&q.QuotaTokenTotalLimit, &q.QuotaTokenTotalUsed,
 		&q.QuotaToken5hLimit, &q.QuotaToken5hUsed, &q.QuotaTokenWeekLimit, &q.QuotaTokenWeekUsed, &q.WeekStart,
-		&q.WindowStart, &q.UpdatedAt, &q.FixedMultiplier)
+		&q.MonthStart, &q.WindowStart, &q.UpdatedAt, &q.FixedMultiplier)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -120,6 +122,7 @@ func AtomicDeductQuota(db *sql.DB, userID int64, effectiveCalls int) (bool, erro
 	// (SQLite datetime('now')) and the local-now values written by CreateUser /
 	// the gate itself.
 	weekCutoff := time.Now().Add(-7 * 24 * time.Hour).Format(time.RFC3339)
+	monthCutoff := time.Now().Add(-30 * 24 * time.Hour).Format(time.RFC3339)
 	nowTime := time.Now().Format(time.RFC3339)
 	result, err := db.Exec(
 		`UPDATE quotas
@@ -127,19 +130,24 @@ func AtomicDeductQuota(db *sql.DB, userID int64, effectiveCalls int) (bool, erro
 		     quota_total_used = quota_total_used + ?,
 		     quota_token_week_used = CASE WHEN week_start < ? THEN 0 ELSE quota_token_week_used END,
 		     week_start = CASE WHEN week_start < ? THEN ? ELSE week_start END,
+		     quota_token_total_used = CASE WHEN month_start < ? THEN 0 ELSE quota_token_total_used END,
+		     month_start = CASE WHEN month_start < ? THEN ? ELSE month_start END,
 		     updated_at = ?
 		 WHERE user_id = ?
 		   AND quota_5h_used + ? <= quota_5h_limit
 		   AND quota_total_used + ? <= quota_total_limit
-		   AND (quota_token_total_limit = 0 OR quota_token_total_used < quota_token_total_limit)
+		   AND (quota_token_total_limit = 0 OR (CASE WHEN month_start < ? THEN 0 ELSE quota_token_total_used END) < quota_token_total_limit)
 		   AND (quota_token_5h_limit = 0 OR quota_token_5h_used < quota_token_5h_limit)
 		   AND (quota_token_week_limit = 0 OR (CASE WHEN week_start < ? THEN 0 ELSE quota_token_week_used END) < quota_token_week_limit)`,
 		effectiveCalls, effectiveCalls, // SET quota_5h_used, quota_total_used
 		weekCutoff,         // SET quota_token_week_used CASE — reset判定
 		weekCutoff, nowTime, // SET week_start CASE — reset判定 + bump 值
+		monthCutoff,        // SET quota_token_total_used CASE — reset判定
+		monthCutoff, nowTime, // SET month_start CASE — reset判定 + bump 值
 		nowTime,            // SET updated_at
 		userID,             // WHERE user_id
 		effectiveCalls, effectiveCalls, // WHERE 次数闸门 (5h / total)
+		monthCutoff,        // WHERE 月 token 闸门 CASE 判定
 		weekCutoff,         // WHERE 周 token 闸门 CASE 判定
 	)
 	if err != nil {
@@ -267,6 +275,44 @@ func CompensateQuotaReset(db *sql.DB, resetIntervalHours int) error {
 		currentWindowStart.Format(time.RFC3339),
 	)
 	return err
+}
+
+// ResetTokenStats zeroes the THREE Token-usage buckets (5h / week / month) for a
+// user and bumps the Token-only window anchors (week_start, month_start) to now.
+//
+// CRITICAL (硬约束 decision R1): it MUST NOT touch the call-count columns
+// window_start / quota_5h_used / quota_total_used — those are the 5h call-count
+// quota and must remain untouched ("次数不重置"). The 5h Token bucket reuses
+// the shared 5h window (window_start) per PR #27 and is reset purely by
+// zeroing quota_token_5h_used here: the gate does NOT lazy-reset the 5h Token
+// bucket (unlike the week / month buckets), so it relies on the cron
+// Reset5hQuota / CompensateQuotaReset which clears quota_token_5h_used every
+// 5h. Bumping week_start / month_start to now is the Token-only "restart
+// window" for those two buckets (their gates DO consume those anchors). One
+// atomic UPDATE — idempotent and safe to call repeatedly.
+//
+// now is an RFC3339 local-time string, written consistently with CreateUser /
+// the gate's own writes (string ordering == chronological ordering). When empty,
+// the local now is used as a best-effort default.
+func ResetTokenStats(db *sql.DB, userID int64, now string) error {
+	if now == "" {
+		now = time.Now().Format(time.RFC3339)
+	}
+	_, err := db.Exec(
+		`UPDATE quotas
+		 SET quota_token_5h_used = 0,
+		     quota_token_week_used = 0,
+		     quota_token_total_used = 0,
+		     week_start = ?,
+		     month_start = ?,
+		     updated_at = ?
+		 WHERE user_id = ?`,
+		now, now, now, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("reset token stats: %w", err)
+	}
+	return nil
 }
 
 // GetFixedMultiplier returns the fixed_multiplier for a user from the quotas table.

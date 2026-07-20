@@ -598,6 +598,10 @@
                     <label>新有效期</label>
                     <div id="extend-preview-text" style="color:var(--color-primary);font-weight:600;padding:8px 0;"></div>
                 </div>
+                <div class="form-group">
+                    <label><input type="checkbox" id="reset-token-stats" checked> 重置 Token 统计（5小时 / 本周 / 本月）</label>
+                    <small>勾选后三档 Token 用量归零并重启窗口，调用次数配额不受影响</small>
+                </div>
                 <button type="submit" class="btn btn-primary btn-block">确认延期</button>
             </form>
         </div>
