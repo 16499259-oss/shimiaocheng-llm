@@ -185,24 +185,19 @@ func RunMigrations(conn *DB) error {
 			return fmt.Errorf("migration alter call_logs.raw_total_tokens failed: %w", err)
 		}
 	}
-	// ── One-time backfill of call_logs.raw_total_tokens (2026-07-20) ──
+	// ── Backfill of call_logs.raw_total_tokens (2026-07-20) ──
 	// PR #35 introduced raw_total_tokens (the UNMULTIPLIED prompt+completion
-	// sum, written at insert time) but historical rows still carry the column
-	// default 0. This one-time step recomputes raw_total_tokens for every row as
-	// prompt_tokens + completion_tokens — the exact invariant InsertCallLog
-	// enforces for new rows. Guarded by the marker column call_logs_raw_backfill_v1
-	// so it runs exactly once (on the first deploy that introduces this migration);
-	// subsequent deploys skip it (column present). The UPDATE is a full in-place SET
-	// from the row's own columns, hence idempotent and self-healing.
-	if !columnExists(conn, "call_logs", "call_logs_raw_backfill_v1") {
-		if _, err := conn.Conn.Exec(
-			`ALTER TABLE call_logs ADD COLUMN call_logs_raw_backfill_v1 INTEGER NOT NULL DEFAULT 0`,
-		); err != nil {
-			return fmt.Errorf("migration add marker call_logs.call_logs_raw_backfill_v1 failed: %w", err)
-		}
-		if _, err := conn.Conn.Exec(backfillRawTotalTokensSQL); err != nil {
-			return fmt.Errorf("migration backfill call_logs.raw_total_tokens failed: %w", err)
-		}
+	// sum, written at insert time), but historical rows still carry the column
+	// default 0, which misleads the "raw (no multiplier) token" summary card.
+	// Recompute raw_total_tokens for every row as prompt_tokens +
+	// completion_tokens — the exact invariant InsertCallLog enforces for new rows.
+	// This is a full in-place SET, hence idempotent and self-healing: it runs on
+	// every deploy and silently re-derives the canonical value, so it also repairs
+	// any row that drifted. No marker column is used — a previous
+	// marker-guarded variant proved fragile (the guard could be skipped across
+	// restarts), so the backfill is now robust by construction.
+	if _, err := conn.Conn.Exec(backfillRawTotalTokensSQL); err != nil {
+		return fmt.Errorf("migration backfill call_logs.raw_total_tokens failed: %w", err)
 	}
 	// Composite index (provider_id, created_at) for the global call-stats panel.
 	// Must run AFTER the provider_id column exists (it is added above, not in the
