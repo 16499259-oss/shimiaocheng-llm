@@ -13,11 +13,22 @@ import (
 	"llm_api_gateway/internal/timeutil"
 )
 
-// TestResolveProvider_SeedWindowBoundaries validates the seeded rule
-// 14:00-18:01 -> openai at exact second-level boundaries. The window is
-// half-open [14:00, 18:01): 14:00 included, 18:01 excluded.
-func TestResolveProvider_SeedWindowBoundaries(t *testing.T) {
+// TestResolveProvider_WindowBoundaries validates the 14:00-18:01 -> openai
+// rule at exact second-level boundaries. The window is half-open
+// [14:00, 18:01): 14:00 included, 18:01 excluded. No rule is seeded by
+// migrations anymore (see internal/db/migrations.go), so the rule is inserted
+// explicitly below — consistent with the other window tests in this package.
+func TestResolveProvider_WindowBoundaries(t *testing.T) {
 	database := newRouterTestDB(t)
+
+	// Insert the 14:00-18:01 -> openai rule ourselves. The rule MUST exist in
+	// the DB before newRouterWithConfig builds the router snapshot via Reload().
+	if _, err := database.Conn.Exec(
+		`INSERT INTO provider_routing_rules (provider_id, start_time, end_time, days_of_week, timezone, enabled) VALUES (?, ?, ?, ?, ?, ?)`,
+		"openai", "14:00", "18:01", "*", "Asia/Shanghai", 1); err != nil {
+		t.Fatalf("insert window rule: %v", err)
+	}
+
 	r := newRouterWithConfig(t, database, testConfig())
 
 	cases := []struct {
@@ -92,6 +103,16 @@ func TestResolveProvider_OvernightRoutingRule(t *testing.T) {
 // default provider.
 func TestResolveProvider_NoFallbackWhenTargetHasNoKey(t *testing.T) {
 	database := newRouterTestDB(t)
+
+	// Insert the 14:00-18:01 -> openai rule ourselves (no rule is seeded by
+	// migrations anymore). The rule MUST exist before newRouterWithConfig
+	// builds the router snapshot via Reload().
+	if _, err := database.Conn.Exec(
+		`INSERT INTO provider_routing_rules (provider_id, start_time, end_time, days_of_week, timezone, enabled) VALUES (?, ?, ?, ?, ?, ?)`,
+		"openai", "14:00", "18:01", "*", "Asia/Shanghai", 1); err != nil {
+		t.Fatalf("insert window rule: %v", err)
+	}
+
 	// Build a config where openai has an empty API key env var.
 	cfg := &config.Config{
 		Providers: []config.ProviderConfig{
@@ -105,7 +126,7 @@ func TestResolveProvider_NoFallbackWhenTargetHasNoKey(t *testing.T) {
 
 	r := newRouterWithConfig(t, database, cfg)
 
-	now := time.Date(2026, 1, 1, 15, 0, 0, 0, timeutil.ShanghaiTZ) // inside seed window
+	now := time.Date(2026, 1, 1, 15, 0, 0, 0, timeutil.ShanghaiTZ) // inside the 14:00-18:01 window we inserted above
 	prov, err := r.ResolveProvider(now)
 	if err != nil {
 		t.Fatalf("ResolveProvider error: %v", err)
@@ -194,7 +215,16 @@ func TestCredentialStore_ConcurrentAccess(t *testing.T) {
 // "命中即走，绝不回退"). When a time window matches a provider that is NOT
 // present in the configured providers, the router returns an error.
 func TestResolveProvider_WindowHitProviderNotConfigured(t *testing.T) {
-	database := newRouterTestDB(t) // seeds 14:00-18:01 -> openai
+	database := newRouterTestDB(t) // no seed rule exists; we insert our own below
+
+	// Insert the 14:00-18:01 -> openai rule ourselves. The config above does NOT
+	// include openai, so the window hit must surface the no-fallback error rather
+	// than silently degrade to the default provider.
+	if _, err := database.Conn.Exec(
+		`INSERT INTO provider_routing_rules (provider_id, start_time, end_time, days_of_week, timezone, enabled) VALUES (?, ?, ?, ?, ?, ?)`,
+		"openai", "14:00", "18:01", "*", "Asia/Shanghai", 1); err != nil {
+		t.Fatalf("insert routing rule: %v", err)
+	}
 
 	cfg := &config.Config{
 		Providers: []config.ProviderConfig{
@@ -205,7 +235,7 @@ func TestResolveProvider_WindowHitProviderNotConfigured(t *testing.T) {
 	defer os.Unsetenv("ZHIPU_API_KEY")
 	r := newRouterWithConfig(t, database, cfg)
 
-	now := time.Date(2026, 1, 1, 15, 0, 0, 0, timeutil.ShanghaiTZ) // inside seed window
+	now := time.Date(2026, 1, 1, 15, 0, 0, 0, timeutil.ShanghaiTZ) // inside the 14:00-18:01 window we inserted above
 	prov, err := r.ResolveProvider(now)
 
 	// DESIRED: a window that matched openai (not configured) must NOT silently

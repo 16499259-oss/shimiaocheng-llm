@@ -44,21 +44,14 @@ func TestRunMigrations_CreatesAllTables(t *testing.T) {
 	}
 }
 
-func TestRunMigrations_SeedsDefaultRoutingRule(t *testing.T) {
+func TestRunMigrations_DoesNotSeedRoutingRule(t *testing.T) {
 	database := openMigrated(t)
 	var cnt int
 	if err := database.Conn.QueryRow(`SELECT COUNT(*) FROM provider_routing_rules`).Scan(&cnt); err != nil {
 		t.Fatalf("count rules: %v", err)
 	}
-	if cnt != 1 {
-		t.Errorf("expected exactly 1 seeded routing rule, got %d", cnt)
-	}
-	var pid string
-	if err := database.Conn.QueryRow(`SELECT provider_id FROM provider_routing_rules`).Scan(&pid); err != nil {
-		t.Fatalf("select rule: %v", err)
-	}
-	if pid != "openai" {
-		t.Errorf("seeded rule provider_id = %q, want openai", pid)
+	if cnt != 0 {
+		t.Errorf("expected no seeded routing rule after a fresh migration, got %d", cnt)
 	}
 }
 
@@ -98,8 +91,8 @@ func TestRunMigrations_Idempotent(t *testing.T) {
 	if err := RunMigrations(database); err != nil {
 		t.Fatalf("second RunMigrations should be idempotent, got: %v", err)
 	}
-	// Idempotency invariant: all 9 domain tables still present, and the seed
-	// routing rule is NOT duplicated (still exactly 1 row).
+	// Idempotency invariant: all 9 domain tables still present, and no seed
+	// routing rule is created (still 0 rows).
 	for _, tbl := range []string{
 		"users", "quotas", "call_logs", "admin_sessions",
 		"time_multipliers", "provider_routing_rules", "providers",
@@ -113,8 +106,8 @@ func TestRunMigrations_Idempotent(t *testing.T) {
 	if err := database.Conn.QueryRow(`SELECT COUNT(*) FROM provider_routing_rules`).Scan(&rules); err != nil {
 		t.Fatalf("count rules: %v", err)
 	}
-	if rules != 1 {
-		t.Errorf("expected 1 seed routing rule after re-migration, got %d (duplicated?)", rules)
+	if rules != 0 {
+		t.Errorf("expected 0 routing rules after re-migration (no seed rule), got %d", rules)
 	}
 }
 

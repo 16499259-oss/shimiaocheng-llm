@@ -15,7 +15,7 @@ import (
 )
 
 // newRouterTestDB opens an isolated temp-file SQLite database, runs migrations,
-// and registers cleanup. The migrations seed a 14:00-18:01 -> openai rule.
+// and registers cleanup. No routing rule is seeded — tests insert their own.
 func newRouterTestDB(t *testing.T) *db.DB {
 	t.Helper()
 
@@ -121,9 +121,20 @@ func TestNewRouter_DefaultProvider(t *testing.T) {
 
 func TestResolveProvider_WindowHitReturnsB(t *testing.T) {
 	database := newRouterTestDB(t)
+
+	// No seed rule exists anymore; insert our own 14:00-18:01 -> openai rule so
+	// the window-hit path is exercised (testConfig already includes openai). The
+	// rule MUST be in the DB before newRouterWithConfig builds the router snapshot
+	// via Reload(), otherwise the snapshot won't see it.
+	if _, err := database.Conn.Exec(
+		`INSERT INTO provider_routing_rules (provider_id, start_time, end_time, days_of_week, timezone, enabled) VALUES (?, ?, ?, ?, ?, ?)`,
+		"openai", "14:00", "18:01", "*", "Asia/Shanghai", 1); err != nil {
+		t.Fatalf("insert routing rule: %v", err)
+	}
+
 	r := newRouterWithConfig(t, database, testConfig())
 
-	// 15:00 Asia/Shanghai matches the seeded 14:00-18:01 -> openai rule.
+	// 15:00 Asia/Shanghai matches the 14:00-18:01 -> openai rule we inserted above.
 	now := time.Date(2026, 1, 1, 15, 0, 0, 0, timeutil.ShanghaiTZ)
 	prov, err := r.ResolveProvider(now)
 	if err != nil {
