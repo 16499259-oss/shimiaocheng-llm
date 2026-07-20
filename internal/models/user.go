@@ -111,13 +111,14 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 	windowStart := calculateWindowStart(5)
 
 	// Insert quota. The 5h-window and weekly Token caps default to 0 (unlimited);
-	// week_start is written as local now so the rolling-7d bucket starts fresh.
-	// The admin API sets the actual caps afterwards via UpdateQuotaTokenWindowLimits.
+	// week_start / month_start are written as local now so the rolling-7d and
+	// rolling-30d Token buckets start fresh. The admin API sets the actual
+	// caps afterwards via UpdateQuotaTokenWindowLimits.
 	_, err = tx.Exec(
 		`INSERT INTO quotas (user_id, quota_5h_limit, quota_5h_used, quota_total_limit, quota_total_used, window_start, fixed_multiplier, updated_at,
-		                      quota_token_5h_limit, quota_token_5h_used, quota_token_week_limit, quota_token_week_used, week_start)
-		 VALUES (?, ?, 0, ?, 0, ?, ?, ?, 0, 0, 0, 0, ?)`,
-		userID, quota5hLimit, quotaTotalLimit, windowStart, fixedMultiplier, now, time.Now().Format(time.RFC3339),
+		                      quota_token_5h_limit, quota_token_5h_used, quota_token_week_limit, quota_token_week_used, week_start, month_start)
+		 VALUES (?, ?, 0, ?, 0, ?, ?, ?, 0, 0, 0, 0, ?, ?)`,
+		userID, quota5hLimit, quotaTotalLimit, windowStart, fixedMultiplier, now, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert quota: %w", err)

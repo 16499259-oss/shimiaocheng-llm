@@ -1037,6 +1037,7 @@ async function submitExtend(e) {
     } else {
         body.days = parseInt(type);
     }
+    body.reset_token_stats = document.getElementById('reset-token-stats').checked;
 
     try {
         const data = await apiFetch('api/users/' + id + '/extend', {

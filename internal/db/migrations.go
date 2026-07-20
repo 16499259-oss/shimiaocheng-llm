@@ -380,6 +380,33 @@ func RunMigrations(conn *DB) error {
 			return fmt.Errorf("migration backfill quotas.week_start failed: %w", err)
 		}
 	}
+	// ── Month-window anchor (rolling 30-day Token bucket) ──
+	// month_start: the rolling-30-day bucket anchor for the cumulative Token cap
+	// (quota_token_total_used). Added symmetrically to week_start so the gate's
+	// lazy-reset (CASE on month_start, cutoff = now-30d) can reset the
+	// monthly Token bucket inside the SAME atomic UPDATE — exactly like the
+	// weekly bucket already does for week_start. Same idempotent ALTER-with
+	// constant-empty-default + backfill pattern as week_start: SQLite forbids a
+	// non-constant default on a non-empty table, so we default to '' and
+	// backfill existing rows with the current UTC time. The gate treats an
+	// empty month_start as "expired" ('' < any ISO timestamp), the safe
+	// first-touch behaviour for legacy rows. New rows (via CreateUser) write
+	// time.Now() directly. Existing production rows are NOT zeroed — only the
+	// window anchor is set — so their already-accumulated
+	// quota_token_total_used is preserved (decision R2).
+	if !columnExists(conn, "quotas", "month_start") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE quotas ADD COLUMN month_start TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("migration alter quotas.month_start failed: %w", err)
+		}
+		// Backfill existing rows; idempotent (only touches empty defaults).
+		if _, err := conn.Conn.Exec(
+			`UPDATE quotas SET month_start = (datetime('now')) WHERE month_start = ''`,
+		); err != nil {
+			return fmt.Errorf("migration backfill quotas.month_start failed: %w", err)
+		}
+	}
 
 	// ── One-time data fix (2026-08-16) ──
 	// User "大仙撸车" (id=39) was mistakenly set to permanent (expires_at='').

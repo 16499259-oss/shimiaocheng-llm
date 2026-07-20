@@ -53,8 +53,9 @@ type updateUserRequest struct {
 
 // extendUserRequest is the JSON body for POST /admin/api/users/{id}/extend.
 type extendUserRequest struct {
-	Days  int    `json:"days"`
-	Until string `json:"until"`
+	Days            int    `json:"days"`
+	Until           string `json:"until"`
+	ResetTokenStats bool   `json:"reset_token_stats"`
 }
 
 // CreateUser handles POST /admin/api/users.
@@ -620,7 +621,7 @@ func (h *Handler) ExtendUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write audit log.
+	// Write audit log for the expiry extension.
 	detail := fmt.Sprintf("expires_at: %s → %s", oldExpiresAt, newExpiresAt)
 	if oldExpiresAt == "" {
 		detail = fmt.Sprintf("expires_at: (permanent) → %s", newExpiresAt)
@@ -630,6 +631,23 @@ func (h *Handler) ExtendUser(w http.ResponseWriter, r *http.Request) {
 		 VALUES (?, ?, ?, ?, ?)`,
 		"extend", "user", strconv.FormatInt(userID, 10), detail, now.Format(time.RFC3339),
 	)
+
+	// If reset_token_stats is requested, zero the three Token-usage buckets
+	// (5h / week / month) and restart their windows (week_start / month_start →
+	// now). Call-count quotas and window_start are deliberately untouched.
+	// An audit entry is written so the operation is traceable.
+	if req.ResetTokenStats {
+		if err := models.ResetTokenStats(h.DB, userID, now.Format(time.RFC3339)); err != nil {
+			log.Printf("ERROR: reset token stats for user %d: %v", userID, err)
+		} else {
+			auditDetail := `{"dimensions":["5h","week","month"],"trigger":"extend","operator":"admin"}`
+			_, _ = h.DB.Exec(
+				`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)
+				 VALUES (?, ?, ?, ?, ?)`,
+				"token_stats_reset", "user", strconv.FormatInt(userID, 10), auditDetail, now.Format(time.RFC3339),
+			)
+		}
+	}
 
 	// Format message for response.
 	parsedNew, _ := time.Parse(time.RFC3339, newExpiresAt)

@@ -90,6 +90,7 @@ func (h *QuotaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		QuotaTokenWeekUsed:      quotaRecord.QuotaTokenWeekUsed,
 		QuotaTokenWeekRemaining: 0,
 		WindowResetAt:           windowStart.Format(time.RFC3339),
+		MonthResetAt:            computeMonthResetAt(quotaRecord.MonthStart),
 		Status:                  user.Status,
 		// Propagate the user's account expiry to the self-service panel so the
 		// /user/ dashboard can show it (fix: user-expiry-display). An empty
@@ -129,6 +130,23 @@ func (h *QuotaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
+}
+
+// computeMonthResetAt derives the rolling-30-day Token bucket's next reset
+// time from the stored month_start anchor (RFC3339). It returns "" when the
+// anchor is empty (e.g. a legacy row whose month_start was not yet set),
+// so the frontend can simply hide the field. The +30d offset mirrors the
+// gate's month-window cutoff (now-30d) in AtomicDeductQuota, keeping the
+// displayed "next reset" consistent with the lazy-reset boundary.
+func computeMonthResetAt(monthStart string) string {
+	if monthStart == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, monthStart)
+	if err != nil {
+		return ""
+	}
+	return t.AddDate(0, 0, 30).Format(time.RFC3339)
 }
 
 // sumMultipliedTokens recomputes the multiplier-inflated Token consumption for a
