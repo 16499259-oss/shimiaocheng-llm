@@ -16,6 +16,13 @@ import (
 type CallStats struct {
 	TotalCalls     int              `json:"total_calls"`
 	Tokens         TokenBreakdown   `json:"tokens"`
+	// RawTokens is the UNMULTIPLIED token breakdown for the same filtered set,
+	// shown side-by-side with Tokens (multiplier-inflated) so admins can compare
+	// raw consumption vs billed consumption. Every value is the verbatim per-row
+	// raw figure (prompt_tokens / completion_tokens / raw_total_tokens), summed
+	// WITHOUT applying any multiplier — the raw_total_tokens column is written at
+	// call-log insert time, so this is never reverse-derived from multiplier_used.
+	RawTokens      TokenBreakdown   `json:"raw_tokens"`
 	EffectiveCalls int              `json:"effective_calls"`
 	Success        SuccessStats     `json:"success"`
 	ByModel        []ModelBreakdown `json:"by_model"`
@@ -152,7 +159,7 @@ func AggregateCallStats(db *sql.DB, filter CallLogFilter) (*CallStats, error) {
 	// --- (1) Main aggregate: token sums + success/error counts over the full
 	// filtered set. Fetches per-row (prompt, completion, multiplier) so the
 	// multiplied token totals can be computed in Go. ---
-	mainQuery := `SELECT prompt_tokens, completion_tokens, multiplier_used, effective_calls,
+	mainQuery := `SELECT prompt_tokens, completion_tokens, raw_total_tokens, multiplier_used, effective_calls,
 		CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END,
 		CASE WHEN status_code >= 400 THEN 1 ELSE 0 END
 		FROM call_logs WHERE ` + where
@@ -163,10 +170,10 @@ func AggregateCallStats(db *sql.DB, filter CallLogFilter) (*CallStats, error) {
 	}
 	var total int64
 	for mainRows.Next() {
-		var p, c, eff int
+		var p, c, raw, eff int
 		var m float64
 		var ok, er int
-		if err := mainRows.Scan(&p, &c, &m, &eff, &ok, &er); err != nil {
+		if err := mainRows.Scan(&p, &c, &raw, &m, &eff, &ok, &er); err != nil {
 			mainRows.Close()
 			return nil, err
 		}
@@ -175,6 +182,10 @@ func AggregateCallStats(db *sql.DB, filter CallLogFilter) (*CallStats, error) {
 		s.Tokens.Prompt += pb
 		s.Tokens.Completion += cb
 		s.Tokens.Total += tb
+		// Raw (unmultiplied) breakdown — verbatim per-row raw values, no multiplier.
+		s.RawTokens.Prompt += p
+		s.RawTokens.Completion += c
+		s.RawTokens.Total += raw
 		s.EffectiveCalls += eff
 		s.Success.SuccessCount += ok
 		s.Success.ErrorCount += er

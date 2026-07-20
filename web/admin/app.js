@@ -1309,6 +1309,10 @@ function renderStatsCards(stats) {
     document.getElementById('cs-tok-prompt').textContent = (tokens.prompt || 0).toLocaleString();
     document.getElementById('cs-tok-completion').textContent = (tokens.completion || 0).toLocaleString();
     document.getElementById('cs-tok-total').textContent = (tokens.total || 0).toLocaleString();
+    const rawTokens = stats.raw_tokens || {};
+    document.getElementById('cs-raw-tok-prompt').textContent = (rawTokens.prompt || 0).toLocaleString();
+    document.getElementById('cs-raw-tok-completion').textContent = (rawTokens.completion || 0).toLocaleString();
+    document.getElementById('cs-raw-tok-total').textContent = (rawTokens.total || 0).toLocaleString();
     document.getElementById('cs-effective-calls').textContent = (stats.effective_calls || 0).toLocaleString();
     document.getElementById('cs-success-rate').textContent = total > 0
         ? (success.success_rate || 0).toFixed(1) + '%' : '-';

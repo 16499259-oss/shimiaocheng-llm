@@ -540,3 +540,83 @@ func TestAggregateCallStats_ByUserWithTimeFilter(t *testing.T) {
 		t.Fatalf("expected alice=1, bob=1 in-window calls, got %+v", callsByUser)
 	}
 }
+
+// TestAggregateCallStats_RawTokens verifies that CallStats.RawTokens is the
+// UNMULTIPLIED token breakdown (summed verbatim from each row's raw
+// prompt/completion/raw_total_tokens), independent of the multiplier-inflated
+// Tokens field. Rows use explicit multipliers != 1 so the two breakdowns must
+// differ, proving RawTokens is NOT derived by dividing the multiplied value.
+func TestAggregateCallStats_RawTokens(t *testing.T) {
+	database := newModelsTestDB(t)
+
+	owner, err := models.CreateUser(
+		database.Conn,
+		"raw-stats-owner", "pw-hash", "sub-hash-raw", "sk-raw...",
+		"user", "active", "", "auto", "",
+		1000, 100000, nil, 0, models.DefaultMaxConcurrency,
+	)
+	if err != nil {
+		t.Fatalf("CreateUser(owner) failed: %v", err)
+	}
+
+	// Each row carries an explicit multiplier so the billed Tokens diverge from
+	// the raw Tokens. raw_total_tokens is written at insert as prompt+completion.
+	insert := func(p, c, status int, m float64) {
+		if _, err := models.InsertCallLog(database.Conn, &models.CallLog{
+			UserID:           owner.ID,
+			Model:            "glm-5.2",
+			ProviderID:       "zhipu",
+			PromptTokens:     p,
+			CompletionTokens: c,
+			TotalTokens:      p + c,
+			MultiplierUsed:   m,
+			EffectiveCalls:   1,
+			StatusCode:       status,
+		}); err != nil {
+			t.Fatalf("InsertCallLog failed: %v", err)
+		}
+	}
+	insert(100, 200, 200, 2.0) // raw 300, billed prompt=200 completion=400 total=600
+	insert(50, 150, 200, 3.0)  // raw 200, billed prompt=150 completion=450 total=600
+	insert(10, 20, 500, 0.5)   // raw 30,  billed prompt=5  completion=15  total=30
+
+	stats, err := models.AggregateCallStats(database.Conn, models.CallLogFilter{})
+	if err != nil {
+		t.Fatalf("AggregateCallStats returned error: %v", err)
+	}
+
+	// Raw breakdown: verbatim per-row sums, no multiplier applied.
+	if stats.RawTokens.Prompt != 100+50+10 {
+		t.Fatalf("RawTokens.Prompt expected %d, got %d", 160, stats.RawTokens.Prompt)
+	}
+	if stats.RawTokens.Completion != 200+150+20 {
+		t.Fatalf("RawTokens.Completion expected %d, got %d", 370, stats.RawTokens.Completion)
+	}
+	if stats.RawTokens.Total != 300+200+30 {
+		t.Fatalf("RawTokens.Total expected %d, got %d", 530, stats.RawTokens.Total)
+	}
+
+	// The persisted raw_total_tokens (prompt+completion per row) must equal the
+	// raw total computed here; assert it independently via a direct SUM.
+	var persistedRaw int
+	if err := database.Conn.QueryRow(
+		`SELECT COALESCE(SUM(raw_total_tokens), 0) FROM call_logs`,
+	).Scan(&persistedRaw); err != nil {
+		t.Fatalf("sum raw_total_tokens: %v", err)
+	}
+	if persistedRaw != 530 {
+		t.Fatalf("persisted SUM(raw_total_tokens) expected 530, got %d", persistedRaw)
+	}
+
+	// Negative control: the multiplier-inflated Tokens.Total must NOT equal the
+	// raw total (proving RawTokens is a distinct, unmultiplied figure).
+	if stats.Tokens.Total == stats.RawTokens.Total {
+		t.Fatalf("BUG: multiplied Tokens.Total (%d) equals raw RawTokens.Total (%d); multiplier not applied",
+			stats.Tokens.Total, stats.RawTokens.Total)
+	}
+	// Sanity: multiplied total = 600 + 600 + 15 = 1215
+	// (row3: ceil((10+20)*0.5) = ceil(15.0) = 15).
+	if stats.Tokens.Total != 1215 {
+		t.Fatalf("expected multiplied Tokens.Total == 1215, got %d", stats.Tokens.Total)
+	}
+}
