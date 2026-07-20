@@ -106,10 +106,13 @@ func RunMigrations(conn *DB) error {
 
 		`CREATE INDEX IF NOT EXISTS idx_provider_routing_rules_enabled ON provider_routing_rules(enabled)`,
 
-		// Seed a default rule (14:00-18:01 -> openai) only when the table is empty.
-		`INSERT INTO provider_routing_rules (provider_id, start_time, end_time, days_of_week, timezone, enabled)
-		 SELECT 'openai', '14:00', '18:01', '*', 'Asia/Shanghai', 1
-		 WHERE NOT EXISTS (SELECT 1 FROM provider_routing_rules)`,
+		// NOTE: We deliberately do NOT seed a default routing rule. A hardcoded
+		// rule pointing at a provider that may not exist (e.g. "openai") would,
+		// under the strict no-fallback invariant (router/selector.go), cause a
+		// 503 for every auto-routed request during its time window on a fresh
+		// deploy that only configured a single real provider. With no rules
+		// present, ResolveProvider safely falls back to the configured default
+		// provider. Admins define time-based routing explicitly via the panel.
 
 		// ── providers table: upstream LLM providers ──
 		`CREATE TABLE IF NOT EXISTS providers (

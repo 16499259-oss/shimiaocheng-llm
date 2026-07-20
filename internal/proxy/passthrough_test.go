@@ -81,9 +81,10 @@ func newTestGateway(t *testing.T, opts gatewayOpts) (*httptest.Server, string) {
 	if err := db.RunMigrations(database); err != nil {
 		t.Fatalf("run migrations: %v", err)
 	}
-	// Clear the seeded routing rule (14:00-18:01 -> openai) so tests that
-	// create only an "anthropic" provider don't 503 when run inside that
-	// time window. The passthrough tests are not testing routing rules.
+	// No seed routing rule exists anymore, but clear any routing rules for a
+	// clean slate so passthrough tests (which create only an "anthropic"
+	// provider) are never affected by time-window routing. The passthrough
+	// tests are not testing routing rules.
 	if _, err := database.Conn.Exec(`DELETE FROM provider_routing_rules`); err != nil {
 		t.Fatalf("clear routing rules: %v", err)
 	}
