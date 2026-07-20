@@ -281,11 +281,18 @@ func buildCallLogWhere(f CallLogFilter) (string, []any) {
 		args = append(args, f.Model)
 	}
 	if f.From != "" {
-		conds = append(conds, "created_at >= ?")
+		// Qualify with the call_logs table alias so the predicate stays
+		// unambiguous when the WHERE clause is reused by the by_user query,
+		// which LEFT JOINs users (a table that also has a created_at column).
+		// A bare "created_at" would otherwise trigger SQLite's
+		// "ambiguous column name: created_at" error and fail the whole
+		// AggregateCallStats call (HTTP 500 on /api/calls/stats). The prefix
+		// is harmless for the non-JOIN call sites.
+		conds = append(conds, "call_logs.created_at >= ?")
 		args = append(args, f.From)
 	}
 	if f.To != "" {
-		conds = append(conds, "created_at <= ?")
+		conds = append(conds, "call_logs.created_at <= ?")
 		args = append(args, f.To)
 	}
 	if len(conds) == 0 {

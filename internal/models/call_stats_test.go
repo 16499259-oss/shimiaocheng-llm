@@ -4,8 +4,10 @@ package models_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"llm_api_gateway/internal/models"
+	"llm_api_gateway/internal/timeutil"
 )
 
 // TestAggregateCallStats_ByModelMergeCaseInsensitive verifies the recent
@@ -403,5 +405,138 @@ func TestAggregateCallStats_ByUser(t *testing.T) {
 	}
 	if b.EffectiveCalls != 1 {
 		t.Fatalf("bob expected EffectiveCalls==1, got %d", b.EffectiveCalls)
+	}
+}
+
+// TestAggregateCallStats_ByUserWithTimeFilter is the regression test for the
+// production 500 on GET /api/calls/stats.
+//
+// Root cause: buildCallLogWhere emitted a *bare* "created_at" predicate. That
+// is fine for the main aggregate / by_model queries (no JOIN), but the by_user
+// query does `LEFT JOIN users ON users.id = call_logs.user_id`, and the users
+// table also has a created_at column. With a time-range filter (the frontend
+// defaults to 7d and always sends from/to), the bare column became ambiguous
+// and SQLite raised "ambiguous column name: created_at", failing the whole
+// AggregateCallStats call -> HTTP 500 -> both breakdown tabs render empty.
+//
+// Now that buildCallLogWhere prefixes created_at with call_logs., the by_user
+// query with a time filter must succeed. This test forces the JOIN+time-filter
+// path and asserts no error plus correct filtering.
+func TestAggregateCallStats_ByUserWithTimeFilter(t *testing.T) {
+	database := newModelsTestDB(t)
+
+	// Three users; one of them (carol) will have only out-of-window calls so
+	// we can prove she is excluded from ByUser.
+	alice, err := models.CreateUser(
+		database.Conn,
+		"tbf-alice", "pw-hash", "sub-alice", "sk-alice...",
+		"user", "active", "", "auto", "",
+		1000, 100000, nil, 0, models.DefaultMaxConcurrency,
+	)
+	if err != nil {
+		t.Fatalf("CreateUser(alice) failed: %v", err)
+	}
+	bob, err := models.CreateUser(
+		database.Conn,
+		"tbf-bob", "pw-hash", "sub-bob", "sk-bob...",
+		"user", "active", "", "auto", "",
+		1000, 100000, nil, 0, models.DefaultMaxConcurrency,
+	)
+	if err != nil {
+		t.Fatalf("CreateUser(bob) failed: %v", err)
+	}
+	carol, err := models.CreateUser(
+		database.Conn,
+		"tbf-carol", "pw-hash", "sub-carol", "sk-carol...",
+		"user", "active", "", "auto", "",
+		1000, 100000, nil, 0, models.DefaultMaxConcurrency,
+	)
+	if err != nil {
+		t.Fatalf("CreateUser(carol) failed: %v", err)
+	}
+
+	// Insert a call log then pin its created_at to a specific instant so we can
+	// deterministically drive the time window. InsertCallLog stamps created_at
+	// with time.Now() internally, so we override it via a direct UPDATE in the
+	// same Asia/Shanghai RFC3339 format the column stores/compares.
+	insertAt := func(userID int64, model string, at time.Time) {
+		id, err := models.InsertCallLog(database.Conn, &models.CallLog{
+			UserID:           userID,
+			Model:            model,
+			ProviderID:       "zhipu",
+			PromptTokens:     10,
+			CompletionTokens: 20,
+			TotalTokens:      30,
+			EffectiveCalls:   1,
+			StatusCode:       200,
+		})
+		if err != nil {
+			t.Fatalf("InsertCallLog failed: %v", err)
+		}
+		ts := at.In(timeutil.ShanghaiTZ).Format(time.RFC3339)
+		if _, err := database.Conn.Exec(
+			"UPDATE call_logs SET created_at = ? WHERE id = ?", ts, id,
+		); err != nil {
+			t.Fatalf("override created_at for id=%d failed: %v", id, err)
+		}
+	}
+
+	now := time.Now().In(timeutil.ShanghaiTZ)
+	// 7-day window boundaries, expressed as Asia/Shanghai RFC3339 strings —
+	// exactly what the admin handler produces via NormalizeToShanghaiRFC3339.
+	from := now.AddDate(0, 0, -7).Format(time.RFC3339)
+	to := now.Format(time.RFC3339)
+
+	// alice: one IN-window call and one 10-days-ago call (out of window).
+	insertAt(alice.ID, "glm-5.2", now.Add(-1*time.Hour))
+	insertAt(alice.ID, "glm-5.2", now.Add(-10*24*time.Hour))
+	// bob: one IN-window call.
+	insertAt(bob.ID, "gpt-4o", now.Add(-2*time.Hour))
+	// carol: one 30-days-ago call (entirely out of window -> excluded).
+	insertAt(carol.ID, "glm-5.2", now.Add(-30*24*time.Hour))
+
+	// The filter is exactly the (from, to) tuple the frontend sends; the bug
+	// only manifested when From/To were non-empty (LEFT JOIN users path).
+	stats, err := models.AggregateCallStats(database.Conn, models.CallLogFilter{
+		From: from,
+		To:   to,
+	})
+	if err != nil {
+		t.Fatalf("AggregateCallStats(with From/To) returned error: %v", err)
+	}
+	if stats == nil {
+		t.Fatalf("expected non-nil *CallStats")
+	}
+
+	// Only alice's 1 in-window call and bob's 1 in-window call count = 2.
+	if stats.TotalCalls != 2 {
+		t.Fatalf("expected TotalCalls == 2 within window, got %d", stats.TotalCalls)
+	}
+
+	// ByModel must be non-empty (we have glm-5.2 + gpt-4o in window).
+	if len(stats.ByModel) == 0 {
+		t.Fatalf("expected non-empty by_model breakdown, got %+v", stats.ByModel)
+	}
+
+	// ByUser must contain exactly alice and bob (each 1 in-window call) and
+	// must NOT contain carol (all her calls are out of window).
+	if len(stats.ByUser) != 2 {
+		t.Fatalf("expected 2 by_user entries (alice+bob), got %d: %+v",
+			len(stats.ByUser), stats.ByUser)
+	}
+	names := map[string]bool{}
+	callsByUser := map[string]int{}
+	for _, u := range stats.ByUser {
+		names[u.Username] = true
+		callsByUser[u.Username] = u.Calls
+	}
+	if !names["tbf-alice"] || !names["tbf-bob"] {
+		t.Fatalf("expected alice and bob in by_user, got %+v", stats.ByUser)
+	}
+	if names["tbf-carol"] {
+		t.Fatalf("carol must be excluded (all calls out of window), got %+v", stats.ByUser)
+	}
+	if callsByUser["tbf-alice"] != 1 || callsByUser["tbf-bob"] != 1 {
+		t.Fatalf("expected alice=1, bob=1 in-window calls, got %+v", callsByUser)
 	}
 }
