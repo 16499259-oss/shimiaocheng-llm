@@ -88,6 +88,12 @@ func qaNewGateway(t *testing.T, opts qaOpts) (*httptest.Server, string, *sql.DB)
 	if err := db.RunMigrations(database); err != nil {
 		t.Fatalf("run migrations: %v", err)
 	}
+	// Clear the seeded routing rule (14:00-18:01 -> openai) so tests that
+	// create only an "anthropic" provider don't 503 when run inside that
+	// time window.
+	if _, err := database.Conn.Exec(`DELETE FROM provider_routing_rules`); err != nil {
+		t.Fatalf("clear routing rules: %v", err)
+	}
 
 	store := provider.NewProviderStore(database.Conn, kek)
 	scheme := opts.scheme
