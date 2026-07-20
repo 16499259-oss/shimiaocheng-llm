@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log"
+	"math"
 	"net/http"
 	"time"
 
@@ -108,12 +109,19 @@ func (h *QuotaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Query token stats for this user. Scan errors are logged but not fatal: on
 	// failure the counters stay 0 and the quota decision above is unaffected
 	// (audit F6).
+	//
+	// IMPORTANT: the cumulative / today counters are recomputed from the RAW
+	// call_logs rows, each multiplied by that row's own multiplier_used (then
+	// ceiled). This makes the displayed Token consumption match the
+	// multiplier-inflated value the quota columns already bill — see the
+	// user-panel display fix. call_logs.total_tokens is the AUDIT (raw,
+	// unmultiplied) value and is intentionally NOT used here.
 	var totalTokens, totalTokensToday int64
 	today := time.Now().Format("2006-01-02")
-	if err := h.DB.QueryRow(`SELECT COALESCE(SUM(total_tokens), 0) FROM call_logs WHERE user_id = ?`, userID).Scan(&totalTokens); err != nil {
+	if totalTokens, err = sumMultipliedTokens(h.DB, userID, ""); err != nil {
 		log.Printf("WARN: /v1/quota total tokens: %v", err)
 	}
-	if err := h.DB.QueryRow(`SELECT COALESCE(SUM(total_tokens), 0) FROM call_logs WHERE user_id = ? AND created_at >= ?`, userID, today).Scan(&totalTokensToday); err != nil {
+	if totalTokensToday, err = sumMultipliedTokens(h.DB, userID, today); err != nil {
 		log.Printf("WARN: /v1/quota total tokens today: %v", err)
 	}
 	status.TotalTokens = totalTokens
@@ -121,6 +129,43 @@ func (h *QuotaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
+}
+
+// sumMultipliedTokens recomputes the multiplier-inflated Token consumption for a
+// user directly from the RAW call_logs rows. Each row stores its own
+// multiplier_used (the rate actually in effect at call time, defaulting to 1.0
+// for pre-multiplier history), so no migration or zero-guard is needed — every
+// historical row is reproducible. The per-row value is ceil((prompt_tokens +
+// completion_tokens) * multiplier_used); we sum in Go because modernc.org/sqlite
+// does not guarantee a CEIL math function.
+//
+// When since is non-empty it is applied as a "created_at >= since" filter (the
+// handler passes the local "2006-01-02" date string to isolate "today"). The
+// comparison is a plain text comparison on RFC3339/timestamp strings, which is
+// well-ordered for the SH-normalized timestamps the gateway writes.
+func sumMultipliedTokens(db *sql.DB, userID int64, since string) (int64, error) {
+	q := `SELECT prompt_tokens, completion_tokens, multiplier_used FROM call_logs WHERE user_id = ?`
+	args := []interface{}{userID}
+	if since != "" {
+		q += ` AND created_at >= ?`
+		args = append(args, since)
+	}
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	var total int64
+	for rows.Next() {
+		var p, c int
+		var m float64
+		if err := rows.Scan(&p, &c, &m); err != nil {
+			return 0, err
+		}
+		total += int64(math.Ceil(float64(p+c) * m))
+	}
+	return total, rows.Err()
 }
 
 func writeQuotaError(w http.ResponseWriter, statusCode int, message, errType string) {
