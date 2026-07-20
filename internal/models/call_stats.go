@@ -2,6 +2,8 @@ package models
 
 import (
 	"database/sql"
+	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,6 +23,14 @@ type CallStats struct {
 }
 
 // TokenBreakdown holds prompt/completion/total token sums.
+//
+// IMPORTANT (口径一致性 / caliber consistency): these sums are the
+// MULTIPLIER-INFLATED token consumption — every row's
+// (prompt_tokens + completion_tokens) is scaled by that row's own
+// multiplier_used and ceiled, exactly like the user-panel Token display
+// (internal/handler/quota.sumMultipliedTokens) and the billed quota counters.
+// The raw, unmultiplied audit values stored in call_logs are intentionally NOT
+// summed here; see multipliedTokenBreakdown for the formula.
 type TokenBreakdown struct {
 	Prompt     int `json:"prompt"`
 	Completion int `json:"completion"`
@@ -116,109 +126,196 @@ func QueryCallLogsGlobal(db *sql.DB, filter CallLogFilter) (*CallLogPage, error)
 }
 
 // AggregateCallStats computes the summary metrics for the filtered set,
-// ignoring page/limit. It runs a single aggregate SQL over COUNT/SUM with
-// CASE WHEN expressions so it stays fast even on large tables.
+// ignoring page/limit.
+//
+// CALIBER CONSISTENCY (口径一致性): the TokenBreakdown fields (Prompt /
+// Completion / Total) are the MULTIPLIER-INFLATED consumption. Each call-log
+// row stores its own multiplier_used (the rate in effect at call time, default
+// 1.0 for pre-multiplier history), and we apply the exact same per-row formula
+// used by the quota/billing path and the user-panel Token display:
+//
+//	billed = ceil((prompt_tokens + completion_tokens) * multiplier_used)
+//
+// so the admin summary agrees with the billed quota counters and the user
+// panel's "累计/今日 Token". The raw call_logs token columns are the audit
+// (unmultiplied) values and are intentionally NOT summed here.
+//
+// SQLite (modernc.org/sqlite) does not guarantee a CEIL math function, so — as
+// in quota.sumMultipliedTokens — we fetch the per-row components + multiplier
+// and apply the ceil formula in Go, then bucket the multiplied sums for the
+// per-model and per-user breakdowns.
 func AggregateCallStats(db *sql.DB, filter CallLogFilter) (*CallStats, error) {
 	where, args := buildCallLogWhere(filter)
 
-	q := `SELECT
-		COUNT(*),
-		COALESCE(SUM(prompt_tokens), 0),
-		COALESCE(SUM(completion_tokens), 0),
-		COALESCE(SUM(total_tokens), 0),
-		COALESCE(SUM(effective_calls), 0),
-		COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0)
-	FROM call_logs WHERE ` + where
+	s := CallStats{}
 
-	var s CallStats
-	var total, okSuccess, errCount int64
-	if err := db.QueryRow(q, args...).Scan(
-		&total,
-		&s.Tokens.Prompt, &s.Tokens.Completion, &s.Tokens.Total,
-		&s.EffectiveCalls, &okSuccess, &errCount,
-	); err != nil {
+	// --- (1) Main aggregate: token sums + success/error counts over the full
+	// filtered set. Fetches per-row (prompt, completion, multiplier) so the
+	// multiplied token totals can be computed in Go. ---
+	mainQuery := `SELECT prompt_tokens, completion_tokens, multiplier_used, effective_calls,
+		CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END,
+		CASE WHEN status_code >= 400 THEN 1 ELSE 0 END
+		FROM call_logs WHERE ` + where
+
+	mainRows, err := db.Query(mainQuery, args...)
+	if err != nil {
 		return nil, err
 	}
+	var total int64
+	for mainRows.Next() {
+		var p, c, eff int
+		var m float64
+		var ok, er int
+		if err := mainRows.Scan(&p, &c, &m, &eff, &ok, &er); err != nil {
+			mainRows.Close()
+			return nil, err
+		}
+		total++
+		pb, cb, tb := multipliedTokenBreakdown(p, c, m)
+		s.Tokens.Prompt += pb
+		s.Tokens.Completion += cb
+		s.Tokens.Total += tb
+		s.EffectiveCalls += eff
+		s.Success.SuccessCount += ok
+		s.Success.ErrorCount += er
+	}
+	if err := mainRows.Err(); err != nil {
+		mainRows.Close()
+		return nil, err
+	}
+	mainRows.Close()
 
 	s.TotalCalls = int(total)
-	s.Success.SuccessCount = int(okSuccess)
-	s.Success.ErrorCount = int(errCount)
 	if total > 0 {
-		s.Success.SuccessRate = float64(okSuccess) / float64(total) * 100.0
+		s.Success.SuccessRate = float64(s.Success.SuccessCount) / float64(total) * 100.0
 	}
 
-	// Per-model breakdown: reuse the same WHERE clause so the filter is
-	// consistent with the aggregate above. Ordered by call count DESC so
-	// the most-used models appear first in the frontend table.
+	// --- (2) Per-model breakdown: same WHERE, GROUP BY LOWER(model). Multiply
+	// each row's tokens by its own multiplier_used and bucket under the
+	// case-normalized model key. Ordered by call count DESC so the most-used
+	// models appear first in the frontend table. ---
 	where2, args2 := buildCallLogWhere(filter)
-	bmQuery := `SELECT LOWER(model) AS model, COUNT(*),
-		COALESCE(SUM(prompt_tokens), 0),
-		COALESCE(SUM(completion_tokens), 0),
-		COALESCE(SUM(total_tokens), 0)
-	FROM call_logs WHERE ` + where2 + ` GROUP BY LOWER(model) ORDER BY COUNT(*) DESC`
+	bmQuery := `SELECT LOWER(model) AS model, prompt_tokens, completion_tokens, multiplier_used
+		FROM call_logs WHERE ` + where2
 
 	bmRows, err := db.Query(bmQuery, args2...)
 	if err != nil {
 		return nil, err
 	}
-	defer bmRows.Close()
-
-	s.ByModel = []ModelBreakdown{} // ensure [] not null in JSON
+	bmMap := map[string]*ModelBreakdown{}
 	for bmRows.Next() {
-		var bm ModelBreakdown
-		if err := bmRows.Scan(
-			&bm.Model,
-			&bm.Calls,
-			&bm.Tokens.Prompt,
-			&bm.Tokens.Completion,
-			&bm.Tokens.Total,
-		); err != nil {
+		var model string
+		var p, c int
+		var m float64
+		if err := bmRows.Scan(&model, &p, &c, &m); err != nil {
+			bmRows.Close()
 			return nil, err
 		}
-		s.ByModel = append(s.ByModel, bm)
+		entry, ok := bmMap[model]
+		if !ok {
+			entry = &ModelBreakdown{Model: model}
+			bmMap[model] = entry
+		}
+		entry.Calls++
+		pb, cb, tb := multipliedTokenBreakdown(p, c, m)
+		entry.Tokens.Prompt += pb
+		entry.Tokens.Completion += cb
+		entry.Tokens.Total += tb
 	}
 	if err := bmRows.Err(); err != nil {
+		bmRows.Close()
 		return nil, err
 	}
+	bmRows.Close()
 
-	// Per-user breakdown: same WHERE as above, LEFT JOIN users for the
-	// display name. Ordered by call count DESC so the heaviest users lead.
+	s.ByModel = []ModelBreakdown{} // ensure [] not null in JSON
+	for _, entry := range bmMap {
+		s.ByModel = append(s.ByModel, *entry)
+	}
+	// Stable sort by Calls DESC keeps output deterministic for equal counts.
+	sort.SliceStable(s.ByModel, func(i, j int) bool {
+		return s.ByModel[i].Calls > s.ByModel[j].Calls
+	})
+
+	// --- (3) Per-user breakdown: same WHERE, LEFT JOIN users for the display
+	// name. Token sums are multiplier-inflated per row; effective_calls is the
+	// call-count already inflated at log time (int(ceil(multiplier))) and is
+	// summed verbatim. Ordered by call count DESC so the heaviest users lead. ---
 	where3, args3 := buildCallLogWhere(filter)
 	buQuery := `SELECT call_logs.user_id,
 		COALESCE(users.username, '') AS username,
-		COUNT(*),
-		COALESCE(SUM(prompt_tokens), 0),
-		COALESCE(SUM(completion_tokens), 0),
-		COALESCE(SUM(total_tokens), 0),
-		COALESCE(SUM(effective_calls), 0)
+		prompt_tokens, completion_tokens, multiplier_used, effective_calls
 		FROM call_logs
 		LEFT JOIN users ON users.id = call_logs.user_id
-		WHERE ` + where3 + `
-		GROUP BY call_logs.user_id, COALESCE(users.username, '')
-		ORDER BY COUNT(*) DESC`
+		WHERE ` + where3
+
 	buRows, err := db.Query(buQuery, args3...)
 	if err != nil {
 		return nil, err
 	}
-	defer buRows.Close()
-	s.ByUser = []UserBreakdown{} // ensure [] not null in JSON
+	buMap := map[int]*UserBreakdown{}
 	for buRows.Next() {
-		var bu UserBreakdown
-		if err := buRows.Scan(
-			&bu.UserID, &bu.Username, &bu.Calls,
-			&bu.Tokens.Prompt, &bu.Tokens.Completion, &bu.Tokens.Total,
-			&bu.EffectiveCalls,
-		); err != nil {
+		var userID int
+		var username string
+		var p, c, eff int
+		var m float64
+		if err := buRows.Scan(&userID, &username, &p, &c, &m, &eff); err != nil {
+			buRows.Close()
 			return nil, err
 		}
-		s.ByUser = append(s.ByUser, bu)
+		entry, ok := buMap[userID]
+		if !ok {
+			entry = &UserBreakdown{UserID: userID, Username: username}
+			buMap[userID] = entry
+		}
+		entry.Calls++
+		pb, cb, tb := multipliedTokenBreakdown(p, c, m)
+		entry.Tokens.Prompt += pb
+		entry.Tokens.Completion += cb
+		entry.Tokens.Total += tb
+		entry.EffectiveCalls += eff
 	}
 	if err := buRows.Err(); err != nil {
+		buRows.Close()
 		return nil, err
 	}
+	buRows.Close()
+
+	s.ByUser = []UserBreakdown{} // ensure [] not null in JSON
+	for _, entry := range buMap {
+		s.ByUser = append(s.ByUser, *entry)
+	}
+	sort.SliceStable(s.ByUser, func(i, j int) bool {
+		return s.ByUser[i].Calls > s.ByUser[j].Calls
+	})
 
 	return &s, nil
+}
+
+// multipliedTokenBreakdown applies the multiplier-inflated token formula used
+// by the quota/billing path (see internal/handler/quota.sumMultipliedTokens) so
+// the admin call-stats summary stays consistent with the user-panel Token
+// display and the billed quota counters ("口径一致性").
+//
+//   - promptBilled     = ceil(prompt * m)
+//   - totalBilled      = ceil((prompt + completion) * m)   // matches the billed value
+//   - completionBilled = totalBilled - promptBilled         // keeps prompt + completion == total
+//
+// multiplier defaults to 1.0 when it is 0 (pre-multiplier history or rows that
+// did not set a multiplier), reproducing the raw audit value exactly and
+// avoiding a 0 token count for those rows.
+func multipliedTokenBreakdown(prompt, completion int, multiplier float64) (promptBilled, completionBilled, totalBilled int) {
+	if multiplier == 0 {
+		multiplier = 1.0
+	}
+	promptBilled = int(math.Ceil(float64(prompt) * multiplier))
+	totalBilled = int(math.Ceil(float64(prompt+completion) * multiplier))
+	// completionBilled is derived so that, within every group, the per-row
+	// (and therefore the summed) prompt + completion always equals total.
+	// (totalBilled >= promptBilled because (prompt+completion) >= prompt and
+	// multiplier >= 0, so completionBilled is never negative.)
+	completionBilled = totalBilled - promptBilled
+	return promptBilled, completionBilled, totalBilled
 }
 
 // DistinctModels returns the sorted, distinct (non-empty) model names that
