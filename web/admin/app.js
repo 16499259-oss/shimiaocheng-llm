@@ -1187,6 +1187,8 @@ async function initCallStatsTab() {
     } catch (_) {}
     await Promise.all([loadCallStatsUsers(), loadCallModels()]);
     await loadCallStats(csPage);
+    // Default to the "按模型明细" sub-tab (matches the HTML's active state).
+    switchCsView('user');
 }
 
 async function loadCallStatsUsers() {
@@ -1258,6 +1260,35 @@ function renderStatsCards(stats) {
             </tr>`;
         }).join('');
     }
+
+    // Render per-user breakdown table (按用户明细)
+    const byUser = stats.by_user || [];
+    const buTbody = document.getElementById('cs-by-user-tbody');
+    if (byUser.length === 0) {
+        buTbody.innerHTML = '<tr><td colspan="6" class="text-center">暂无数据</td></tr>';
+    } else {
+        buTbody.innerHTML = byUser.map(u => {
+            const ut = u.tokens || {};
+            const name = u.username ? escapeHtml(u.username) : ('用户#' + u.user_id);
+            return `<tr>
+                <td><code>${name}</code></td>
+                <td>${(u.calls || 0).toLocaleString()}</td>
+                <td>${(ut.prompt || 0).toLocaleString()}</td>
+                <td>${(ut.completion || 0).toLocaleString()}</td>
+                <td>${(ut.total || 0).toLocaleString()}</td>
+                <td>${(u.effective_calls || 0).toLocaleString()}</td>
+            </tr>`;
+        }).join('');
+    }
+}
+
+function switchCsView(view) {
+    document.getElementById('cs-view-model').style.display  = view === 'model'  ? '' : 'none';
+    document.getElementById('cs-view-user').style.display   = view === 'user'   ? '' : 'none';
+    document.getElementById('cs-view-detail').style.display = view === 'detail' ? '' : 'none';
+    document.querySelectorAll('.cs-subtab').forEach(b => {
+        b.classList.toggle('active', b.getAttribute('data-view') === view);
+    });
 }
 
 function renderCsCalls(calls) {
