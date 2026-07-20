@@ -122,8 +122,8 @@ func mustID(t *testing.T, rec *httptest.ResponseRecorder) int64 {
 }
 
 // TestAdminExtendUser_ResetTokenStatsTrue verifies that when reset_token_stats=true
-// the token_stats_reset audit entry is written with the correct structured detail
-// and the user's three Token-usage buckets are zeroed.
+// the quota_reset audit entry is written with the correct structured detail
+// and the user's all usage buckets (call-count + Token) are zeroed.
 func TestAdminExtendUser_ResetTokenStatsTrue(t *testing.T) {
 	h := newAdminTestHandler(t)
 	id, _ := adminCreateUser(t, h, "ext-rst-true", nil)
@@ -131,6 +131,12 @@ func TestAdminExtendUser_ResetTokenStatsTrue(t *testing.T) {
 	// Seed token usage so we can verify it gets zeroed.
 	if err := models.AddTokenUsage(h.DB, id, 100); err != nil {
 		t.Fatalf("seed token usage: %v", err)
+	}
+	// Also seed call-count columns.
+	if _, err := h.DB.Exec(
+		`UPDATE quotas SET quota_5h_used = 7, quota_total_used = 42 WHERE user_id = ?`, id,
+	); err != nil {
+		t.Fatalf("seed call-count cols: %v", err)
 	}
 	qBefore, err := models.GetQuota(h.DB, id)
 	if err != nil || qBefore == nil {
@@ -150,9 +156,9 @@ func TestAdminExtendUser_ResetTokenStatsTrue(t *testing.T) {
 		t.Fatalf("expected 200, got %d; body=%s", rec.Code, rec.Body.String())
 	}
 
-	// Verify token_stats_reset audit entry exists.
+	// Verify quota_reset audit entry exists.
 	rows, err := h.DB.Query(
-		`SELECT detail FROM audit_logs WHERE action = 'token_stats_reset' AND target_type = 'user' AND target_id = ?`,
+		`SELECT detail FROM audit_logs WHERE action = 'quota_reset' AND target_type = 'user' AND target_id = ?`,
 		strconv.FormatInt(id, 10),
 	)
 	if err != nil {
@@ -165,18 +171,24 @@ func TestAdminExtendUser_ResetTokenStatsTrue(t *testing.T) {
 		if err := rows.Scan(&d); err != nil {
 			t.Fatalf("scan audit detail: %v", err)
 		}
-		if d == `{"dimensions":["5h","week","month"],"trigger":"extend","operator":"admin"}` {
+		if d == `{"dimensions":["calls","tokens-5h","tokens-week","tokens-month"],"trigger":"extend","operator":"admin"}` {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("token_stats_reset audit entry not found or detail mismatch")
+		t.Fatalf("quota_reset audit entry not found or detail mismatch")
 	}
 
-	// Verify token buckets are zeroed.
+	// Verify ALL buckets are zeroed.
 	qAfter, err := models.GetQuota(h.DB, id)
 	if err != nil || qAfter == nil {
 		t.Fatalf("GetQuota after: %v", err)
+	}
+	if qAfter.Quota5hUsed != 0 {
+		t.Fatalf("quota_5h_used expected 0, got %d", qAfter.Quota5hUsed)
+	}
+	if qAfter.QuotaTotalUsed != 0 {
+		t.Fatalf("quota_total_used expected 0, got %d", qAfter.QuotaTotalUsed)
 	}
 	if qAfter.QuotaToken5hUsed != 0 {
 		t.Fatalf("quota_token_5h_used expected 0, got %d", qAfter.QuotaToken5hUsed)
@@ -189,7 +201,7 @@ func TestAdminExtendUser_ResetTokenStatsTrue(t *testing.T) {
 	}
 }
 
-// TestAdminExtendUser_ResetTokenStatsFalse verifies that no token_stats_reset
+// TestAdminExtendUser_ResetTokenStatsFalse verifies that no quota_reset
 // audit entry is written when reset_token_stats is omitted (false).
 func TestAdminExtendUser_ResetTokenStatsFalse(t *testing.T) {
 	h := newAdminTestHandler(t)
@@ -205,15 +217,82 @@ func TestAdminExtendUser_ResetTokenStatsFalse(t *testing.T) {
 		t.Fatalf("expected 200, got %d; body=%s", rec.Code, rec.Body.String())
 	}
 
-	// Verify NO token_stats_reset audit entry.
+	// Verify NO quota_reset audit entry.
 	var count int
 	if err := h.DB.QueryRow(
-		`SELECT COUNT(*) FROM audit_logs WHERE action = 'token_stats_reset' AND target_id = ?`,
+		`SELECT COUNT(*) FROM audit_logs WHERE action = 'quota_reset' AND target_id = ?`,
 		strconv.FormatInt(id, 10),
 	).Scan(&count); err != nil {
 		t.Fatalf("count audit: %v", err)
 	}
 	if count > 0 {
-		t.Fatalf("expected 0 token_stats_reset audit entries, got %d", count)
+		t.Fatalf("expected 0 quota_reset audit entries, got %d", count)
+	}
+}
+
+// TestAdminResetUsage verifies the independent reset-usage endpoint zeroes
+// all buckets (call-count + Token), writes a quota_reset audit with
+// trigger=manual_reset, and does NOT touch the user's expiry date.
+func TestAdminResetUsage(t *testing.T) {
+	h := newAdminTestHandler(t)
+	id, _ := adminCreateUser(t, h, "reset-usage-test", nil)
+
+	// Seed usage.
+	if err := models.AddTokenUsage(h.DB, id, 100); err != nil {
+		t.Fatalf("seed token usage: %v", err)
+	}
+	if _, err := h.DB.Exec(
+		`UPDATE quotas SET quota_5h_used = 7, quota_total_used = 42 WHERE user_id = ?`, id,
+	); err != nil {
+		t.Fatalf("seed call-count cols: %v", err)
+	}
+
+	// Call reset-usage endpoint.
+	body, _ := json.Marshal(map[string]any{})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/users/"+strconv.FormatInt(id, 10)+"/reset-usage", bytes.NewReader(body))
+	req.SetPathValue("id", strconv.FormatInt(id, 10))
+	rec := httptest.NewRecorder()
+	h.ResetUsage(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Verify quota_reset audit with manual_reset trigger.
+	rows, err := h.DB.Query(
+		`SELECT detail FROM audit_logs WHERE action = 'quota_reset' AND target_id = ?`,
+		strconv.FormatInt(id, 10),
+	)
+	if err != nil {
+		t.Fatalf("query audit: %v", err)
+	}
+	defer rows.Close()
+	var found bool
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			t.Fatalf("scan audit detail: %v", err)
+		}
+		if d == `{"dimensions":["calls","tokens-5h","tokens-week","tokens-month"],"trigger":"manual_reset","operator":"admin"}` {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("quota_reset audit entry not found or detail mismatch (manual_reset)")
+	}
+
+	// Verify ALL buckets are zeroed.
+	qAfter, err := models.GetQuota(h.DB, id)
+	if err != nil || qAfter == nil {
+		t.Fatalf("GetQuota after: %v", err)
+	}
+	if qAfter.Quota5hUsed != 0 {
+		t.Fatalf("quota_5h_used expected 0, got %d", qAfter.Quota5hUsed)
+	}
+	if qAfter.QuotaTotalUsed != 0 {
+		t.Fatalf("quota_total_used expected 0, got %d", qAfter.QuotaTotalUsed)
+	}
+	if qAfter.QuotaToken5hUsed != 0 || qAfter.QuotaTokenWeekUsed != 0 || qAfter.QuotaTokenTotalUsed != 0 {
+		t.Fatalf("token buckets expected all 0, got 5h=%d week=%d total=%d",
+			qAfter.QuotaToken5hUsed, qAfter.QuotaTokenWeekUsed, qAfter.QuotaTokenTotalUsed)
 	}
 }

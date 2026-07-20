@@ -277,40 +277,39 @@ func CompensateQuotaReset(db *sql.DB, resetIntervalHours int) error {
 	return err
 }
 
-// ResetTokenStats zeroes the THREE Token-usage buckets (5h / week / month) for a
-// user and bumps the Token-only window anchors (week_start, month_start) to now.
+// ResetQuotaUsage zeroes ALL usage buckets — call-count (5h + total) and
+// Token (5h / week / month) — and restarts every window anchor (window_start,
+// week_start, month_start) to now. This gives the user a clean "full revive":
+// every quota gate re-opens immediately on the next request.
 //
-// CRITICAL (硬约束 decision R1): it MUST NOT touch the call-count columns
-// window_start / quota_5h_used / quota_total_used — those are the 5h call-count
-// quota and must remain untouched ("次数不重置"). The 5h Token bucket reuses
-// the shared 5h window (window_start) per PR #27 and is reset purely by
-// zeroing quota_token_5h_used here: the gate does NOT lazy-reset the 5h Token
-// bucket (unlike the week / month buckets), so it relies on the cron
-// Reset5hQuota / CompensateQuotaReset which clears quota_token_5h_used every
-// 5h. Bumping week_start / month_start to now is the Token-only "restart
-// window" for those two buckets (their gates DO consume those anchors). One
-// atomic UPDATE — idempotent and safe to call repeatedly.
+// The 5h Token bucket reuses the shared 5h window (window_start) per PR #27;
+// the gate does NOT lazy-reset the 5h Token bucket (unlike week / month), so
+// it relies on the cron Reset5hQuota / CompensateQuotaReset to clear
+// quota_token_5h_used every 5h. Bumping window_start here restarts that
+// shared window for both call-count and Token 5h buckets.
 //
-// now is an RFC3339 local-time string, written consistently with CreateUser /
-// the gate's own writes (string ordering == chronological ordering). When empty,
-// the local now is used as a best-effort default.
-func ResetTokenStats(db *sql.DB, userID int64, now string) error {
+// A single atomic UPDATE — idempotent and safe to call repeatedly. now is an
+// RFC3339 local-time string; when empty, the local now is used as a fallback.
+func ResetQuotaUsage(db *sql.DB, userID int64, now string) error {
 	if now == "" {
 		now = time.Now().Format(time.RFC3339)
 	}
 	_, err := db.Exec(
 		`UPDATE quotas
-		 SET quota_token_5h_used = 0,
+		 SET quota_5h_used = 0,
+		     quota_total_used = 0,
+		     window_start = ?,
+		     quota_token_5h_used = 0,
 		     quota_token_week_used = 0,
 		     quota_token_total_used = 0,
 		     week_start = ?,
 		     month_start = ?,
 		     updated_at = ?
 		 WHERE user_id = ?`,
-		now, now, now, userID,
+		now, now, now, now, userID,
 	)
 	if err != nil {
-		return fmt.Errorf("reset token stats: %w", err)
+		return fmt.Errorf("reset quota usage: %w", err)
 	}
 	return nil
 }

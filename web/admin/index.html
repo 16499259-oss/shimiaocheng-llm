@@ -599,11 +599,33 @@
                     <div id="extend-preview-text" style="color:var(--color-primary);font-weight:600;padding:8px 0;"></div>
                 </div>
                 <div class="form-group">
-                    <label><input type="checkbox" id="reset-token-stats" checked> 重置 Token 统计（5小时 / 本周 / 本月）</label>
-                    <small>勾选后三档 Token 用量归零并重启窗口，调用次数配额不受影响</small>
+                    <label><input type="checkbox" id="reset-token-stats" checked> 重置所有用量统计（调用次数 + Token）</label>
+                    <small>勾选后所有用量归零并重启配额窗口，不影响调用记录和审计日志</small>
                 </div>
                 <button type="submit" class="btn btn-primary btn-block">确认延期</button>
             </form>
+        </div>
+    </div>
+
+    <!-- Reset Usage Confirm Modal -->
+    <div id="reset-usage-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>确认重置 — <span id="reset-username"></span></h3>
+                <button class="modal-close" onclick="closeModal('reset-usage-modal')">&times;</button>
+            </div>
+            <div style="padding:16px;">
+                <p style="color:var(--color-warning, #e6a817);font-weight:600;">⚠️ 将归零该用户的所有用量统计：</p>
+                <ul style="margin:12px 0;padding-left:20px;line-height:2;">
+                    <li>调用次数（5小时 / 累计）</li>
+                    <li>Token 用量（5小时 / 本周 / 本月）</li>
+                </ul>
+                <p style="color:var(--color-secondary);font-size:13px;">配额窗口将重启，此操作不可撤销。调用记录与审计日志不受影响。</p>
+                <div style="margin-top:20px;display:flex;gap:12px;">
+                    <button class="btn btn-outline btn-block" onclick="closeModal('reset-usage-modal')">取消</button>
+                    <button class="btn" style="background:var(--color-warning,#e6a817);color:#fff;flex:1;" onclick="confirmResetUsage()">确认重置</button>
+                </div>
+            </div>
         </div>
     </div>
 

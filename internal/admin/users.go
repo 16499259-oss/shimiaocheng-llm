@@ -632,19 +632,18 @@ func (h *Handler) ExtendUser(w http.ResponseWriter, r *http.Request) {
 		"extend", "user", strconv.FormatInt(userID, 10), detail, now.Format(time.RFC3339),
 	)
 
-	// If reset_token_stats is requested, zero the three Token-usage buckets
-	// (5h / week / month) and restart their windows (week_start / month_start →
-	// now). Call-count quotas and window_start are deliberately untouched.
+	// If reset_token_stats is requested, zero all usage buckets (call-count +
+	// Token, all three Token dimensions) and restart all window anchors.
 	// An audit entry is written so the operation is traceable.
 	if req.ResetTokenStats {
-		if err := models.ResetTokenStats(h.DB, userID, now.Format(time.RFC3339)); err != nil {
-			log.Printf("ERROR: reset token stats for user %d: %v", userID, err)
+		if err := models.ResetQuotaUsage(h.DB, userID, now.Format(time.RFC3339)); err != nil {
+			log.Printf("ERROR: reset quota usage for user %d: %v", userID, err)
 		} else {
-			auditDetail := `{"dimensions":["5h","week","month"],"trigger":"extend","operator":"admin"}`
+			auditDetail := `{"dimensions":["calls","tokens-5h","tokens-week","tokens-month"],"trigger":"extend","operator":"admin"}`
 			_, _ = h.DB.Exec(
 				`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)
 				 VALUES (?, ?, ?, ?, ?)`,
-				"token_stats_reset", "user", strconv.FormatInt(userID, 10), auditDetail, now.Format(time.RFC3339),
+				"quota_reset", "user", strconv.FormatInt(userID, 10), auditDetail, now.Format(time.RFC3339),
 			)
 		}
 	}
@@ -659,6 +658,43 @@ func (h *Handler) ExtendUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"expires_at": newExpiresAt,
 		"message":    "有效期已更新至 " + dateDisplay,
+	})
+}
+
+// ResetUsage handles POST /admin/api/users/{id}/reset-usage.
+// Zeroes all usage buckets (call-count + Token) and restarts every window
+// anchor. Does not touch the user's expiry date or any other field.
+func (h *Handler) ResetUsage(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	userID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid user ID"})
+		return
+	}
+
+	user, err := models.GetUserByID(h.DB, userID)
+	if err != nil || user == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "User not found"})
+		return
+	}
+
+	now := time.Now()
+	if err := models.ResetQuotaUsage(h.DB, userID, now.Format(time.RFC3339)); err != nil {
+		log.Printf("ERROR: reset quota usage for user %d: %v", userID, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to reset usage"})
+		return
+	}
+
+	// Audit trail.
+	auditDetail := `{"dimensions":["calls","tokens-5h","tokens-week","tokens-month"],"trigger":"manual_reset","operator":"admin"}`
+	_, _ = h.DB.Exec(
+		`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"quota_reset", "user", strconv.FormatInt(userID, 10), auditDetail, now.Format(time.RFC3339),
+	)
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message": "用户 " + user.Username + " 的所有用量统计已重置",
 	})
 }
 

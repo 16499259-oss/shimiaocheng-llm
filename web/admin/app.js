@@ -794,6 +794,7 @@ async function loadUsers() {
                 <td>${quota5h}</td><td>${quotaTotal}</td><td class="token-cell">${tokenCell}</td><td class="token-cell">${token5hCell}</td><td class="token-cell">${tokenWeekCell}</td><td>${routeHtml}</td><td>${formatBodySize(u.max_body_size)}</td><td>${u.max_concurrency > 0 ? u.max_concurrency : '不限'}</td><td>${expiryHtml}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
                 <td><div class="btn-group">
                     <button class="btn btn-outline btn-sm" onclick="extendUser(${u.id},'${escapeAttr(u.username)}','${escapeAttr(u.expires_at || '')}')">🕐 延期</button>
+                    <button class="btn btn-outline btn-sm" style="color:var(--color-warning,#e6a817);" onclick="openResetModal(${u.id},'${escapeAttr(u.username)}')">🔄 重置</button>
                     <button class="btn btn-outline btn-sm" onclick="shareUser('${escapeAttr(u.username)}',${u.id})">📋 分享</button>
                     <button class="btn btn-outline btn-sm" onclick="editUser(${u.id},'${escapeAttr(u.status)}',${u.quota_5h_limit},${u.quota_total_limit},'${escapeAttr(u.route_mode || 'auto')}','${escapeAttr(u.fixed_provider || '')}',${u.fixed_multiplier != null ? u.fixed_multiplier : 'null'},${u.max_body_size ? u.max_body_size : 1048576},${u.quota_token_total_limit || 0},${u.quota_token_total_used || 0},${u.max_concurrency != null ? u.max_concurrency : 10},${u.quota_token_5h_limit || 0},${u.quota_token_week_limit || 0})">编辑</button>
                     <button class="btn btn-outline btn-sm" onclick="viewCalls(${u.id},'${escapeAttr(u.username)}')">记录</button>
@@ -1047,6 +1048,26 @@ async function submitExtend(e) {
         showToast(data.message || '延期成功', 'success');
         loadUsers(); loadOverview();
     } catch (err) { showToast('延期失败: ' + err.message, 'error'); }
+}
+
+let _resetUserId = null;
+let _resetUsername = '';
+
+function openResetModal(id, username) {
+    _resetUserId = id;
+    _resetUsername = username;
+    document.getElementById('reset-username').textContent = username;
+    showModal('reset-usage-modal');
+}
+
+async function confirmResetUsage() {
+    const id = _resetUserId;
+    closeModal('reset-usage-modal');
+    try {
+        const data = await apiFetch('api/users/' + id + '/reset-usage', { method: 'POST' });
+        showToast(data.message || '重置成功', 'success');
+        loadUsers(); loadOverview();
+    } catch (err) { showToast('重置失败: ' + err.message, 'error'); }
 }
 
 async function viewCalls(userId, username) {

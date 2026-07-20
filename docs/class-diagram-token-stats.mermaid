@@ -1,0 +1,106 @@
+classDiagram
+    direction LR
+
+    class Quota {
+        +int ID
+        +int64 UserID
+        +int Quota5hLimit
+        +int Quota5hUsed
+        +int QuotaTotalLimit
+        +int QuotaTotalUsed
+        +int QuotaTokenTotalLimit
+        +int QuotaTokenTotalUsed
+        +int QuotaToken5hLimit
+        +int QuotaToken5hUsed
+        +int QuotaTokenWeekLimit
+        +int QuotaTokenWeekUsed
+        +string WindowStart
+        +string WeekStart
+        +string MonthStart
+        +string UpdatedAt
+        +sql.NullFloat64 FixedMultiplier
+    }
+
+    class QuotaStatus {
+        +int Quota5hLimit
+        +int Quota5hUsed
+        +int Quota5hRemaining
+        +int QuotaTotalLimit
+        +int QuotaTotalUsed
+        +int QuotaTotalRemaining
+        +int QuotaTokenTotalLimit
+        +int QuotaTokenTotalUsed
+        +int QuotaTokenTotalRemaining
+        +int QuotaToken5hLimit
+        +int QuotaToken5hUsed
+        +int QuotaToken5hRemaining
+        +int QuotaTokenWeekLimit
+        +int QuotaTokenWeekUsed
+        +int QuotaTokenWeekRemaining
+        +int64 TotalTokens
+        +int64 TotalTokensToday
+        +string WindowResetAt
+        +string MonthResetAt
+        +string Status
+        +string ExpiresAt
+    }
+
+    class UserWithQuota {
+        +User User
+        +int Quota5hLimit
+        +int Quota5hUsed
+        +int QuotaTotalLimit
+        +int QuotaTotalUsed
+        +int QuotaTokenTotalLimit
+        +int QuotaTokenTotalUsed
+        +int QuotaToken5hLimit
+        +int QuotaToken5hUsed
+        +int QuotaTokenWeekLimit
+        +int QuotaTokenWeekUsed
+        +int64 TotalTokens
+        +string SubKey
+        +*float64 FixedMultiplier
+    }
+
+    class extendUserRequest {
+        +int Days
+        +string Until
+        +bool ResetTokenStats
+    }
+
+    class Models {
+        <<package models>>
+        +GetQuota(db, userID) *Quota
+        +AtomicDeductQuota(db, userID, effectiveCalls) bool
+        +AddTokenUsage(db, userID, delta) error
+        +ResetTokenStats(db, userID, now) error
+        +ExtendUserExpiry(db, userID, newExpiresAt) error
+        +UpdateQuotaTokenTotalLimit(db, userID, limit) error
+        +UpdateQuotaTokenWindowLimits(db, userID, token5hLimit, tokenWeekLimit) error
+        +Reset5hQuota(db, resetIntervalHours) error
+        +CompensateQuotaReset(db, resetIntervalHours) error
+        +CreateUser(...) *UserWithQuota
+        +ListUsers(db) []UserWithQuota
+    }
+
+    class Handler {
+        <<package admin>>
+        +ExtendUser(w, r)
+        -writeExtendAudit(db, userID, oldExpires, newExpires)
+        -writeTokenStatsResetAudit(db, userID, dimensions, trigger, operator)
+    }
+
+    class Checker {
+        <<package quota>>
+        -db *sql.DB
+        -multEng *MultiplierEngine
+        -resetHours int
+        +CheckAndDeduct(userID, effectiveCalls) (bool, error)
+    }
+
+    Quota "1" -- "1" QuotaStatus : builds
+    UserWithQuota o-- Quota : embeds
+    Models ..> Quota : reads/writes
+    Handler ..> Models : ExtendUser -> ExtendUserExpiry + ResetTokenStats
+    Checker ..> Models : AtomicDeductQuota
+    extendUserRequest ..> Handler : ExtendUser
