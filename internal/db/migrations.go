@@ -261,25 +261,56 @@ func RunMigrations(conn *DB) error {
 	}
 
 	// Add quota_token_total_limit column to quotas (idempotent). On first
-	// creation, backfill quota_token_total_used from historical call_logs
-	// (SUM(prompt_tokens + completion_tokens) per user) — a one-time migration
-	// so existing users' cumulative Token usage is preserved under the new
-	// quota-unlimited-by-default model. Idempotent: only runs when the column
-	// does not yet exist.
+	// creation, backfill quota_token_total_used from historical call_logs as the
+	// MULTIPLIER-AWARE sum (ceil((prompt+completion) * multiplier_used) per row)
+	// so existing users' cumulative Token usage is preserved and consistent with
+	// actual billing under the new quota-unlimited-by-default model. Idempotent:
+	// only runs when the column does not yet exist.
 	if !columnExists(conn, "quotas", "quota_token_total_limit") {
 		if _, err := conn.Conn.Exec(
 			`ALTER TABLE quotas ADD COLUMN quota_token_total_limit INTEGER NOT NULL DEFAULT 0`,
 		); err != nil {
 			return fmt.Errorf("migration alter quotas.quota_token_total_limit failed: %w", err)
 		}
-		// Backfill only where not already incremented (defensive against a
-		// partial prior run). quota_token_total_used now exists (added above).
-		if _, err := conn.Conn.Exec(
-			`UPDATE quotas SET quota_token_total_used = COALESCE(
-				(SELECT SUM(prompt_tokens + completion_tokens) FROM call_logs WHERE call_logs.user_id = quotas.user_id), 0
-			) WHERE quota_token_total_used = 0`,
-		); err != nil {
+		// Backfill quota_token_total_used from historical call_logs, but
+		// MULTIPLIER-AWARE: each row is billed as ceil((prompt_tokens +
+		// completion_tokens) * multiplier_used), exactly matching the runtime
+		// semantics of AddTokenUsage (which the 5h/week Token caps already use).
+		// This keeps the cumulative Token cap ("Token 月总量") consistent with
+		// the 5h/week caps and with actual billing. The multiplier-scaled sum is
+		// computed by backfillQuotaTokenTotalUsed (set-based SQL below);
+		// call_logs.multiplier_used defaults to 1.0 for pre-multiplier history,
+		// so legacy rows are billed at 1x (matching the period when no
+		// multiplier was in effect).
+		if err := backfillQuotaTokenTotalUsed(conn); err != nil {
 			return fmt.Errorf("migration backfill quotas.quota_token_total_used failed: %w", err)
+		}
+	}
+
+	// ── One-time recompute of quota_token_total_used to include the billing
+	// multiplier (2026-08-18) ──
+// The cumulative-Token backfill that already ran on production (when
+// quota_token_total_limit was first created, on an earlier build) summed RAW
+// prompt+completion from call_logs (no multiplier). Going forward,
+	// AddTokenUsage accrues the multiplier-scaled billed delta into
+	// quota_token_total_used — exactly like the 5h/week Token caps — so the raw
+	// backfill left existing production rows under-counted versus actual billing.
+	// This one-time step recomputes quota_token_total_used for every user as the
+	// multiplier-scaled sum of historical call_logs, in lock-step with the
+	// 5h/week caps. It is guarded by the presence of the marker column
+	// quota_token_total_mult_v1 so it runs exactly once (on the first deploy that
+	// introduces this migration); subsequent deploys skip it (column already
+	// present). The recompute is a full SET from call_logs (not an increment), so
+	// it safely corrects a column that already holds a raw or partially-billed
+	// value. The lead triggers it simply by deploying this build.
+	if !columnExists(conn, "quotas", "quota_token_total_mult_v1") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE quotas ADD COLUMN quota_token_total_mult_v1 INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("migration add marker quotas.quota_token_total_mult_v1 failed: %w", err)
+		}
+		if err := backfillQuotaTokenTotalUsed(conn); err != nil {
+			return fmt.Errorf("migration recompute quotas.quota_token_total_used (multiplier) failed: %w", err)
 		}
 	}
 
@@ -475,4 +506,36 @@ func columnExists(conn *DB, table, column string) bool {
 		}
 	}
 	return false
+}
+
+// backfillQuotaTokenTotalUsed recomputes quotas.quota_token_total_used for every
+// user as the multiplier-scaled sum of historical call_logs, mirroring the
+// runtime billing semantics of models.AddTokenUsage: each request is billed
+// ceil((prompt_tokens + completion_tokens) * multiplier_used) Tokens. This keeps
+// the cumulative Token cap ("Token 月总量") consistent with the 5h/week Token
+// caps, which are already accrued with the same multiplier.
+//
+// It is a single set-based UPDATE (no app-side iteration), so it scales to large
+// production call_logs tables. We use the CAST(x + 0.999999 AS INTEGER) idiom
+// for ceil because modernc.org/sqlite does not guarantee a CEIL math function;
+// the +0.999999 offset makes the integer truncation equal ceil(x) for every
+// non-negative billed x. call_logs.multiplier_used is NOT NULL DEFAULT 1.0, so
+// pre-multiplier history is billed at 1x — matching the period when no
+// multiplier was in effect. COALESCE(...,0) keeps users with no call_logs at 0.
+//
+// This is the SAME statement documented (and regression-tested) in
+// internal/models/token_total_recalc_test.go, which the lead may also run
+// manually as a belt-and-suspenders check. Because it is a full SET from the
+// authoritative call_logs source, it is idempotent and safe to call on a column
+// that already holds a raw or partially-billed value — e.g. the one-time
+// migration backfill and the one-time multiplier recompute both delegate to it.
+func backfillQuotaTokenTotalUsed(conn *DB) error {
+	if _, err := conn.Conn.Exec(
+		`UPDATE quotas SET quota_token_total_used = COALESCE(
+			(SELECT SUM(CAST((prompt_tokens + completion_tokens) * multiplier_used + 0.999999 AS INTEGER))
+			 FROM call_logs WHERE call_logs.user_id = quotas.user_id), 0)`,
+	); err != nil {
+		return fmt.Errorf("recompute quota_token_total_used (multiplier): %w", err)
+	}
+	return nil
 }

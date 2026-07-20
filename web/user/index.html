@@ -399,16 +399,13 @@ function renderExpiryRow(expiresAt) {
 }
 
 // renderTokenRow renders a cumulative-Token-style quota row. A limit of 0 means
-// unlimited: show 「无限」 and hide the progress bar; otherwise show used/limit
+// unlimited: render nothing (the whole row is hidden); otherwise show used/limit
 // with a colored bar (the same >80% red / >50% orange / else green scale used by
 // the count rows and the cumulative Token row). Used for the 5h-window and
 // weekly Token rows, which carry the same 0 = unlimited semantics.
 function renderTokenRow(label, used, limit) {
     if (!limit || limit === 0) {
-        return `<div class="stat-row">
-            <span class="stat-label">${label}</span>
-            <span class="stat-value">无限</span>
-        </div>`;
+        return '';
     }
     const pct = Math.round((used / limit) * 100);
     const cls = pct > 80 ? 'bad' : (pct > 50 ? 'warn' : 'good');
@@ -420,21 +417,18 @@ function renderTokenRow(label, used, limit) {
 }
 
 function renderDashboard(data) {
-    // Cumulative Token quota row. A limit of 0 means unlimited: show 「无限」
-    // and hide the progress bar; otherwise show used/limit with a colored bar.
+    // Monthly Token quota row. A limit of 0 means unlimited: render nothing
+    // (the whole row is hidden); otherwise show used/limit with a colored bar.
     let tokenRowHtml;
     const tokenLimit = data.quota_token_total_limit || 0;
     const tokenUsed = data.quota_token_total_used || 0;
     if (tokenLimit === 0) {
-        tokenRowHtml = `<div class="stat-row">
-            <span class="stat-label">Token 总量</span>
-            <span class="stat-value">无限</span>
-        </div>`;
+        tokenRowHtml = '';
     } else {
         const pctToken = Math.round((tokenUsed / tokenLimit) * 100);
         const clsToken = pctToken > 80 ? 'bad' : (pctToken > 50 ? 'warn' : 'good');
         tokenRowHtml = `<div class="stat-row">
-            <span class="stat-label">Token 总量</span>
+            <span class="stat-label">Token 月总量</span>
             <span class="stat-value ${clsToken}">${tokenUsed.toLocaleString()} / ${tokenLimit.toLocaleString()}</span>
         </div>
         <div class="progress-bar"><div class="progress-fill ${clsToken}" style="width:${pctToken}%"></div></div>`;
@@ -451,15 +445,15 @@ function renderDashboard(data) {
     $('quota-stats').innerHTML = `
         ${count5hHtml}
         ${countTotalHtml}
-        ${tokenRowHtml}
         ${token5hRowHtml}
         ${tokenWeekRowHtml}
+        ${tokenRowHtml}
         <div class="stat-row">
-            <span class="stat-label">累计 Token（含倍率）</span>
+            <span class="stat-label">累计 Token</span>
             <span class="stat-value">${(data.total_tokens || 0).toLocaleString()}</span>
         </div>
         <div class="stat-row">
-            <span class="stat-label">今日 Token（含倍率）</span>
+            <span class="stat-label">今日 Token</span>
             <span class="stat-value">${(data.total_tokens_today || 0).toLocaleString()}</span>
         </div>
         <div class="stat-row">
