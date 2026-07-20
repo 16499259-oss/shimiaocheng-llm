@@ -307,7 +307,7 @@ func TestQueryCallLogsGlobal_UsernamePopulated(t *testing.T) {
 //
 // NOTE on the orphan (user_id = 0) case mentioned in the spec: call_logs has a
 // FOREIGN KEY (user_id) REFERENCES users(id), so a true orphan row cannot be
-// inserted through the normal path. The COALESCE(users.username, '') in the
+// inserted through the normal path. The COALESCE(users.username, ”) in the
 // aggregate query is therefore a defensive safeguard (covers e.g. a user row
 // dropped without CASCADE). This test validates the real-user path with two
 // users and asserts the sums/order are correct.
