@@ -171,6 +171,20 @@ func RunMigrations(conn *DB) error {
 			return fmt.Errorf("migration alter call_logs.provider_id failed: %w", err)
 		}
 	}
+	// Add raw_total_tokens column to call_logs (idempotent: only when missing).
+	// This stores the UNMULTIPLIED raw token sum (prompt_tokens +
+	// completion_tokens) written at call-log insert time, so the "raw (no
+	// multiplier) token statistics" can be displayed side-by-side with the
+	// multiplier-inflated CallStats.Tokens without ever reverse-deriving it from
+	// the multiplier. Distinct from total_tokens, which is the provider-reported
+	// total (may include provider-specific extras such as reasoning tokens).
+	if !columnExists(conn, "call_logs", "raw_total_tokens") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE call_logs ADD COLUMN raw_total_tokens INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("migration alter call_logs.raw_total_tokens failed: %w", err)
+		}
+	}
 	// Composite index (provider_id, created_at) for the global call-stats panel.
 	// Must run AFTER the provider_id column exists (it is added above, not in the
 	// CREATE TABLE). Idempotent so re-runs are safe.

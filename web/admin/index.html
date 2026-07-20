@@ -230,6 +230,12 @@
                         <div class="stat-value-sm">总计 <span id="cs-tok-total">0</span></div>
                     </div>
                     <div class="stat-card">
+                        <div class="stat-label">原始 Token <span class="cs-mult-note" title="未经过任何倍率折算，等于每行 输入Token+输出Token 之和，写入调用记录时即记录（数据来源：call_logs.raw_total_tokens），与左侧「含倍率」并列对比">未含倍率</span></div>
+                        <div class="stat-value-sm">输入 <span id="cs-raw-tok-prompt">0</span></div>
+                        <div class="stat-value-sm">输出 <span id="cs-raw-tok-completion">0</span></div>
+                        <div class="stat-value-sm">总计 <span id="cs-raw-tok-total">0</span></div>
+                    </div>
+                    <div class="stat-card">
                         <div class="stat-label">折合调用次数</div>
                         <div class="stat-value" id="cs-effective-calls">0</div>
                     </div>

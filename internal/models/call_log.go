@@ -18,6 +18,12 @@ type CallLog struct {
 	PromptTokens     int     `json:"prompt_tokens"`
 	CompletionTokens int     `json:"completion_tokens"`
 	TotalTokens      int     `json:"total_tokens"`
+	// RawTotalTokens is the UNMULTIPLIED raw token total (prompt_tokens +
+	// completion_tokens), recorded at insert time. It is the canonical "raw
+	// token" figure surfaced by the call-records summary ("未含倍率") and is
+	// intentionally independent of TotalTokens (provider-reported, may include
+	// extras) and of any multiplier. Never reverse-derived from multiplier_used.
+	RawTotalTokens   int     `json:"raw_total_tokens"`
 	EffectiveCalls   int     `json:"effective_calls"`
 	MultiplierUsed   float64 `json:"multiplier_used"`
 	StatusCode       int     `json:"status_code"`
@@ -67,10 +73,10 @@ func InsertCallLog(db *sql.DB, log *CallLog) (int64, error) {
 	}
 	result, err := db.Exec(
 		`INSERT INTO call_logs (user_id, model, provider_id, prompt_tokens, completion_tokens, total_tokens,
-		 effective_calls, multiplier_used, status_code, latency_ms, error_msg, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 raw_total_tokens, effective_calls, multiplier_used, status_code, latency_ms, error_msg, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		log.UserID, log.Model, providerID, log.PromptTokens, log.CompletionTokens,
-		log.TotalTokens, log.EffectiveCalls, log.MultiplierUsed,
+		log.TotalTokens, log.PromptTokens+log.CompletionTokens, log.EffectiveCalls, log.MultiplierUsed,
 		log.StatusCode, log.LatencyMs, log.ErrorMsg, now,
 	)
 	if err != nil {
