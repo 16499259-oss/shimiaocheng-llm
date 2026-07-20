@@ -398,6 +398,27 @@ function renderExpiryRow(expiresAt) {
     </div>`;
 }
 
+// renderTokenRow renders a cumulative-Token-style quota row. A limit of 0 means
+// unlimited: show 「无限」 and hide the progress bar; otherwise show used/limit
+// with a colored bar (the same >80% red / >50% orange / else green scale used by
+// the count rows and the cumulative Token row). Used for the 5h-window and
+// weekly Token rows, which carry the same 0 = unlimited semantics.
+function renderTokenRow(label, used, limit) {
+    if (!limit || limit === 0) {
+        return `<div class="stat-row">
+            <span class="stat-label">${label}</span>
+            <span class="stat-value">无限</span>
+        </div>`;
+    }
+    const pct = Math.round((used / limit) * 100);
+    const cls = pct > 80 ? 'bad' : (pct > 50 ? 'warn' : 'good');
+    return `<div class="stat-row">
+        <span class="stat-label">${label}</span>
+        <span class="stat-value ${cls}">${used.toLocaleString()} / ${limit.toLocaleString()}</span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill ${cls}" style="width:${pct}%"></div></div>`;
+}
+
 function renderDashboard(data) {
     // Cumulative Token quota row. A limit of 0 means unlimited: show 「无限」
     // and hide the progress bar; otherwise show used/limit with a colored bar.
@@ -424,10 +445,15 @@ function renderDashboard(data) {
     const count5hHtml = renderCountRow('5小时配额', data.quota_5h_used || 0, data.quota_5h_limit || 0);
     const countTotalHtml = renderCountRow('总配额', data.quota_total_used || 0, data.quota_total_limit || 0);
 
+    const token5hRowHtml = renderTokenRow('5小时 Token', data.quota_token_5h_used || 0, data.quota_token_5h_limit || 0);
+    const tokenWeekRowHtml = renderTokenRow('本周 Token', data.quota_token_week_used || 0, data.quota_token_week_limit || 0);
+
     $('quota-stats').innerHTML = `
         ${count5hHtml}
         ${countTotalHtml}
         ${tokenRowHtml}
+        ${token5hRowHtml}
+        ${tokenWeekRowHtml}
         <div class="stat-row">
             <span class="stat-label">累计 Token</span>
             <span class="stat-value">${(data.total_tokens || 0).toLocaleString()}</span>

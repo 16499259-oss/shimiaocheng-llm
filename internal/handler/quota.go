@@ -79,8 +79,17 @@ func (h *QuotaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		QuotaTokenTotalLimit:     quotaRecord.QuotaTokenTotalLimit,
 		QuotaTokenTotalUsed:      quotaRecord.QuotaTokenTotalUsed,
 		QuotaTokenTotalRemaining: 0,
-		WindowResetAt:            windowStart.Format(time.RFC3339),
-		Status:                   user.Status,
+		// 5h-window Token quota. Like the cumulative cap, remaining is forced to
+		// 0 when the cap is 0 (unlimited) so the frontend hides the progress bar.
+		QuotaToken5hLimit:     quotaRecord.QuotaToken5hLimit,
+		QuotaToken5hUsed:      quotaRecord.QuotaToken5hUsed,
+		QuotaToken5hRemaining: 0,
+		// Weekly (rolling 7d) Token quota, same semantics as above.
+		QuotaTokenWeekLimit:     quotaRecord.QuotaTokenWeekLimit,
+		QuotaTokenWeekUsed:      quotaRecord.QuotaTokenWeekUsed,
+		QuotaTokenWeekRemaining: 0,
+		WindowResetAt:           windowStart.Format(time.RFC3339),
+		Status:                  user.Status,
 		// Propagate the user's account expiry to the self-service panel so the
 		// /user/ dashboard can show it (fix: user-expiry-display). An empty
 		// string means "permanent" — the frontend renders that as 「永久」.
@@ -88,6 +97,12 @@ func (h *QuotaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if quotaRecord.QuotaTokenTotalLimit > 0 {
 		status.QuotaTokenTotalRemaining = max(0, quotaRecord.QuotaTokenTotalLimit-quotaRecord.QuotaTokenTotalUsed)
+	}
+	if quotaRecord.QuotaToken5hLimit > 0 {
+		status.QuotaToken5hRemaining = max(0, quotaRecord.QuotaToken5hLimit-quotaRecord.QuotaToken5hUsed)
+	}
+	if quotaRecord.QuotaTokenWeekLimit > 0 {
+		status.QuotaTokenWeekRemaining = max(0, quotaRecord.QuotaTokenWeekLimit-quotaRecord.QuotaTokenWeekUsed)
 	}
 
 	// Query token stats for this user. Scan errors are logged but not fatal: on

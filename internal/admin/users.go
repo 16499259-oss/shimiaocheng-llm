@@ -24,6 +24,8 @@ type createUserRequest struct {
 	Quota5hLimit         int      `json:"quota_5h_limit"`
 	QuotaTotalLimit      int      `json:"quota_total_limit"`
 	QuotaTokenTotalLimit int      `json:"quota_token_total_limit"` // 0 = 不限制（默认）
+	QuotaToken5hLimit    int      `json:"quota_token_5h_limit"`    // 0 = 不限制（默认）
+	QuotaTokenWeekLimit  int      `json:"quota_token_week_limit"`  // 0 = 不限制（默认）
 	ExpiresAt            string   `json:"expires_at"`
 	RouteMode            string   `json:"route_mode"`
 	FixedProvider        string   `json:"fixed_provider"`
@@ -37,6 +39,8 @@ type updateUserRequest struct {
 	Quota5hLimit         *int     `json:"quota_5h_limit"`
 	QuotaTotalLimit      *int     `json:"quota_total_limit"`
 	QuotaTokenTotalLimit *int     `json:"quota_token_total_limit"` // nil = 不改；0 = 不限制
+	QuotaToken5hLimit    *int     `json:"quota_token_5h_limit"`    // nil = 不改；0 = 不限制
+	QuotaTokenWeekLimit  *int     `json:"quota_token_week_limit"`  // nil = 不改；0 = 不限制
 	Status               *string  `json:"status"`
 	RegenerateKey        *bool    `json:"regenerate_key"`
 	RouteMode            *string  `json:"route_mode"`
@@ -160,6 +164,27 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Reject negative window Token caps (same bricking risk as the cumulative
+	// cap). 0 / omitted = unlimited (no-op). Both the 5h-window and weekly caps
+	// are written in a SINGLE statement so a create that sets BOTH dimensions
+	// does not clobber the other (the partial-update path in UpdateUser instead
+	// reads the current caps first and overrides only the provided dimension).
+	if req.QuotaToken5hLimit < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_token_5h_limit must be >= 0"})
+		return
+	}
+	if req.QuotaTokenWeekLimit < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_token_week_limit must be >= 0"})
+		return
+	}
+	if req.QuotaToken5hLimit > 0 || req.QuotaTokenWeekLimit > 0 {
+		if err := models.UpdateQuotaTokenWindowLimits(h.DB, user.ID, req.QuotaToken5hLimit, req.QuotaTokenWeekLimit); err != nil {
+			log.Printf("ERROR: set token window limits: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to set token window limits: " + err.Error()})
+			return
+		}
+	}
+
 	// Now regenerate the sub-key with the actual user ID as input
 	actualSubKey := auth.GenerateSubKey(h.SubKeySalt, user.ID)
 	actualSubKeyHash := auth.HashSubKey(actualSubKey)
@@ -198,6 +223,10 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		"quota_total_used":        user.QuotaTotalUsed,
 		"quota_token_total_limit": req.QuotaTokenTotalLimit,
 		"quota_token_total_used":  0,
+		"quota_token_5h_limit":    req.QuotaToken5hLimit,
+		"quota_token_5h_used":     0,
+		"quota_token_week_limit":  req.QuotaTokenWeekLimit,
+		"quota_token_week_used":   0,
 		"route_mode":              user.RouteMode,
 		"fixed_provider":          user.FixedProvider,
 		"status":                  user.Status,
@@ -273,6 +302,14 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_token_total_limit must be >= 0"})
 		return
 	}
+	if req.QuotaToken5hLimit != nil && *req.QuotaToken5hLimit < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_token_5h_limit must be >= 0"})
+		return
+	}
+	if req.QuotaTokenWeekLimit != nil && *req.QuotaTokenWeekLimit < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_token_week_limit must be >= 0"})
+		return
+	}
 
 	// Update quota limits
 	if req.Quota5hLimit != nil || req.QuotaTotalLimit != nil {
@@ -294,6 +331,36 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		if q, gerr := models.GetQuota(h.DB, userID); gerr == nil {
 			response["quota_token_total_limit"] = q.QuotaTokenTotalLimit
 			response["quota_token_total_used"] = q.QuotaTokenTotalUsed
+		}
+	}
+	// Update 5h-window and weekly Token caps (nil = unchanged; 0 = unlimited).
+	// Read the current caps first so a partial update (only one dimension set)
+	// preserves the other dimension instead of resetting it to 0.
+	if req.QuotaToken5hLimit != nil || req.QuotaTokenWeekLimit != nil {
+		var cur *models.Quota
+		if c, gerr := models.GetQuota(h.DB, userID); gerr == nil {
+			cur = c
+		}
+		t5h, tw := 0, 0
+		if cur != nil {
+			t5h, tw = cur.QuotaToken5hLimit, cur.QuotaTokenWeekLimit
+		}
+		if req.QuotaToken5hLimit != nil {
+			t5h = *req.QuotaToken5hLimit
+		}
+		if req.QuotaTokenWeekLimit != nil {
+			tw = *req.QuotaTokenWeekLimit
+		}
+		if err := models.UpdateQuotaTokenWindowLimits(h.DB, userID, t5h, tw); err != nil {
+			log.Printf("ERROR: update token window limits: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to update token window limits"})
+			return
+		}
+		if q, gerr := models.GetQuota(h.DB, userID); gerr == nil {
+			response["quota_token_5h_limit"] = q.QuotaToken5hLimit
+			response["quota_token_5h_used"] = q.QuotaToken5hUsed
+			response["quota_token_week_limit"] = q.QuotaTokenWeekLimit
+			response["quota_token_week_used"] = q.QuotaTokenWeekUsed
 		}
 	}
 

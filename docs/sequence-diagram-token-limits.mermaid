@@ -1,0 +1,46 @@
+sequenceDiagram
+    autonumber
+    participant A as Admin Client
+    participant AU as admin.Handler.CreateUser
+    participant M as models
+    participant DB as SQLite (quotas)
+
+    Note over A,DB: (A) 创建用户 → 写 5h/周 Token 上限
+    A->>AU: POST /admin/api/users {quota_token_5h_limit, quota_token_week_limit}
+    AU->>AU: 校验 >=0（<0 → 400）
+    AU->>M: CreateUser(...) — INSERT quotas (5新列默认 0, week_start=now)
+    M->>DB: INSERT quotas
+    AU->>M: UpdateQuotaTokenWindowLimits(userID, 5h, week)
+    M->>DB: UPDATE quotas SET quota_token_5h_limit=?, quota_token_week_limit=?
+    AU-->>A: 201 {quota_token_5h_limit, quota_token_week_limit}
+
+    Note over A,DB: (B) 请求 → 闸门(含新闸门+周内惰性重置) → 响应后累加
+    participant P as proxy.Handler.ServeHTTP
+    participant C as quota.Checker
+    participant UP as Upstream
+
+    P->>C: CheckAndDeduct(userID, effectiveCalls)
+    C->>M: AtomicDeductQuota(db, userID, calls)
+    M->>DB: UPDATE quotas SET quota_5h_used+=calls, quota_total_used+=calls,<br/>quota_token_week_used = CASE WHEN week_start<now-7d THEN 0 ELSE week_used END + calls,<br/>week_start = CASE WHEN ... THEN now ELSE week_start END<br/>WHERE 5h/总次数闸门 AND (token_total 软闸门) AND (token_5h 软闸门) AND (token_week 软闸门)
+    alt rowsAffected==1 (放行)
+        M-->>C: true
+        C-->>P: true
+        P->>UP: 转发请求
+        UP-->>P: 响应 (usage: prompt/completion)
+        P->>M: AddTokenUsage(db, userID, billedTokens)
+        M->>DB: UPDATE quotas SET quota_token_total_used+=d, quota_token_5h_used+=d, quota_token_week_used+=d
+        P-->>A: 200 响应
+    else 拦截 (rowsAffected==0)
+        M-->>C: false
+        C-->>P: false
+        P->>M: GetQuota(userID) 读回
+        P->>P: 三分类 5h→周→总量 + 新鲜度
+        P-->>A: 429 {error.type: token_5h/week/total_quota_exceeded}
+    end
+
+    Note over A,DB: (C) 惰性重置触发点
+    participant S as quota.Scheduler
+    Note right of S: 5h token 重置复用 5h 次数窗口
+    S->>M: Reset5hQuota / CompensateQuotaReset (每30s边界 + 启动补偿)
+    M->>DB: UPDATE quotas SET quota_5h_used=0, quota_token_5h_used=0, window_start=? WHERE ...
+    Note right of DB: 周 token 重置在 AtomicDeductQuota 闸门 UPDATE 内用 CASE 原子完成（请求时，week_start 距今>7d 则清零并 bump）

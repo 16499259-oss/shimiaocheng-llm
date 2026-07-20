@@ -85,8 +85,8 @@
                     <button id="create-user-btn" class="btn btn-primary">+ 创建用户</button>
                 </div>
                 <table class="table" id="users-table">
-                    <thead><tr><th>ID</th><th>用户名</th><th>Key</th><th>5h 配额</th><th>总配额</th><th>Token</th><th>路由/倍率</th><th>单次上限</th><th>并发</th><th>有效期</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
-                    <tbody id="users-tbody"><tr><td colspan="13" class="text-center">加载中...</td></tr></tbody>
+                    <thead><tr><th>ID</th><th>用户名</th><th>Key</th><th>5h 配额</th><th>总配额</th><th>Token</th><th>5h·Token</th><th>周·Token</th><th>路由/倍率</th><th>单次上限</th><th>并发</th><th>有效期</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
+                    <tbody id="users-tbody"><tr><td colspan="15" class="text-center">加载中...</td></tr></tbody>
                 </table>
                 <!-- Calls sub-section -->
                 <div id="calls-section" style="display:none; margin-top:24px;">
@@ -434,6 +434,8 @@
                 <div class="form-group"><label for="new-quota-5h">5h 配额上限 (默认 100)</label><input type="number" id="new-quota-5h" value="100" min="1"></div>
                 <div class="form-group"><label for="new-quota-total">总配额上限 (默认 10000)</label><input type="number" id="new-quota-total" value="10000" min="1"></div>
                 <div class="form-group"><label for="new-quota-token-total">Token 总量上限 (默认 0 = 不限制)</label><input type="number" id="new-quota-token-total" value="0" min="0" placeholder="0 = 不限制"></div>
+                <div class="form-group"><label for="new-quota-token-5h">5h Token 上限 (默认 0 = 不限制)</label><input type="number" id="new-quota-token-5h" value="0" min="0" placeholder="0 = 不限制"></div>
+                <div class="form-group"><label for="new-quota-token-week">周 Token 上限 (默认 0 = 不限制)</label><input type="number" id="new-quota-token-week" value="0" min="0" placeholder="0 = 不限制"></div>
                 <div class="form-group">
                     <label for="new-expiry-type">有效期</label>
                     <select id="new-expiry-type">
@@ -514,6 +516,8 @@
                 <div class="form-group"><label for="update-quota-5h">5h 配额上限</label><input type="number" id="update-quota-5h" min="1"></div>
                 <div class="form-group"><label for="update-quota-total">总配额上限</label><input type="number" id="update-quota-total" min="1"></div>
                 <div class="form-group"><label for="update-quota-token-total">Token 总量上限 (0 = 不限制)</label><input type="number" id="update-quota-token-total" min="0" placeholder="0 = 不限制"></div>
+                <div class="form-group"><label for="update-quota-token-5h">5h Token 上限 (0 = 不限制)</label><input type="number" id="update-quota-token-5h" min="0" placeholder="0 = 不限制"></div>
+                <div class="form-group"><label for="update-quota-token-week">周 Token 上限 (0 = 不限制)</label><input type="number" id="update-quota-token-week" min="0" placeholder="0 = 不限制"></div>
                 <div class="form-group"><label for="update-status">状态</label><select id="update-status"><option value="">不修改</option><option value="active">启用</option><option value="disabled">禁用</option></select></div>
                 <div class="form-group"><label><input type="checkbox" id="update-regenerate-key"> 重新生成 Key</label></div>
                 <div class="form-group">
