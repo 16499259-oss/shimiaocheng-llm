@@ -590,8 +590,8 @@ async function loadRoutingRules() {
             return `<tr>
                 <td>${r.id}</td>
                 <td><span class="badge badge-enabled">${escapeHtml(r.provider_id)}</span></td>
-                <td>${r.start_time}</td>
-                <td>${r.end_time}</td>
+                <td>${escapeHtml(r.start_time)}</td>
+                <td>${escapeHtml(r.end_time)}</td>
                 <td>${formatDaysOfWeek(r.days_of_week)}</td>
                 <td>${r.priority ?? 0}</td>
                 <td>${s}</td>

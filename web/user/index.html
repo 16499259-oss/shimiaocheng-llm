@@ -267,9 +267,17 @@ let currentKey = '';
 
 function $(id) { return document.getElementById(id); }
 
+// Escape a string for safe insertion into innerHTML (defends against stored XSS).
+function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
 // Auto-login if key is saved
 document.addEventListener('DOMContentLoaded', () => {
-    const saved = localStorage.getItem(STORAGE_KEY);
+    const saved = sessionStorage.getItem(STORAGE_KEY);
     if (saved && saved.startsWith('sk-')) {
         currentKey = saved;
         $('sub-key-input').value = saved;
@@ -304,13 +312,13 @@ async function fetchQuota() {
         }
 
         const data = await resp.json();
-        localStorage.setItem(STORAGE_KEY, currentKey);
+        sessionStorage.setItem(STORAGE_KEY, currentKey);
         renderDashboard(data);
         $('login-card').classList.add('hidden');
         $('dashboard-card').classList.remove('hidden');
     } catch (err) {
         showError('验证失败: ' + err.message);
-        localStorage.removeItem(STORAGE_KEY);
+        sessionStorage.removeItem(STORAGE_KEY);
     } finally {
         btn.disabled = false;
         btn.textContent = '查询配额';
@@ -374,7 +382,7 @@ function renderExpiryRow(expiresAt) {
     if (isNaN(expDate.getTime())) {
         return `<div class="stat-row">
             <span class="stat-label">到期时间</span>
-            <span class="stat-value">${expiresAt}</span>
+            <span class="stat-value">${escapeHtml(expiresAt)}</span>
         </div>`;
     }
     const now = new Date();
@@ -463,7 +471,7 @@ function renderDashboard(data) {
         ${renderExpiryRow(data.expires_at)}
         <div class="stat-row">
             <span class="stat-label">账户状态</span>
-            <span class="stat-value good">${data.status === 'active' ? '✅ 正常' : '🚫 ' + data.status}</span>
+            <span class="stat-value good">${data.status === 'active' ? '✅ 正常' : '🚫 ' + escapeHtml(data.status)}</span>
         </div>
     `;
 
@@ -517,7 +525,7 @@ function copyBaseUrl() {
 
 function logout() {
     currentKey = '';
-    localStorage.removeItem(STORAGE_KEY);
+    sessionStorage.removeItem(STORAGE_KEY);
     $('sub-key-input').value = '';
     $('dashboard-card').classList.add('hidden');
     $('login-card').classList.remove('hidden');

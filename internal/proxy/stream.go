@@ -45,7 +45,9 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, bodyBytes
 			LatencyMs:      latencyMs,
 			ErrorMsg:       err.Error(),
 		}
-		models.InsertCallLog(h.QuotaChecker.DB(), callLog)
+		if _, err := models.InsertCallLog(h.QuotaChecker.DB(), callLog); err != nil {
+			log.Printf("insert call log failed: %v", err)
+		}
 
 		writeProxyError(w, http.StatusBadGateway, "Upstream request failed", "upstream_error")
 		return
@@ -65,7 +67,9 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, bodyBytes
 			LatencyMs:      latencyMs,
 			ErrorMsg:       fmt.Sprintf("Upstream returned %d", resp.StatusCode),
 		}
-		models.InsertCallLog(h.QuotaChecker.DB(), callLog)
+		if _, err := models.InsertCallLog(h.QuotaChecker.DB(), callLog); err != nil {
+			log.Printf("insert call log failed: %v", err)
+		}
 
 		// Forward the error response
 		w.Header().Set("Content-Type", "application/json")
@@ -169,7 +173,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, bodyBytes
 	latencyMs := int(time.Since(startTime).Milliseconds())
 
 	// Log the call with token statistics
-	statusCode := http.StatusOK
+	statusCode := resp.StatusCode
 	callLog := &models.CallLog{
 		UserID:           userID,
 		Model:            model,

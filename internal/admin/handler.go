@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"strings"
 
 	"llm_api_gateway/internal/auth"
 	"llm_api_gateway/internal/config"
@@ -110,12 +111,12 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Auth middleware: session for page routes, API auth for API routes
 	authHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Static files — no auth required
-		if len(r.URL.Path) >= 8 && r.URL.Path[:8] == "/static/" {
+		if strings.HasPrefix(r.URL.Path, "/static/") {
 			adminMux.ServeHTTP(w, r)
 			return
 		}
 		// API routes need JSON auth
-		if len(r.URL.Path) >= 5 && r.URL.Path[:5] == "/api/" {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
 			h.AuthMW.AdminSessionAuthAPI(adminMux).ServeHTTP(w, r)
 		} else {
 			h.AuthMW.AdminSessionAuth(adminMux).ServeHTTP(w, r)

@@ -201,7 +201,9 @@ func (h *PassthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			LatencyMs:      int(time.Since(startTime).Milliseconds()),
 			ErrorMsg:       errMsg,
 		}
-		models.InsertCallLog(h.QuotaChecker.DB(), callLog)
+		if _, err := models.InsertCallLog(h.QuotaChecker.DB(), callLog); err != nil {
+			log.Printf("insert call log failed: %v", err)
+		}
 		writeProxyError(w, http.StatusTooManyRequests, errMsg, errType)
 		return
 	}
@@ -236,7 +238,9 @@ func (h *PassthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			LatencyMs:      latencyMs,
 			ErrorMsg:       derr.Error(),
 		}
-		models.InsertCallLog(h.QuotaChecker.DB(), callLog)
+		if _, err := models.InsertCallLog(h.QuotaChecker.DB(), callLog); err != nil {
+			log.Printf("insert call log failed: %v", err)
+		}
 		writeProxyError(w, http.StatusBadGateway, "Upstream request failed", "upstream_error")
 		return
 	}
@@ -264,7 +268,9 @@ func (h *PassthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		StatusCode:     resp.StatusCode,
 		LatencyMs:      latencyMs,
 	}
-	models.InsertCallLog(h.QuotaChecker.DB(), callLog)
+	if _, err := models.InsertCallLog(h.QuotaChecker.DB(), callLog); err != nil {
+		log.Printf("insert call log failed: %v", err)
+	}
 }
 
 // methodPathModel renders the call_logs "model" column for a passthrough
