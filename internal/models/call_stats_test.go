@@ -297,3 +297,111 @@ func TestQueryCallLogsGlobal_UsernamePopulated(t *testing.T) {
 		t.Fatalf("expected second row to be alice, got id=%d username=%q", aliceRow.UserID, aliceRow.Username)
 	}
 }
+
+// TestAggregateCallStats_ByUser verifies the per-user breakdown added for the
+// "按用户明细" admin tab: call_logs are grouped by user_id (LEFT JOIN users for
+// the display name), token columns are summed, and rows are ordered by call
+// count DESC.
+//
+// NOTE on the orphan (user_id = 0) case mentioned in the spec: call_logs has a
+// FOREIGN KEY (user_id) REFERENCES users(id), so a true orphan row cannot be
+// inserted through the normal path. The COALESCE(users.username, '') in the
+// aggregate query is therefore a defensive safeguard (covers e.g. a user row
+// dropped without CASCADE). This test validates the real-user path with two
+// users and asserts the sums/order are correct.
+func TestAggregateCallStats_ByUser(t *testing.T) {
+	database := newModelsTestDB(t)
+
+	alice, err := models.CreateUser(
+		database.Conn,
+		"byuser-alice", "pw-hash", "sub-alice", "sk-alice...",
+		"user", "active", "", "auto", "",
+		1000, 100000, nil, 0, models.DefaultMaxConcurrency,
+	)
+	if err != nil {
+		t.Fatalf("CreateUser(alice) failed: %v", err)
+	}
+	bob, err := models.CreateUser(
+		database.Conn,
+		"byuser-bob", "pw-hash", "sub-bob", "sk-bob...",
+		"user", "active", "", "auto", "",
+		1000, 100000, nil, 0, models.DefaultMaxConcurrency,
+	)
+	if err != nil {
+		t.Fatalf("CreateUser(bob) failed: %v", err)
+	}
+
+	// alice: 2 calls (glm-5.2 + gpt-4o) -> leads by count.
+	// bob:   1 call  (glm-5.2).
+	insert := func(userID int64, model string, p, c, tot, status, eff int) {
+		if _, err := models.InsertCallLog(database.Conn, &models.CallLog{
+			UserID:           userID,
+			Model:            model,
+			ProviderID:       "zhipu",
+			PromptTokens:     p,
+			CompletionTokens: c,
+			TotalTokens:      tot,
+			EffectiveCalls:   eff,
+			StatusCode:       status,
+		}); err != nil {
+			t.Fatalf("InsertCallLog(%d,%q) failed: %v", userID, model, err)
+		}
+	}
+	insert(alice.ID, "glm-5.2", 100, 200, 300, 200, 1)
+	insert(alice.ID, "gpt-4o", 10, 20, 30, 200, 1)
+	insert(bob.ID, "glm-5.2", 40, 60, 100, 200, 1)
+
+	stats, err := models.AggregateCallStats(database.Conn, models.CallLogFilter{})
+	if err != nil {
+		t.Fatalf("AggregateCallStats returned error: %v", err)
+	}
+
+	if len(stats.ByUser) != 2 {
+		t.Fatalf("expected 2 by_user entries, got %d: %+v", len(stats.ByUser), stats.ByUser)
+	}
+
+	// Ordered by Calls DESC: alice (2) must come before bob (1).
+	if stats.ByUser[0].Calls < stats.ByUser[1].Calls {
+		t.Fatalf("expected by_user sorted by Calls DESC, got %d then %d",
+			stats.ByUser[0].Calls, stats.ByUser[1].Calls)
+	}
+
+	// Locate each user by username (ids are not guaranteed to be 1/2 in a temp DB).
+	find := func(name string) models.UserBreakdown {
+		for _, u := range stats.ByUser {
+			if u.Username == name {
+				return u
+			}
+		}
+		t.Fatalf("by_user entry for %q not found: %+v", name, stats.ByUser)
+		return models.UserBreakdown{}
+	}
+	a := find("byuser-alice")
+	b := find("byuser-bob")
+
+	if a.Calls != 2 {
+		t.Fatalf("alice expected Calls==2, got %d", a.Calls)
+	}
+	if a.Tokens.Prompt != 100+10 {
+		t.Fatalf("alice prompt mismatch: got %d want %d", a.Tokens.Prompt, 100+10)
+	}
+	if a.Tokens.Completion != 200+20 {
+		t.Fatalf("alice completion mismatch: got %d want %d", a.Tokens.Completion, 200+20)
+	}
+	if a.Tokens.Total != 300+30 {
+		t.Fatalf("alice total mismatch: got %d want %d", a.Tokens.Total, 300+30)
+	}
+	if a.EffectiveCalls != 2 {
+		t.Fatalf("alice expected EffectiveCalls==2, got %d", a.EffectiveCalls)
+	}
+
+	if b.Calls != 1 {
+		t.Fatalf("bob expected Calls==1, got %d", b.Calls)
+	}
+	if b.Tokens.Prompt != 40 || b.Tokens.Completion != 60 || b.Tokens.Total != 100 {
+		t.Fatalf("bob token mismatch: %+v", b.Tokens)
+	}
+	if b.EffectiveCalls != 1 {
+		t.Fatalf("bob expected EffectiveCalls==1, got %d", b.EffectiveCalls)
+	}
+}

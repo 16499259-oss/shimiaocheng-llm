@@ -17,6 +17,7 @@ type CallStats struct {
 	EffectiveCalls int              `json:"effective_calls"`
 	Success        SuccessStats     `json:"success"`
 	ByModel        []ModelBreakdown `json:"by_model"`
+	ByUser         []UserBreakdown  `json:"by_user"`
 }
 
 // TokenBreakdown holds prompt/completion/total token sums.
@@ -42,6 +43,16 @@ type ModelBreakdown struct {
 	Model  string         `json:"model"`
 	Calls  int            `json:"calls"`
 	Tokens TokenBreakdown `json:"tokens"`
+}
+
+// UserBreakdown holds per-user call count and token usage within the
+// filtered result set, rendered as the "按用户明细" tab in the admin UI.
+type UserBreakdown struct {
+	UserID         int            `json:"user_id"`
+	Username       string         `json:"username"`
+	Calls          int            `json:"calls"`
+	EffectiveCalls int            `json:"effective_calls"`
+	Tokens         TokenBreakdown `json:"tokens"`
 }
 
 // QueryCallLogsGlobal returns a paginated, global (multi-user) list of call
@@ -168,6 +179,42 @@ func AggregateCallStats(db *sql.DB, filter CallLogFilter) (*CallStats, error) {
 		s.ByModel = append(s.ByModel, bm)
 	}
 	if err := bmRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Per-user breakdown: same WHERE as above, LEFT JOIN users for the
+	// display name. Ordered by call count DESC so the heaviest users lead.
+	where3, args3 := buildCallLogWhere(filter)
+	buQuery := `SELECT call_logs.user_id,
+		COALESCE(users.username, '') AS username,
+		COUNT(*),
+		COALESCE(SUM(prompt_tokens), 0),
+		COALESCE(SUM(completion_tokens), 0),
+		COALESCE(SUM(total_tokens), 0),
+		COALESCE(SUM(effective_calls), 0)
+		FROM call_logs
+		LEFT JOIN users ON users.id = call_logs.user_id
+		WHERE ` + where3 + `
+		GROUP BY call_logs.user_id, COALESCE(users.username, '')
+		ORDER BY COUNT(*) DESC`
+	buRows, err := db.Query(buQuery, args3...)
+	if err != nil {
+		return nil, err
+	}
+	defer buRows.Close()
+	s.ByUser = []UserBreakdown{} // ensure [] not null in JSON
+	for buRows.Next() {
+		var bu UserBreakdown
+		if err := buRows.Scan(
+			&bu.UserID, &bu.Username, &bu.Calls,
+			&bu.Tokens.Prompt, &bu.Tokens.Completion, &bu.Tokens.Total,
+			&bu.EffectiveCalls,
+		); err != nil {
+			return nil, err
+		}
+		s.ByUser = append(s.ByUser, bu)
+	}
+	if err := buRows.Err(); err != nil {
 		return nil, err
 	}
 

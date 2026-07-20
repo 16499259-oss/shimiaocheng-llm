@@ -31,6 +31,11 @@
             .filter-actions { margin-left: 0; }
             .filter-group select, .filter-group input { min-width: 120px; }
         }
+        /* Call-stats sub-tabs: switch between 按模型 / 按用户 / 按每条数据 */
+        .cs-subtabs { display:flex; gap:8px; margin:4px 0 16px; flex-wrap:wrap; }
+        .cs-subtab { padding:7px 16px; border:1px solid #d1d5db; background:#fff; border-radius:8px; cursor:pointer; font-size:.9rem; color:#374151; }
+        .cs-subtab:hover { border-color:#9ca3af; }
+        .cs-subtab.active { background:#2563eb; border-color:#2563eb; color:#fff; font-weight:600; }
     </style>
 </head>
 <body>
@@ -229,20 +234,40 @@
                 </div>
                 <div class="cs-note" id="cs-note">基于当前筛选 0 条</div>
 
-                <!-- By-model breakdown table -->
-                <div id="cs-by-model-section" style="margin-bottom:20px;">
-                    <h3 style="margin:0 0 12px; font-size:1rem; color:#374151;">按模型明细</h3>
-                    <table class="table" id="cs-by-model-table">
-                        <thead><tr><th>模型名</th><th>调用次数</th><th>输入 Token</th><th>输出 Token</th><th>总 Token</th></tr></thead>
-                        <tbody id="cs-by-model-tbody"><tr><td colspan="5" class="text-center">暂无数据</td></tr></tbody>
+                <div class="cs-subtabs">
+                    <button class="cs-subtab" data-view="model" onclick="switchCsView('model')">按模型明细</button>
+                    <button class="cs-subtab active" data-view="user" onclick="switchCsView('user')">按用户明细</button>
+                    <button class="cs-subtab" data-view="detail" onclick="switchCsView('detail')">按每条数据明细</button>
+                </div>
+
+                <!-- By-model breakdown table (view: model) -->
+                <div id="cs-view-model" style="display:none;">
+                    <div id="cs-by-model-section" style="margin-bottom:20px;">
+                        <h3 style="margin:0 0 12px; font-size:1rem; color:#374151;">按模型明细</h3>
+                        <table class="table" id="cs-by-model-table">
+                            <thead><tr><th>模型名</th><th>调用次数</th><th>输入 Token</th><th>输出 Token</th><th>总 Token</th></tr></thead>
+                            <tbody id="cs-by-model-tbody"><tr><td colspan="5" class="text-center">暂无数据</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- By-user breakdown table (view: user) -->
+                <div id="cs-view-user">
+                    <h3 style="margin:0 0 12px; font-size:1rem; color:#374151;">按用户明细</h3>
+                    <table class="table" id="cs-by-user-table">
+                        <thead><tr><th>用户名</th><th>调用次数</th><th>输入 Token</th><th>输出 Token</th><th>总 Token</th><th>折合调用次数</th></tr></thead>
+                        <tbody id="cs-by-user-tbody"><tr><td colspan="6" class="text-center">暂无数据</td></tr></tbody>
                     </table>
                 </div>
 
-                <table class="table" id="cs-table">
-                    <thead><tr><th>ID</th><th>用户名</th><th>模型</th><th>Token</th><th>消耗次数</th><th>倍率</th><th>状态码</th><th>延迟(ms)</th><th>时间(SH)</th><th>上游</th></tr></thead>
-                    <tbody id="cs-tbody"><tr><td colspan="10" class="text-center">加载中...</td></tr></tbody>
-                </table>
-                <div class="pagination" id="cs-pagination"></div>
+                <!-- Per-row detail table (view: detail) -->
+                <div id="cs-view-detail" style="display:none;">
+                    <table class="table" id="cs-table">
+                        <thead><tr><th>ID</th><th>用户名</th><th>模型</th><th>Token</th><th>消耗次数</th><th>倍率</th><th>状态码</th><th>延迟(ms)</th><th>时间(SH)</th><th>上游</th></tr></thead>
+                        <tbody id="cs-tbody"><tr><td colspan="10" class="text-center">加载中...</td></tr></tbody>
+                    </table>
+                    <div class="pagination" id="cs-pagination"></div>
+                </div>
             </section>
         </main>
     </div>
