@@ -269,3 +269,33 @@ func TestAdminUpdateUser_ZeroTotalLimitRejected(t *testing.T) {
 		t.Fatalf("total cap persisted as %d, want positive (rejected)", q.QuotaTotalLimit)
 	}
 }
+
+// L2+: edit quota_token_total_limit = 0 -> 200 (NOT rejected). Unlike the count
+// quotas, a 0 cumulative Token cap means "unlimited", so the API must accept it.
+// This is the positive counterpart to the count-quota 0-rejection contract and
+// proves an admin can "unlimit" a user's Token cap. The value is persisted as 0.
+func TestAdminUpdateUser_ZeroTokenTotalLimitAllowed(t *testing.T) {
+	h := newAdminTestHandler(t)
+	id, _ := adminCreateUser(t, h, "qtok-zero", nil)
+	zero := 0
+	body, _ := json.Marshal(map[string]any{"quota_token_total_limit": zero})
+	req := httptest.NewRequest(http.MethodPut, "/admin/api/users/"+strconv.FormatInt(id, 10), bytes.NewReader(body))
+	req.SetPathValue("id", strconv.FormatInt(id, 10))
+	rec := httptest.NewRecorder()
+	h.UpdateUser(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for update quota_token_total_limit=0 (unlimited), got %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if got, ok := resp["quota_token_total_limit"].(float64); !ok || int(got) != 0 {
+		t.Fatalf("expected response quota_token_total_limit=0, got %v", resp["quota_token_total_limit"])
+	}
+	q, err := models.GetQuota(h.DB, id)
+	if err != nil || q == nil {
+		t.Fatalf("GetQuota: %v", err)
+	}
+	if q.QuotaTokenTotalLimit != 0 {
+		t.Fatalf("token total cap expected 0 (unlimited), got %d", q.QuotaTokenTotalLimit)
+	}
+}

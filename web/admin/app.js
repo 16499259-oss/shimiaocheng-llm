@@ -170,10 +170,25 @@ async function loadProviders() {
                 ? '<span class="badge badge-success">✅</span>'
                 : '<span class="badge badge-disabled">-</span>';
             const u = usageMap[p.slug];
-            const tokenCell = u ? renderUsageCell(u.token_used, u.monthly_token_limit, u.token_low) : '<span class="usage-unlimited">不限制</span>';
-            const allocTokenCell = u ? renderAllocationCell(u.allocated_tokens, u.monthly_token_limit, u.allocation_low) : '<span class="usage-unlimited">-</span>';
-            const callCell = u ? renderUsageCell(u.call_used, u.monthly_call_limit, u.call_low, localeFmt) : '<span class="usage-unlimited">不限制</span>';
-            const allocCallCell = u ? renderAllocationCell(u.allocated_calls, u.monthly_call_limit, u.allocation_low, localeFmt) : '<span class="usage-unlimited">-</span>';
+            // F5 fix: judge "unlimited" by the provider's OWN limit field (always
+            // returned by the list API), NOT by whether the usage subquery
+            // succeeded. If usage fetch failed or a slug is missing from
+            // usageMap, show a neutral "获取失败" placeholder instead of falsely
+            // reporting "不限制" for a provider that actually has a real cap.
+            const isTokenUnlimited = (p.monthly_token_limit || 0) <= 0;
+            const isCallUnlimited = (p.monthly_call_limit || 0) <= 0;
+            const tokenCell = isTokenUnlimited
+                ? '<span class="usage-unlimited">不限制</span>'
+                : (u ? renderUsageCell(u.token_used, u.monthly_token_limit, u.token_low) : '<span class="usage-unlimited">获取失败</span>');
+            const allocTokenCell = u
+                ? renderAllocationCell(u.allocated_tokens, u.monthly_token_limit, u.allocation_low)
+                : '<span class="usage-unlimited">-</span>';
+            const callCell = isCallUnlimited
+                ? '<span class="usage-unlimited">不限制</span>'
+                : (u ? renderUsageCell(u.call_used, u.monthly_call_limit, u.call_low, localeFmt) : '<span class="usage-unlimited">获取失败</span>');
+            const allocCallCell = u
+                ? renderAllocationCell(u.allocated_calls, u.monthly_call_limit, u.allocation_low, localeFmt)
+                : '<span class="usage-unlimited">-</span>';
             return `<tr>
                 <td>${p.id}</td>
                 <td>${escapeHtml(p.name)}${defBadge}</td>
@@ -394,7 +409,7 @@ function renderUsageCell(used, limit, low, numFmt) {
     if (!limit || limit <= 0) {
         return `<div class="usage-cell${low ? ' usage-low' : ''}"><span class="usage-unlimited">不限制</span></div>`;
     }
-    const remaining = limit - used;
+    const remaining = Math.max(0, limit - used); // F3 fix: clamp negative remaining to 0 when over quota
     const pct = Math.min(100, Math.round(used / limit * 100));
     const barCls = pct > 80 ? 'bad' : (pct > 50 ? 'warn' : 'good');
     const lowCls = low ? ' usage-low' : '';
@@ -411,7 +426,11 @@ function renderAllocationCell(allocated, limit, low, numFmt) {
     numFmt = numFmt || formatToken;
     allocated = Number(allocated) || 0;
     if (!limit || limit <= 0) {
-        return `<div class="usage-cell"><span class="usage-unlimited">不限制</span></div>`;
+        // F4 fix: an unlimited-cap provider still exposes an allocated total
+        // (sum of per-user quotas), which is meaningful regardless of the
+        // provider's own cap. Show it instead of hiding behind a bare "不限制".
+        const allocCls = low ? ' allocation-low' : '';
+        return `<div class="usage-cell${allocCls}"><span class="usage-nums">${numFmt(allocated)}</span> <span class="usage-unlimited">（无限上限）</span></div>`;
     }
     const lowCls = low ? ' allocation-low' : '';
     const pct = limit > 0 ? Math.round(allocated / limit * 100) : 0;
@@ -704,7 +723,7 @@ async function loadUsers() {
     try {
         const data = await apiFetch('api/users');
         const tbody = document.getElementById('users-tbody');
-        if (!data.data || data.data.length === 0) { tbody.innerHTML = '<tr><td colspan="11" class="text-center">暂无用户</td></tr>'; return; }
+        if (!data.data || data.data.length === 0) { tbody.innerHTML = '<tr><td colspan="13" class="text-center">暂无用户</td></tr>'; return; }
         const now = new Date();
         tbody.innerHTML = data.data.map(u => {
             const quota5h = `${u.quota_5h_used} / ${u.quota_5h_limit}`;
