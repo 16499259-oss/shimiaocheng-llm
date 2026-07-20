@@ -258,13 +258,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// and the deferred releaseConcurrency stay unchanged.
 		log.Printf("WARN: concurrency limit exceeded user=%d cur=%d max=%d", userID, curInFlight, maxConc)
 		if h.QuotaChecker != nil {
-			_, _ = models.InsertCallLog(h.QuotaChecker.DB(), &models.CallLog{
+			if _, err := models.InsertCallLog(h.QuotaChecker.DB(), &models.CallLog{
 				UserID:     userID,
-				ProviderID: "zhipu",
+				ProviderID: "concurrency_rejected",
 				StatusCode: 429,
 				LatencyMs:  int(time.Since(startTime).Milliseconds()),
 				ErrorMsg:   "concurrency_limit_exceeded",
-			})
+			}); err != nil {
+				log.Printf("insert call log failed: %v", err)
+			}
 		}
 		// Hint how long the client might wait before retrying (seconds).
 		w.Header().Set("Retry-After", "1")
@@ -465,7 +467,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			LatencyMs:      int(time.Since(startTime).Milliseconds()),
 			ErrorMsg:       errMsg,
 		}
-		models.InsertCallLog(h.QuotaChecker.DB(), callLog)
+		if _, err := models.InsertCallLog(h.QuotaChecker.DB(), callLog); err != nil {
+			log.Printf("insert call log failed: %v", err)
+		}
 
 		writeProxyError(w, http.StatusTooManyRequests, errMsg, errType)
 		return
@@ -506,7 +510,9 @@ func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int
 			LatencyMs:      latencyMs,
 			ErrorMsg:       err.Error(),
 		}
-		models.InsertCallLog(h.QuotaChecker.DB(), callLog)
+		if _, err := models.InsertCallLog(h.QuotaChecker.DB(), callLog); err != nil {
+			log.Printf("insert call log failed: %v", err)
+		}
 
 		writeProxyError(w, http.StatusBadGateway, "Upstream request failed", "upstream_error")
 		return
@@ -527,7 +533,9 @@ func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int
 			LatencyMs:      latencyMs,
 			ErrorMsg:       err.Error(),
 		}
-		models.InsertCallLog(h.QuotaChecker.DB(), callLog)
+		if _, err := models.InsertCallLog(h.QuotaChecker.DB(), callLog); err != nil {
+			log.Printf("insert call log failed: %v", err)
+		}
 
 		writeProxyError(w, http.StatusBadGateway, "Failed to read upstream response", "upstream_error")
 		return
@@ -555,7 +563,9 @@ func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int
 		StatusCode:       resp.StatusCode,
 		LatencyMs:        latencyMs,
 	}
-	models.InsertCallLog(h.QuotaChecker.DB(), callLog)
+	if _, err := models.InsertCallLog(h.QuotaChecker.DB(), callLog); err != nil {
+		log.Printf("insert call log failed: %v", err)
+	}
 
 	// Account the Token usage toward the user's cumulative Token quota.
 	// Mirrors the streaming path (stream.go): fire-and-forget so a DB hiccup

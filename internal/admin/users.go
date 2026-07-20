@@ -122,17 +122,14 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		maxConc = v
 	}
 
-	// Generate sub-key
-	subKey := auth.GenerateSubKey(h.SubKeySalt, 0) // userID is not yet known, use 0 as placeholder
-	// Regenerate with a proper approach: generate, then we'll store
-	subKeyHash := auth.HashSubKey(subKey)
-	subKeyPreview := auth.SubKeyPreview(subKey)
-
 	// Users created via admin have no password (only admin accounts have passwords)
 	emptyPassHash := "$2a$10$placeholder" // This is just a placeholder; user accounts use sub-keys
 
+	// Insert the user row first with empty sub-key placeholders, then generate
+	// the real sub-key bound to the actual user.ID and UPDATE it below. This
+	// avoids generating a throwaway key that is discarded right after the INSERT.
 	user, err := models.CreateUser(
-		h.DB, req.Username, emptyPassHash, subKeyHash, subKeyPreview,
+		h.DB, req.Username, emptyPassHash, "", "",
 		"user", "active", req.ExpiresAt, req.RouteMode, req.FixedProvider,
 		req.Quota5hLimit, req.QuotaTotalLimit, req.FixedMultiplier, maxBodySize, maxConc,
 	)
@@ -197,13 +194,21 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write audit log for user creation (including route/multiplier info).
-	auditDetail := fmt.Sprintf(`{"username":"%s","route_mode":"%s","fixed_provider":"%s"`, req.Username, req.RouteMode, req.FixedProvider)
-	if req.FixedMultiplier != nil {
-		auditDetail += fmt.Sprintf(`,"fixed_multiplier":%v`, *req.FixedMultiplier)
-	} else {
-		auditDetail += `,"fixed_multiplier":null`
+	// Build the detail as a JSON object via json.Marshal so values containing
+	// quotes or other special characters are always correctly escaped (a raw
+	// fmt.Sprintf concatenation could otherwise produce invalid JSON).
+	auditDetailMap := map[string]interface{}{
+		"username":       req.Username,
+		"route_mode":     req.RouteMode,
+		"fixed_provider": req.FixedProvider,
 	}
-	auditDetail += "}"
+	if req.FixedMultiplier != nil {
+		auditDetailMap["fixed_multiplier"] = *req.FixedMultiplier
+	} else {
+		auditDetailMap["fixed_multiplier"] = nil
+	}
+	detailBytes, _ := json.Marshal(auditDetailMap)
+	auditDetail := string(detailBytes)
 	_, _ = h.DB.Exec(
 		`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)
 		 VALUES (?, ?, ?, ?, ?)`,
