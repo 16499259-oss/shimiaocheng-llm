@@ -1187,8 +1187,9 @@ async function initCallStatsTab() {
     } catch (_) {}
     await Promise.all([loadCallStatsUsers(), loadCallModels()]);
     await loadCallStats(csPage);
-    // Default to the "按模型明细" sub-tab (matches the HTML's active state).
-    switchCsView('user');
+    // 优先恢复上次选中的 sub-tab；首次访问默认「按用户明细」。
+    const savedCsView = localStorage.getItem('csActiveView') || 'user';
+    switchCsView(savedCsView);
 }
 
 async function loadCallStatsUsers() {
@@ -1289,6 +1290,7 @@ function switchCsView(view) {
     document.querySelectorAll('.cs-subtab').forEach(b => {
         b.classList.toggle('active', b.getAttribute('data-view') === view);
     });
+    localStorage.setItem('csActiveView', view);
 }
 
 function renderCsCalls(calls) {
