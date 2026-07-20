@@ -185,6 +185,25 @@ func RunMigrations(conn *DB) error {
 			return fmt.Errorf("migration alter call_logs.raw_total_tokens failed: %w", err)
 		}
 	}
+	// ── One-time backfill of call_logs.raw_total_tokens (2026-07-20) ──
+	// PR #35 introduced raw_total_tokens (the UNMULTIPLIED prompt+completion
+	// sum, written at insert time) but historical rows still carry the column
+	// default 0. This one-time step recomputes raw_total_tokens for every row as
+	// prompt_tokens + completion_tokens — the exact invariant InsertCallLog
+	// enforces for new rows. Guarded by the marker column call_logs_raw_backfill_v1
+	// so it runs exactly once (on the first deploy that introduces this migration);
+	// subsequent deploys skip it (column present). The UPDATE is a full in-place SET
+	// from the row's own columns, hence idempotent and self-healing.
+	if !columnExists(conn, "call_logs", "call_logs_raw_backfill_v1") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE call_logs ADD COLUMN call_logs_raw_backfill_v1 INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("migration add marker call_logs.call_logs_raw_backfill_v1 failed: %w", err)
+		}
+		if _, err := conn.Conn.Exec(backfillRawTotalTokensSQL); err != nil {
+			return fmt.Errorf("migration backfill call_logs.raw_total_tokens failed: %w", err)
+		}
+	}
 	// Composite index (provider_id, created_at) for the global call-stats panel.
 	// Must run AFTER the provider_id column exists (it is added above, not in the
 	// CREATE TABLE). Idempotent so re-runs are safe.
@@ -551,6 +570,14 @@ func columnExists(conn *DB, table, column string) bool {
 	}
 	return false
 }
+
+// backfillRawTotalTokensSQL recomputes call_logs.raw_total_tokens for every row
+// as the UNMULTIPLIED prompt_tokens + completion_tokens sum — the exact invariant
+// InsertCallLog writes for new rows (log.PromptTokens+log.CompletionTokens). It
+// makes historical rows consistent with newly-inserted ones. It is a full in-place
+// SET, hence idempotent and safe to re-run. COALESCE guards against any NULL. The
+// QA engineer references this const from a regression test.
+const backfillRawTotalTokensSQL = `UPDATE call_logs SET raw_total_tokens = COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)`
 
 // backfillQuotaTokenTotalUsed recomputes quotas.quota_token_total_used for every
 // user as the multiplier-scaled sum of historical call_logs, mirroring the
