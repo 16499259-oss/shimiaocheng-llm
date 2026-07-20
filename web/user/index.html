@@ -455,11 +455,11 @@ function renderDashboard(data) {
         ${token5hRowHtml}
         ${tokenWeekRowHtml}
         <div class="stat-row">
-            <span class="stat-label">累计 Token</span>
+            <span class="stat-label">累计 Token（含倍率）</span>
             <span class="stat-value">${(data.total_tokens || 0).toLocaleString()}</span>
         </div>
         <div class="stat-row">
-            <span class="stat-label">今日 Token</span>
+            <span class="stat-label">今日 Token（含倍率）</span>
             <span class="stat-value">${(data.total_tokens_today || 0).toLocaleString()}</span>
         </div>
         <div class="stat-row">
