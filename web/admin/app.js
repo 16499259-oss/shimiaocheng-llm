@@ -723,7 +723,7 @@ async function loadUsers() {
     try {
         const data = await apiFetch('api/users');
         const tbody = document.getElementById('users-tbody');
-        if (!data.data || data.data.length === 0) { tbody.innerHTML = '<tr><td colspan="13" class="text-center">暂无用户</td></tr>'; return; }
+        if (!data.data || data.data.length === 0) { tbody.innerHTML = '<tr><td colspan="15" class="text-center">暂无用户</td></tr>'; return; }
         const now = new Date();
         tbody.innerHTML = data.data.map(u => {
             const quota5h = `${u.quota_5h_used} / ${u.quota_5h_limit}`;
@@ -739,6 +739,30 @@ async function loadUsers() {
                 const cls = pct > 80 ? 'bad' : (pct > 50 ? 'warn' : 'good');
                 tokenCell = `${tokenUsed.toLocaleString()} / ${tokenLimit.toLocaleString()}` +
                     `<div class="token-progress"><div class="${cls}" style="width:${pct}%"></div></div>`;
+            }
+            // 5h-window Token cell. 0 cap => unlimited.
+            const token5hLimit = u.quota_token_5h_limit || 0;
+            const token5hUsed = u.quota_token_5h_used || 0;
+            let token5hCell;
+            if (token5hLimit === 0) {
+                token5hCell = '<span class="infinite">无限</span>';
+            } else {
+                const pct5h = Math.min(100, Math.round(token5hUsed / token5hLimit * 100));
+                const cls5h = pct5h > 80 ? 'bad' : (pct5h > 50 ? 'warn' : 'good');
+                token5hCell = `${token5hUsed.toLocaleString()} / ${token5hLimit.toLocaleString()}` +
+                    `<div class="token-progress"><div class="${cls5h}" style="width:${pct5h}%"></div></div>`;
+            }
+            // Weekly (rolling 7d) Token cell. 0 cap => unlimited.
+            const tokenWeekLimit = u.quota_token_week_limit || 0;
+            const tokenWeekUsed = u.quota_token_week_used || 0;
+            let tokenWeekCell;
+            if (tokenWeekLimit === 0) {
+                tokenWeekCell = '<span class="infinite">无限</span>';
+            } else {
+                const pctWeek = Math.min(100, Math.round(tokenWeekUsed / tokenWeekLimit * 100));
+                const clsWeek = pctWeek > 80 ? 'bad' : (pctWeek > 50 ? 'warn' : 'good');
+                tokenWeekCell = `${tokenWeekUsed.toLocaleString()} / ${tokenWeekLimit.toLocaleString()}` +
+                    `<div class="token-progress"><div class="${clsWeek}" style="width:${pctWeek}%"></div></div>`;
             }
             let s = u.status === 'active' ? '<span class="badge badge-active">启用</span>' : '<span class="badge badge-disabled">禁用</span>';
             // Route mode badge
@@ -767,11 +791,11 @@ async function loadUsers() {
             }
             return `<tr${rowClass}>
                 <td>${u.id}</td><td>${escapeHtml(u.username)}</td><td><code>${escapeHtml(u.sub_key_preview)}</code></td>
-                <td>${quota5h}</td><td>${quotaTotal}</td><td class="token-cell">${tokenCell}</td><td>${routeHtml}</td><td>${formatBodySize(u.max_body_size)}</td><td>${u.max_concurrency > 0 ? u.max_concurrency : '不限'}</td><td>${expiryHtml}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
+                <td>${quota5h}</td><td>${quotaTotal}</td><td class="token-cell">${tokenCell}</td><td class="token-cell">${token5hCell}</td><td class="token-cell">${tokenWeekCell}</td><td>${routeHtml}</td><td>${formatBodySize(u.max_body_size)}</td><td>${u.max_concurrency > 0 ? u.max_concurrency : '不限'}</td><td>${expiryHtml}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
                 <td><div class="btn-group">
                     <button class="btn btn-outline btn-sm" onclick="extendUser(${u.id},'${escapeAttr(u.username)}','${escapeAttr(u.expires_at || '')}')">🕐 延期</button>
                     <button class="btn btn-outline btn-sm" onclick="shareUser('${escapeAttr(u.username)}',${u.id})">📋 分享</button>
-                    <button class="btn btn-outline btn-sm" onclick="editUser(${u.id},'${escapeAttr(u.status)}',${u.quota_5h_limit},${u.quota_total_limit},'${escapeAttr(u.route_mode || 'auto')}','${escapeAttr(u.fixed_provider || '')}',${u.fixed_multiplier != null ? u.fixed_multiplier : 'null'},${u.max_body_size ? u.max_body_size : 1048576},${u.quota_token_total_limit || 0},${u.quota_token_total_used || 0},${u.max_concurrency != null ? u.max_concurrency : 10})">编辑</button>
+                    <button class="btn btn-outline btn-sm" onclick="editUser(${u.id},'${escapeAttr(u.status)}',${u.quota_5h_limit},${u.quota_total_limit},'${escapeAttr(u.route_mode || 'auto')}','${escapeAttr(u.fixed_provider || '')}',${u.fixed_multiplier != null ? u.fixed_multiplier : 'null'},${u.max_body_size ? u.max_body_size : 1048576},${u.quota_token_total_limit || 0},${u.quota_token_total_used || 0},${u.max_concurrency != null ? u.max_concurrency : 10},${u.quota_token_5h_limit || 0},${u.quota_token_week_limit || 0})">编辑</button>
                     <button class="btn btn-outline btn-sm" onclick="viewCalls(${u.id},'${escapeAttr(u.username)}')">记录</button>
                     <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id},'${escapeAttr(u.username)}')">删除</button>
                 </div></td>
@@ -826,6 +850,18 @@ async function createUser(e) {
         const qtt = parseInt(qttRaw);
         if (!isNaN(qtt) && qtt >= 0) body.quota_token_total_limit = qtt;
     }
+    // 5h-window Token cap: only send when non-empty (default 0 = unlimited).
+    const q5hRaw = document.getElementById('new-quota-token-5h').value.trim();
+    if (q5hRaw !== '') {
+        const q5h = parseInt(q5hRaw);
+        if (!isNaN(q5h) && q5h >= 0) body.quota_token_5h_limit = q5h;
+    }
+    // Weekly (rolling 7d) Token cap: only send when non-empty (default 0 = unlimited).
+    const qWeekRaw = document.getElementById('new-quota-token-week').value.trim();
+    if (qWeekRaw !== '') {
+        const qWeek = parseInt(qWeekRaw);
+        if (!isNaN(qWeek) && qWeek >= 0) body.quota_token_week_limit = qWeek;
+    }
 
     try {
         const data = await apiFetch('api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -846,11 +882,13 @@ async function createUser(e) {
     } catch (err) { document.getElementById('create-user-result').textContent = '创建失败: ' + err.message; document.getElementById('create-user-result').classList.remove('hidden'); }
 }
 
-function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier, maxBodySize, tokenLimit, tokenUsed, maxConcurrency) {
+function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier, maxBodySize, tokenLimit, tokenUsed, maxConcurrency, token5hLimit, tokenWeekLimit) {
     document.getElementById('update-user-id').value = id;
     document.getElementById('update-quota-5h').value = q5;
     document.getElementById('update-quota-total').value = qt;
     document.getElementById('update-quota-token-total').value = tokenLimit || 0;
+    document.getElementById('update-quota-token-5h').value = token5hLimit || 0;
+    document.getElementById('update-quota-token-week').value = tokenWeekLimit || 0;
     document.getElementById('update-status').value = '';
     document.getElementById('update-regenerate-key').checked = false;
     document.getElementById('update-route-mode').value = '';
@@ -894,6 +932,18 @@ async function updateUser(e) {
     if (uttRaw !== '') {
         const utt = parseInt(uttRaw);
         if (!isNaN(utt) && utt >= 0) body.quota_token_total_limit = utt;
+    }
+    // 5h-window Token cap: empty = unchanged; 0 = unlimited.
+    const u5hRaw = document.getElementById('update-quota-token-5h').value.trim();
+    if (u5hRaw !== '') {
+        const u5h = parseInt(u5hRaw);
+        if (!isNaN(u5h) && u5h >= 0) body.quota_token_5h_limit = u5h;
+    }
+    // Weekly (rolling 7d) Token cap: empty = unchanged; 0 = unlimited.
+    const uWeekRaw = document.getElementById('update-quota-token-week').value.trim();
+    if (uWeekRaw !== '') {
+        const uWeek = parseInt(uWeekRaw);
+        if (!isNaN(uWeek) && uWeek >= 0) body.quota_token_week_limit = uWeek;
     }
     const st = document.getElementById('update-status').value;
     if (st) body.status = st;

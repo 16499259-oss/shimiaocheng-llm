@@ -53,6 +53,10 @@ type UserWithQuota struct {
 	QuotaTotalUsed       int      `json:"quota_total_used"`
 	QuotaTokenTotalLimit int      `json:"quota_token_total_limit"`
 	QuotaTokenTotalUsed  int      `json:"quota_token_total_used"`
+	QuotaToken5hLimit    int      `json:"quota_token_5h_limit"`
+	QuotaToken5hUsed     int      `json:"quota_token_5h_used"`
+	QuotaTokenWeekLimit  int      `json:"quota_token_week_limit"`
+	QuotaTokenWeekUsed   int      `json:"quota_token_week_used"`
 	TotalTokens          int64    `json:"total_tokens"`
 	SubKey               string   `json:"sub_key,omitempty"`
 	FixedMultiplier      *float64 `json:"fixed_multiplier"` // nil = global
@@ -106,11 +110,14 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 	// Calculate next window start (align to 5h boundaries)
 	windowStart := calculateWindowStart(5)
 
-	// Insert quota
+	// Insert quota. The 5h-window and weekly Token caps default to 0 (unlimited);
+	// week_start is written as local now so the rolling-7d bucket starts fresh.
+	// The admin API sets the actual caps afterwards via UpdateQuotaTokenWindowLimits.
 	_, err = tx.Exec(
-		`INSERT INTO quotas (user_id, quota_5h_limit, quota_5h_used, quota_total_limit, quota_total_used, window_start, fixed_multiplier, updated_at)
-		 VALUES (?, ?, 0, ?, 0, ?, ?, ?)`,
-		userID, quota5hLimit, quotaTotalLimit, windowStart, fixedMultiplier, now,
+		`INSERT INTO quotas (user_id, quota_5h_limit, quota_5h_used, quota_total_limit, quota_total_used, window_start, fixed_multiplier, updated_at,
+		                      quota_token_5h_limit, quota_token_5h_used, quota_token_week_limit, quota_token_week_used, week_start)
+		 VALUES (?, ?, 0, ?, 0, ?, ?, ?, 0, 0, 0, 0, ?)`,
+		userID, quota5hLimit, quotaTotalLimit, windowStart, fixedMultiplier, now, time.Now().Format(time.RFC3339),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert quota: %w", err)
@@ -137,10 +144,14 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 			MaxBodySize:    maxBodySize,
 			MaxConcurrency: maxConcurrency,
 		},
-		Quota5hLimit:    quota5hLimit,
-		Quota5hUsed:     0,
-		QuotaTotalLimit: quotaTotalLimit,
-		QuotaTotalUsed:  0,
+		Quota5hLimit:        quota5hLimit,
+		Quota5hUsed:         0,
+		QuotaTotalLimit:     quotaTotalLimit,
+		QuotaTotalUsed:      0,
+		QuotaToken5hLimit:   0,
+		QuotaToken5hUsed:    0,
+		QuotaTokenWeekLimit: 0,
+		QuotaTokenWeekUsed:  0,
 	}, nil
 }
 
@@ -200,7 +211,9 @@ func ListUsers(db *sql.DB) ([]UserWithQuota, error) {
 	rows, err := db.Query(
 		`SELECT u.id, u.username, u.sub_key_preview, u.role, u.status, u.created_at, u.updated_at, u.expires_at, u.route_mode, u.fixed_provider, u.max_body_size, u.max_concurrency,
 		        q.quota_5h_limit, q.quota_5h_used, q.quota_total_limit, q.quota_total_used,
-		        q.quota_token_total_limit, q.quota_token_total_used, q.fixed_multiplier,
+		        q.quota_token_total_limit, q.quota_token_total_used,
+		        q.quota_token_5h_limit, q.quota_token_5h_used, q.quota_token_week_limit, q.quota_token_week_used,
+		        q.fixed_multiplier,
 		        COALESCE(t.total_tokens, 0) AS total_tokens
 		 FROM users u
 		 LEFT JOIN quotas q ON u.id = q.user_id
@@ -222,6 +235,7 @@ func ListUsers(db *sql.DB) ([]UserWithQuota, error) {
 			&uwq.CreatedAt, &uwq.UpdatedAt, &uwq.ExpiresAt, &uwq.RouteMode, &uwq.FixedProvider, &uwq.MaxBodySize, &uwq.MaxConcurrency,
 			&uwq.Quota5hLimit, &uwq.Quota5hUsed, &uwq.QuotaTotalLimit, &uwq.QuotaTotalUsed,
 			&uwq.QuotaTokenTotalLimit, &uwq.QuotaTokenTotalUsed,
+			&uwq.QuotaToken5hLimit, &uwq.QuotaToken5hUsed, &uwq.QuotaTokenWeekLimit, &uwq.QuotaTokenWeekUsed,
 			&fixedMult, &uwq.TotalTokens,
 		)
 		if err != nil {

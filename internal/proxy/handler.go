@@ -439,11 +439,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Token-cap hit apart from a count-quota hit. The atomic deduction
 		// (CheckAndDeduct) already decided to block; here we only read back the
 		// quota to label the rejection. When both dimensions are simultaneously
-		// exhausted we report the Token cause — an acceptable boundary, since
-		// the block itself is always correct (race-free, decided by the DB).
+		// exhausted we report by priority 5h → weekly → cumulative, each gated
+		// by window freshness so a stale (already-due-for-reset) window is never
+		// blamed for a Token-cap hit — it would have been reset on the next
+		// request, and the block is then correctly attributed to the count/total
+		// quotas instead.
 		errType, errMsg := "quota_exceeded", "Quota exceeded"
 		if q, gerr := models.GetQuota(h.QuotaChecker.DB(), userID); gerr == nil {
-			if q.QuotaTokenTotalLimit != 0 && q.QuotaTokenTotalUsed >= q.QuotaTokenTotalLimit {
+			if q.QuotaToken5hLimit != 0 && q.QuotaToken5hUsed >= q.QuotaToken5hLimit && freshWindow(q.WindowStart, 5*time.Hour) {
+				errType, errMsg = "token_5h_quota_exceeded", "5 小时内 Token 已超限"
+			} else if q.QuotaTokenWeekLimit != 0 && q.QuotaTokenWeekUsed >= q.QuotaTokenWeekLimit && freshWindow(q.WeekStart, 7*24*time.Hour) {
+				errType, errMsg = "token_week_quota_exceeded", "本周 Token 已超限"
+			} else if q.QuotaTokenTotalLimit != 0 && q.QuotaTokenTotalUsed >= q.QuotaTokenTotalLimit {
 				errType, errMsg = "token_quota_exceeded", "Token 额度已用尽"
 			}
 		}
@@ -604,6 +611,34 @@ func writeProxyError(w http.ResponseWriter, statusCode int, message, errType str
 			"code":    errType,
 		},
 	})
+}
+
+// freshWindow reports whether the window anchored at ts is still "fresh" — i.e.
+// the elapsed time since ts is within dur. Used by the 429 classification to
+// attribute a block to a specific Token dimension only when that window is
+// actually still active; a stale window (due for its lazy reset) must NOT be
+// blamed, because the block is then correctly attributed to the count/total
+// quotas instead.
+//
+// Parsing tolerates both RFC3339 (new users and post-request bumps of week_start /
+// the 5h window_start from calculateWindowStart) and the SQLite datetime('now')
+// default format written by the migration for legacy rows. A ts that parses as
+// neither (or is empty) is treated as stale (not fresh), so we never attribute a
+// block to a Token dimension we cannot prove is active.
+func freshWindow(ts string, dur time.Duration) bool {
+	if ts == "" {
+		return false
+	}
+	now := time.Now()
+	var t time.Time
+	var err error
+	if t, err = time.Parse(time.RFC3339, ts); err != nil {
+		t, err = time.Parse("2006-01-02 15:04:05", ts)
+		if err != nil {
+			return false
+		}
+	}
+	return now.Sub(t) <= dur
 }
 
 // CompactionMode selects the over-budget behaviour for request bodies.

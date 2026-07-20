@@ -283,6 +283,70 @@ func RunMigrations(conn *DB) error {
 		}
 	}
 
+	// ── Token window columns (5h + weekly rolling) for the dual Token soft gate ──
+	// quota_token_5h_limit / quota_token_5h_used: Token cap inside the 5h count
+	//   window (reuses the existing 5h window reset path via Reset5hQuota /
+	//   CompensateQuotaReset; 0 = unlimited).
+	// quota_token_week_limit / quota_token_week_used: Token cap inside a rolling-7-day
+	//   (lazy-reset) bucket. The reset is performed inside AtomicDeductQuota's
+	//   atomic UPDATE (CASE on week_start), so no separate migration backfill is
+	//   needed — and that is precisely why the gate does NOT accumulate token
+	//   counts at request time (only the response-time AddTokenUsage does).
+	// week_start: the rolling-7-day bucket anchor (RFC3339/UTC default; newly
+	//   created users write local now). The gate resets it when it is older than
+	//   7 days. Each column is guarded by columnExists so re-runs are idempotent.
+	if !columnExists(conn, "quotas", "quota_token_5h_limit") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE quotas ADD COLUMN quota_token_5h_limit INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("migration alter quotas.quota_token_5h_limit failed: %w", err)
+		}
+	}
+	if !columnExists(conn, "quotas", "quota_token_5h_used") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE quotas ADD COLUMN quota_token_5h_used INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("migration alter quotas.quota_token_5h_used failed: %w", err)
+		}
+	}
+	if !columnExists(conn, "quotas", "quota_token_week_limit") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE quotas ADD COLUMN quota_token_week_limit INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("migration alter quotas.quota_token_week_limit failed: %w", err)
+		}
+	}
+	if !columnExists(conn, "quotas", "quota_token_week_used") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE quotas ADD COLUMN quota_token_week_used INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("migration alter quotas.quota_token_week_used failed: %w", err)
+		}
+	}
+	if !columnExists(conn, "quotas", "week_start") {
+		// NOTE: SQLite forbids ALTER TABLE ADD COLUMN with a NON-CONSTANT
+		// default (e.g. datetime('now')) once the table already contains rows,
+		// raising "Cannot add a column with non-constant default". To stay
+		// idempotent and compatible with non-empty databases we add the column
+		// with a constant empty default and then backfill existing rows with
+		// the current UTC time as the rolling-7-day bucket anchor. New rows
+		// (via CreateUser) write time.Now() directly, so they never hit this
+		// empty default. The gate (AtomicDeductQuota) treats an empty week_start
+		// as "expired" ('' < any ISO timestamp), which is the safe first-touch
+		// behaviour for legacy rows.
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE quotas ADD COLUMN week_start TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("migration alter quotas.week_start failed: %w", err)
+		}
+		// Backfill existing rows; idempotent (only touches empty defaults).
+		if _, err := conn.Conn.Exec(
+			`UPDATE quotas SET week_start = (datetime('now')) WHERE week_start = ''`,
+		); err != nil {
+			return fmt.Errorf("migration backfill quotas.week_start failed: %w", err)
+		}
+	}
+
 	// ── One-time data fix (2026-08-16) ──
 	// User "大仙撸车" (id=39) was mistakenly set to permanent (expires_at='').
 	// Correct to 2026-08-15 (Beijing time, end of day). Guarded so it only
