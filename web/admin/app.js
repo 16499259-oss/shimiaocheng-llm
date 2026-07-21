@@ -181,14 +181,18 @@ async function loadProviders() {
                 ? '<span class="usage-unlimited">不限制</span>'
                 : (u ? renderUsageCell(u.token_used, u.monthly_token_limit, u.token_low) : '<span class="usage-unlimited">获取失败</span>');
             const allocViewBtn = `<button class="link-btn" onclick="openAllocationModal('${escapeHtml(p.slug)}')">查看明细</button>`;
+            const autoTokLine = (u && u.auto_allocated_tokens)
+                ? `<div class="alloc-auto">含 auto 预计 +${localeFmt(u.auto_allocated_tokens)}</div>` : '';
+            const autoCallLine = (u && u.auto_allocated_calls)
+                ? `<div class="alloc-auto">含 auto 预计 +${localeFmt(u.auto_allocated_calls)}</div>` : '';
             const allocTokenCell = u
-                ? `<div class="alloc-cell">${renderAllocationCell(u.allocated_tokens, u.monthly_token_limit, u.allocation_low)}${allocViewBtn}</div>`
+                ? `<div class="alloc-cell">${renderAllocationCell(u.allocated_tokens, u.monthly_token_limit, u.allocation_low)}${autoTokLine}${allocViewBtn}</div>`
                 : '<span class="usage-unlimited">-</span>';
             const callCell = isCallUnlimited
                 ? '<span class="usage-unlimited">不限制</span>'
                 : (u ? renderUsageCell(u.call_used, u.monthly_call_limit, u.call_low, localeFmt) : '<span class="usage-unlimited">获取失败</span>');
             const allocCallCell = u
-                ? `<div class="alloc-cell">${renderAllocationCell(u.allocated_calls, u.monthly_call_limit, u.allocation_low, localeFmt)}${allocViewBtn}</div>`
+                ? `<div class="alloc-cell">${renderAllocationCell(u.allocated_calls, u.monthly_call_limit, u.allocation_low, localeFmt)}${autoCallLine}${allocViewBtn}</div>`
                 : '<span class="usage-unlimited">-</span>';
             return `<tr>
                 <td>${p.id}</td>
@@ -463,9 +467,12 @@ async function fetchProviderUsage(slug, hintId) {
         const allocInfo = (u.allocated_tokens > 0 || u.allocated_calls > 0 || u.unlimited_user_count > 0)
             ? `<div class="usage-hint-row"><span class="usage-hint-label">已分配</span><span class="usage-hint-text">Token ${localeFmt(u.allocated_tokens)} · 调用 ${localeFmt(u.allocated_calls)}${u.unlimited_user_count > 0 ? ' · 无限用户 ' + u.unlimited_user_count : ''}</span></div>`
             : '';
+        const autoInfo = (u.auto_allocated_tokens || u.auto_allocated_calls)
+            ? `<div class="usage-hint-row"><span class="usage-hint-label">auto 预计</span><span class="usage-hint-text">Token +${localeFmt(u.auto_allocated_tokens)} · 调用 +${localeFmt(u.auto_allocated_calls)}</span></div>`
+            : '';
         hintEl.innerHTML = `
             <div class="usage-hint-row"><span class="usage-hint-label">本月 Token</span>${renderUsageCell(u.token_used, u.monthly_token_limit, u.token_low)}</div>
-            <div class="usage-hint-row"><span class="usage-hint-label">本月 调用</span>${renderUsageCell(u.call_used, u.monthly_call_limit, u.call_low, localeFmt)}</div>${allocInfo}`;
+            <div class="usage-hint-row"><span class="usage-hint-label">本月 调用</span>${renderUsageCell(u.call_used, u.monthly_call_limit, u.call_low, localeFmt)}</div>${allocInfo}${autoInfo}`;
     } catch (err) {
         // Read-only hint only — must not block the create/edit submit.
         hintEl.innerHTML = '<span class="usage-hint-text">获取失败</span>';
@@ -486,11 +493,20 @@ async function loadProviderUsage() {
         }
         const localeFmt = n => (Number(n) || 0).toLocaleString();
         const now = new Date().toLocaleString('zh-CN');
-        grid.innerHTML = views.map(u => {
+        // Shared auto pool banner (global, independent of any single provider).
+        const pool = data && data.auto_pool;
+        const banner = pool
+            ? `<div class="auto-pool-banner">🧮 <strong>auto 共享池</strong>（路由=auto 的用户配额，未钉死到任何上游）：Token <strong>${localeFmt(pool.pool_token_total)}</strong> · 调用 <strong>${localeFmt(pool.pool_call_total)}</strong>${pool.unlimited_user_count > 0 ? ' · 无限用户 ' + pool.unlimited_user_count : ''}。各上游「已分配」已按实际用量份额叠加「含 auto 预计」。</div>`
+            : '';
+        grid.innerHTML = banner + views.map(u => {
             const tokenCell = renderUsageCell(u.token_used, u.monthly_token_limit, u.token_low);
             const callCell = renderUsageCell(u.call_used, u.monthly_call_limit, u.call_low, localeFmt);
-            const allocTokenCell = renderAllocationCell(u.allocated_tokens, u.monthly_token_limit, u.allocation_low);
-            const allocCallCell = renderAllocationCell(u.allocated_calls, u.monthly_call_limit, u.allocation_low, localeFmt);
+            const autoTokLine = (u.auto_allocated_tokens)
+                ? `<div class="alloc-auto">含 auto 预计 +${localeFmt(u.auto_allocated_tokens)}</div>` : '';
+            const autoCallLine = (u.auto_allocated_calls)
+                ? `<div class="alloc-auto">含 auto 预计 +${localeFmt(u.auto_allocated_calls)}</div>` : '';
+            const allocTokenCell = `<div>${renderAllocationCell(u.allocated_tokens, u.monthly_token_limit, u.allocation_low)}${autoTokLine}</div>`;
+            const allocCallCell = `<div>${renderAllocationCell(u.allocated_calls, u.monthly_call_limit, u.allocation_low, localeFmt)}${autoCallLine}</div>`;
             const lowCls = (u.token_low || u.call_low || u.allocation_low) ? ' usage-card-low' : '';
             // Cycle info
             const cycleDaysCls = (u.cycle_days_remaining >= 0 && u.cycle_days_remaining <= 3) ? ' cycle-expiring' : '';

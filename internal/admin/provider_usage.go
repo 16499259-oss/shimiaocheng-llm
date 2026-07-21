@@ -47,6 +47,21 @@ func (h *Handler) HandleListProviderUsage(w http.ResponseWriter, r *http.Request
 	}
 
 	views := make([]models.ProviderUsageView, 0, len(providers))
+
+	// Auto shared-pool attribution: computed once globally (the auto pool is a
+	// single global concept, independent of each provider's billing cycle).
+	autoRes, autoErr := models.GetAutoUserAllocationByProvider(h.DB, models.RollingWindowStart())
+	if autoErr != nil {
+		log.Printf("ERROR: auto user allocation: %v", autoErr)
+		autoRes = nil
+	}
+	autoBySlug := map[string]*models.AutoProviderLoad{}
+	if autoRes != nil {
+		for i := range autoRes.ByProvider {
+			autoBySlug[autoRes.ByProvider[i].ProviderSlug] = &autoRes.ByProvider[i]
+		}
+	}
+
 	for _, p := range providers {
 		// Compute the current fixed 30-day cycle window for this provider.
 		cycleStart, _ := models.CurrentCycleWindow(p.CycleStartDate)
@@ -72,10 +87,24 @@ func (h *Handler) HandleListProviderUsage(w http.ResponseWriter, r *http.Request
 
 		view := models.BuildProviderUsageView(p, used, alloc,
 			h.globalTokenLowRatio(), h.globalCallLowRatio())
+		if al, ok := autoBySlug[p.Slug]; ok {
+			view.AutoAllocatedTokens = al.TokenQuotaShare
+			view.AutoAllocatedCalls = al.CallQuotaShare
+			view.AutoTokenUsage = al.AutoTokenUsage
+			view.AutoCallUsage = al.AutoCallUsage
+		}
 		views = append(views, view)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"data": views})
+	resp := map[string]any{"data": views}
+	if autoRes != nil {
+		resp["auto_pool"] = map[string]any{
+			"pool_token_total":     autoRes.PoolTokenTotal,
+			"pool_call_total":      autoRes.PoolCallTotal,
+			"unlimited_user_count": autoRes.UnlimitedUserCount,
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // HandleGetProviderUsage handles GET /admin/api/providers/{slug}/usage.
@@ -118,9 +147,34 @@ func (h *Handler) HandleGetProviderUsage(w http.ResponseWriter, r *http.Request)
 		alloc = nil
 	}
 
+	autoRes, autoErr := models.GetAutoUserAllocationByProvider(h.DB, models.RollingWindowStart())
+	if autoErr != nil {
+		log.Printf("ERROR: auto user allocation %s: %v", slug, autoErr)
+		autoRes = nil
+	}
+
 	view := models.BuildProviderUsageView(*p, used, alloc,
 		h.globalTokenLowRatio(), h.globalCallLowRatio())
-	writeJSON(w, http.StatusOK, map[string]any{"data": view})
+	if autoRes != nil {
+		for i := range autoRes.ByProvider {
+			if autoRes.ByProvider[i].ProviderSlug == slug {
+				view.AutoAllocatedTokens = autoRes.ByProvider[i].TokenQuotaShare
+				view.AutoAllocatedCalls = autoRes.ByProvider[i].CallQuotaShare
+				view.AutoTokenUsage = autoRes.ByProvider[i].AutoTokenUsage
+				view.AutoCallUsage = autoRes.ByProvider[i].AutoCallUsage
+				break
+			}
+		}
+	}
+	resp := map[string]any{"data": view}
+	if autoRes != nil {
+		resp["auto_pool"] = map[string]any{
+			"pool_token_total":     autoRes.PoolTokenTotal,
+			"pool_call_total":      autoRes.PoolCallTotal,
+			"unlimited_user_count": autoRes.UnlimitedUserCount,
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // HandleGetProviderAllocation handles GET /admin/api/providers/{slug}/allocation.

@@ -249,6 +249,12 @@ body {
 }
 .link-btn:hover { background: rgba(37, 99, 235, 0.08); }
 .alloc-cell { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.alloc-auto { font-size: 11px; color: var(--color-text-secondary, #64748b); width: 100%; margin-top: 2px; }
+.auto-pool-banner { margin: 0 0 14px; padding: 10px 14px; border-radius: var(--radius, 8px);
+    background: color-mix(in srgb, var(--color-primary, #4f46e5) 8%, #fff);
+    border: 1px solid color-mix(in srgb, var(--color-primary, #4f46e5) 30%, transparent);
+    font-size: 13px; color: var(--color-text, #1e293b); line-height: 1.5; }
+.auto-pool-banner strong { color: var(--color-primary, #4f46e5); }
 
 .modal-header {
     display: flex;
