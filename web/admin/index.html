@@ -375,6 +375,32 @@
         </div>
     </div>
 
+    <!-- Allocation Detail Modal -->
+    <div id="allocation-detail-modal" class="modal hidden">
+        <div class="modal-content modal-lg">
+            <div class="modal-header">
+                <h3 id="allocation-detail-title">分配明细</h3>
+                <button class="modal-close" onclick="closeModal('allocation-detail-modal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="cs-note" id="allocation-detail-cycle"></p>
+                <div class="table-responsive">
+                    <table class="table table-sm">
+                        <thead><tr>
+                            <th>用户名</th><th>状态</th>
+                            <th>分配Token上限</th><th>周期内已用Token</th>
+                            <th>分配调用上限</th><th>周期内已用调用</th>
+                            <th>创建时间</th><th>到期时间</th>
+                        </tr></thead>
+                        <tbody id="allocation-detail-body">
+                            <tr><td colspan="8" class="text-center">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Mapping Modal -->
     <div id="mapping-modal" class="modal hidden">
         <div class="modal-content">

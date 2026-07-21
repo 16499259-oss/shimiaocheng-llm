@@ -123,6 +123,48 @@ func (h *Handler) HandleGetProviderUsage(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"data": view})
 }
 
+// HandleGetProviderAllocation handles GET /admin/api/providers/{slug}/allocation.
+//
+// Returns the per-user allocation breakdown for a provider (who is pinned to
+// it, their monthly quota limits, and cycle-window usage). A non-existent slug
+// yields 404. Used by the providers-table "查看" button.
+func (h *Handler) HandleGetProviderAllocation(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	if slug == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Missing provider slug"})
+		return
+	}
+
+	p, err := h.ProviderStore.GetProvider(slug)
+	if err != nil {
+		log.Printf("ERROR: get provider %s: %v", slug, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to get provider"})
+		return
+	}
+	if p == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Provider not found"})
+		return
+	}
+
+	// Compute the current fixed 30-day cycle window (same as usage endpoints),
+	// so the per-user "已用" aligns with the provider "已耗" column.
+	cycleStart, _ := models.CurrentCycleWindow(p.CycleStartDate)
+	windowRFC3339 := cycleStart + "T00:00:00+08:00"
+
+	details, err := models.GetProviderAllocationDetails(h.DB, slug, windowRFC3339)
+	if err != nil {
+		log.Printf("ERROR: get provider allocation details %s: %v", slug, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to get allocation details"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data":         details,
+		"cycle_start":  cycleStart,
+		"provider_name": p.Name,
+	})
+}
+
 // ServeProviderUsagePage handles GET /admin/provider-usage.
 //
 // It serves the same SPA (index.html) but injects window.__INIT_TAB__ so the

@@ -180,14 +180,15 @@ async function loadProviders() {
             const tokenCell = isTokenUnlimited
                 ? '<span class="usage-unlimited">不限制</span>'
                 : (u ? renderUsageCell(u.token_used, u.monthly_token_limit, u.token_low) : '<span class="usage-unlimited">获取失败</span>');
+            const allocViewBtn = `<button class="link-btn" onclick="openAllocationModal('${escapeHtml(p.slug)}')">查看明细</button>`;
             const allocTokenCell = u
-                ? renderAllocationCell(u.allocated_tokens, u.monthly_token_limit, u.allocation_low)
+                ? `<div class="alloc-cell">${renderAllocationCell(u.allocated_tokens, u.monthly_token_limit, u.allocation_low)}${allocViewBtn}</div>`
                 : '<span class="usage-unlimited">-</span>';
             const callCell = isCallUnlimited
                 ? '<span class="usage-unlimited">不限制</span>'
                 : (u ? renderUsageCell(u.call_used, u.monthly_call_limit, u.call_low, localeFmt) : '<span class="usage-unlimited">获取失败</span>');
             const allocCallCell = u
-                ? renderAllocationCell(u.allocated_calls, u.monthly_call_limit, u.allocation_low, localeFmt)
+                ? `<div class="alloc-cell">${renderAllocationCell(u.allocated_calls, u.monthly_call_limit, u.allocation_low, localeFmt)}${allocViewBtn}</div>`
                 : '<span class="usage-unlimited">-</span>';
             return `<tr>
                 <td>${p.id}</td>
@@ -1537,6 +1538,45 @@ async function logout() {
 // ===== Modal Helpers =====
 function showModal(id) { document.getElementById(id).classList.remove('hidden'); }
 function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
+
+// openAllocationModal fetches the per-user allocation breakdown for a provider
+// and renders it in a modal table (username / status / quota limits / cycle
+// usage / created / expires). Called from the "查看明细" buttons in the
+// providers table "已分配" columns.
+async function openAllocationModal(slug) {
+    const modal = document.getElementById('allocation-detail-modal');
+    const body = document.getElementById('allocation-detail-body');
+    const title = document.getElementById('allocation-detail-title');
+    title.textContent = '分配明细 · ' + (providerMap[slug] || slug);
+    body.innerHTML = '<tr><td colspan="8" class="text-center">加载中...</td></tr>';
+    showModal('allocation-detail-modal');
+    try {
+        const res = await apiFetch('api/providers/' + encodeURIComponent(slug) + '/allocation');
+        const list = (res && res.data) || [];
+        const cycle = (res && res.cycle_start) || '';
+        document.getElementById('allocation-detail-cycle').textContent =
+            cycle ? ('周期起点: ' + cycle + ' (Asia/Shanghai, 固定 30 天)') : '';
+        if (list.length === 0) {
+            body.innerHTML = '<tr><td colspan="8" class="text-center">该上游暂无分配的用户</td></tr>';
+            return;
+        }
+        const fmt = n => (Number(n) || 0).toLocaleString();
+        const tokenLimit = v => v > 0 ? fmt(v) : '<span class="usage-unlimited">无限</span>';
+        const callLimit = v => v > 0 ? fmt(v) : '<span class="usage-unlimited">锁死</span>';
+        body.innerHTML = list.map(u => `<tr>
+            <td>${escapeHtml(u.username)}</td>
+            <td>${escapeHtml(u.status || '-')}</td>
+            <td>${tokenLimit(u.quota_token_total_limit)}</td>
+            <td>${fmt(u.token_used)}</td>
+            <td>${callLimit(u.quota_total_limit)}</td>
+            <td>${fmt(u.call_used)}</td>
+            <td>${formatDate(u.created_at)}</td>
+            <td>${u.expires_at ? formatDate(u.expires_at) : '永久'}</td>
+        </tr>`).join('');
+    } catch (e) {
+        body.innerHTML = '<tr><td colspan="8" class="text-center text-danger">加载失败: ' + escapeHtml(String(e.message || e)) + '</td></tr>';
+    }
+}
 
 // ===== Utilities =====
 function escapeHtml(str) { const div = document.createElement('div'); div.textContent = str; return div.innerHTML; }

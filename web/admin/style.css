@@ -231,6 +231,25 @@ body {
     overflow-y: auto;
 }
 
+/* Wider modal for the 8-column allocation-detail table. */
+.modal-content.modal-lg { max-width: 920px; }
+.table-responsive { width: 100%; overflow-x: auto; }
+.table-sm th, .table-sm td { padding: 6px 10px; font-size: 0.85rem; }
+.link-btn {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 2px 8px;
+    font-size: 0.78rem;
+    color: var(--color-primary, #2563eb);
+    background: transparent;
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.link-btn:hover { background: rgba(37, 99, 235, 0.08); }
+.alloc-cell { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+
 .modal-header {
     display: flex;
     justify-content: space-between;

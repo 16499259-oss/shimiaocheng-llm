@@ -96,6 +96,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Provider monthly usage (ADR: upstream monthly quota visibility)
 	adminMux.HandleFunc("GET /api/provider-usage", h.HandleListProviderUsage)
 	adminMux.HandleFunc("GET /api/providers/{slug}/usage", h.HandleGetProviderUsage)
+	adminMux.HandleFunc("GET /api/providers/{slug}/allocation", h.HandleGetProviderAllocation)
 	adminMux.HandleFunc("GET /provider-usage", h.ServeProviderUsagePage)
 
 	// Routing rules routes
