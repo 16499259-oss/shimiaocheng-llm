@@ -553,3 +553,153 @@ func TestBuildProviderUsageView_CycleInfo(t *testing.T) {
 		t.Errorf("WindowStart=%s != CycleStart=%s", view.WindowStart, view.CycleStart)
 	}
 }
+
+// TestGetAutoUserAllocationByProvider verifies the shared-pool attribution:
+// auto users' finite quotas are split across the providers they actually used
+// (by billed-usage share, no double-count), zero-usage auto users stay in the
+// pool, and unlimited auto users contribute real usage but no finite quota.
+func TestGetAutoUserAllocationByProvider(t *testing.T) {
+	conn := usageTestDB(t)
+
+	// Two providers for auto traffic to land on.
+	for _, slug := range []string{"p-a", "p-b"} {
+		if _, err := conn.Exec(
+			`INSERT INTO providers (name, slug, endpoint, encrypted_key, is_default, enabled, monthly_token_limit, monthly_call_limit, cycle_start_date, created_at, updated_at)
+			 VALUES (?, ?, 'https://x', X'00', 0, 1, 100000, 100000, '2026-01-01', datetime('now'), datetime('now'))`,
+			slug, slug,
+		); err != nil {
+			t.Fatalf("seed provider %s: %v", slug, err)
+		}
+	}
+
+	seedAuto := func(username string, tokenLimit, callLimit int) int64 {
+		res, err := conn.Exec(
+			`INSERT INTO users (username, password_hash, sub_key_hash, sub_key_preview, role, status, route_mode, created_at, updated_at)
+			 VALUES (?, 'x', ?, 'p', 'user', 'active', 'auto', datetime('now'), datetime('now'))`,
+			username, "h-"+username,
+		)
+		if err != nil {
+			t.Fatalf("seed auto user %s: %v", username, err)
+		}
+		uid, _ := res.LastInsertId()
+		if _, err := conn.Exec(
+			`INSERT INTO quotas (user_id, quota_token_total_limit, quota_total_limit, window_start, updated_at)
+			 VALUES (?, ?, ?, datetime('now'), datetime('now'))`,
+			uid, tokenLimit, callLimit,
+		); err != nil {
+			t.Fatalf("seed quota %s: %v", username, err)
+		}
+		return uid
+	}
+	seedLog := func(uid int64, provider, when string, pt, ct, calls int, mult float64) {
+		if _, err := conn.Exec(
+			`INSERT INTO call_logs (user_id, provider_id, model, prompt_tokens, completion_tokens, effective_calls, status_code, created_at, multiplier_used)
+			 VALUES (?, ?, 'glm', ?, ?, ?, 200, ?, ?)`,
+			uid, provider, pt, ct, calls, when, mult,
+		); err != nil {
+			t.Fatalf("seed auto call_log: %v", err)
+		}
+	}
+
+	now := time.Now().Format(time.RFC3339) // within the rolling-30d window
+	// u1: finite quota 1000/100, traffic split 60% p-a / 40% p-b (billed tokens).
+	uid1 := seedAuto("auto1", 1000, 100)
+	seedLog(uid1, "p-a", now, 60, 0, 6, 1.0) // billed 60
+	seedLog(uid1, "p-b", now, 40, 0, 4, 1.0) // billed 40
+	// u2: finite quota 500/50, ZERO usage → stays in the shared pool.
+	seedAuto("auto2", 500, 50)
+	// u3: token-unlimited (0) + call-locked (0), with mult-2.0 traffic on p-a.
+	uid3 := seedAuto("auto3", 0, 0)
+	seedLog(uid3, "p-a", now, 100, 0, 10, 2.0) // billed = ceil(100*2.0)=200
+
+	res, err := GetAutoUserAllocationByProvider(conn, RollingWindowStart())
+	if err != nil {
+		t.Fatalf("GetAutoUserAllocationByProvider: %v", err)
+	}
+
+	// Pool totals count only FINITE quotas (u1 1000 + u2 500 = 1500 token;
+	// 100 + 50 = 150 call). u3 is token-unlimited (0) + call-locked (0) → excluded.
+	if res.PoolTokenTotal != 1500 {
+		t.Errorf("PoolTokenTotal = %d, want 1500", res.PoolTokenTotal)
+	}
+	if res.PoolCallTotal != 150 {
+		t.Errorf("PoolCallTotal = %d, want 150", res.PoolCallTotal)
+	}
+	if res.UnlimitedUserCount != 1 {
+		t.Errorf("UnlimitedUserCount = %d, want 1 (auto3)", res.UnlimitedUserCount)
+	}
+
+	bySlug := map[string]AutoProviderLoad{}
+	for _, l := range res.ByProvider {
+		bySlug[l.ProviderSlug] = l
+	}
+	if len(bySlug) != 2 {
+		t.Fatalf("ByProvider len = %d, want 2 (p-a, p-b)", len(bySlug))
+	}
+
+	// p-a: u1 share 60% of 1000 = 600 token, 60% of 100 = 60 call;
+	//      + u3 real usage (no quota share since unlimited/locked): 200 token, 10 call.
+	pa := bySlug["p-a"]
+	if pa.TokenQuotaShare != 600 {
+		t.Errorf("p-a TokenQuotaShare = %d, want 600", pa.TokenQuotaShare)
+	}
+	if pa.CallQuotaShare != 60 {
+		t.Errorf("p-a CallQuotaShare = %d, want 60", pa.CallQuotaShare)
+	}
+	if pa.AutoTokenUsage != 260 { // 60 (u1) + 200 (u3)
+		t.Errorf("p-a AutoTokenUsage = %d, want 260", pa.AutoTokenUsage)
+	}
+	if pa.AutoCallUsage != 16 { // 6 (u1) + 10 (u3)
+		t.Errorf("p-a AutoCallUsage = %d, want 16", pa.AutoCallUsage)
+	}
+
+	// p-b: u1 share 40% of 1000 = 400 token, 40% of 100 = 40 call.
+	pb := bySlug["p-b"]
+	if pb.TokenQuotaShare != 400 {
+		t.Errorf("p-b TokenQuotaShare = %d, want 400", pb.TokenQuotaShare)
+	}
+	if pb.CallQuotaShare != 40 {
+		t.Errorf("p-b CallQuotaShare = %d, want 40", pb.CallQuotaShare)
+	}
+	if pb.AutoTokenUsage != 40 {
+		t.Errorf("p-b AutoTokenUsage = %d, want 40", pb.AutoTokenUsage)
+	}
+	if pb.AutoCallUsage != 4 {
+		t.Errorf("p-b AutoCallUsage = %d, want 4", pb.AutoCallUsage)
+	}
+
+	// No double-count: attributed quota across providers == sum of finite
+	// quotas of users who actually generated usage (u1=1000 token/100 call;
+	// u2 zero-usage stays in pool; u3 unlimited → 0). And never exceeds pool.
+	var sumTok, sumCall int64
+	for _, l := range res.ByProvider {
+		sumTok += l.TokenQuotaShare
+		sumCall += l.CallQuotaShare
+	}
+	if sumTok != 1000 {
+		t.Errorf("attributed token = %d, want 1000 (only used users)", sumTok)
+	}
+	if sumCall != 100 {
+		t.Errorf("attributed call = %d, want 100", sumCall)
+	}
+	if sumTok > res.PoolTokenTotal || sumCall > res.PoolCallTotal {
+		t.Errorf("attributed (%d/%d) exceeds pool (%d/%d) — double-count?",
+			sumTok, sumCall, res.PoolTokenTotal, res.PoolCallTotal)
+	}
+}
+
+// TestGetAutoUserAllocationByProvider_NoUsers verifies that with no auto users
+// (or none with quotas) the result is empty and the pool is zero — not an error.
+func TestGetAutoUserAllocationByProvider_NoUsers(t *testing.T) {
+	conn := usageTestDB(t)
+	res, err := GetAutoUserAllocationByProvider(conn, RollingWindowStart())
+	if err != nil {
+		t.Fatalf("GetAutoUserAllocationByProvider(no users): %v", err)
+	}
+	if len(res.ByProvider) != 0 {
+		t.Errorf("ByProvider = %d rows, want 0", len(res.ByProvider))
+	}
+	if res.PoolTokenTotal != 0 || res.PoolCallTotal != 0 || res.UnlimitedUserCount != 0 {
+		t.Errorf("expected zero pool, got %+v", res)
+	}
+}

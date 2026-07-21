@@ -3,6 +3,8 @@ package models
 import (
 	"database/sql"
 	"fmt"
+	"math"
+	"sort"
 	"time"
 
 	"llm_api_gateway/internal/timeutil"
@@ -227,6 +229,190 @@ func GetProviderAllocationDetails(db *sql.DB, providerSlug, windowStart string) 
 	return out, rows.Err()
 }
 
+// ── Auto user allocation (shared pool attribution) ──
+
+// AutoProviderLoad is the per-provider attribution of auto (route_mode='auto')
+// users' quotas and actual usage within the cycle window. It lets the provider
+// "已分配" column reflect the real pressure auto traffic puts on each upstream,
+// without double-counting (an auto user's quota is counted once globally and
+// split across providers by actual usage share).
+type AutoProviderLoad struct {
+	ProviderSlug    string `json:"provider_slug"`
+	TokenQuotaShare int64  `json:"token_quota_share"` // attributed auto token quota (finite users, by usage share)
+	CallQuotaShare  int64  `json:"call_quota_share"`  // attributed auto call quota
+	AutoTokenUsage  int64  `json:"auto_token_usage"`  // actual billed tokens from auto users in window
+	AutoCallUsage   int64  `json:"auto_call_usage"`   // actual calls from auto users in window
+}
+
+// AutoAllocationResult is the global breakdown of auto (route_mode='auto') users.
+type AutoAllocationResult struct {
+	ByProvider         []AutoProviderLoad `json:"by_provider"`
+	PoolTokenTotal     int64              `json:"pool_token_total"` // Σ finite auto token quotas (shared pool)
+	PoolCallTotal      int64              `json:"pool_call_total"`  // Σ finite auto call quotas
+	UnlimitedUserCount int64              `json:"unlimited_user_count"`
+}
+
+// GetAutoUserAllocationByProvider aggregates auto (route_mode='auto') users'
+// quotas into a global shared pool and attributes each user's quota to the
+// providers they actually used (by their cycle-window token usage share), so
+// the per-provider "已分配" can include a realistic auto-load estimate.
+//
+// Attribution rule (no double-counting):
+//   - For an auto user with cycle-window billed usage T>0 on providers, their
+//     finite token/call quota is split across those providers by share
+//     (billed_on_p / T). Shares sum to 1, so the user's quota is counted exactly
+//     once across all providers.
+//   - Auto users with zero cycle-window usage are NOT attributed to any single
+//     provider — their quotas stay in the global shared pool (PoolTokenTotal /
+//     PoolCallTotal) until they generate traffic.
+//   - Unlimited auto users (quota_token_total_limit=0) have no finite token quota
+//     to attribute, but their actual window usage is still counted in
+//     AutoTokenUsage/AutoCallUsage (real pressure on the upstream).
+//
+// Billed token = ceil((prompt+completion)*multiplier_used) per call_log row —
+// the same multiplier-aware口径 as quota_token_total_used / the allocation
+// detail (PR #42), so the auto attribution is consistent with the user's own
+// "Token 月总量" and the per-user "已用" shown in the detail modal.
+//
+// windowStart must be an RFC3339 timestamp comparable to call_logs.created_at.
+func GetAutoUserAllocationByProvider(db *sql.DB, windowStart string) (*AutoAllocationResult, error) {
+	// 1. All active, non-expired auto users and their finite quotas.
+	type autoUser struct {
+		id         int64
+		tokenLimit int64 // 0 = unlimited (token dim)
+		callLimit  int64 // 0 = locked/invalid (call dim)
+	}
+	users := make([]autoUser, 0)
+	var poolToken, poolCall, unlimitedCnt int64
+
+	rows, err := db.Query(`
+		SELECT u.id, q.quota_token_total_limit, q.quota_total_limit
+		FROM users u
+		JOIN quotas q ON u.id = q.user_id
+		WHERE u.route_mode = 'auto'
+		  AND u.status = 'active'
+		  AND (u.expires_at = '' OR u.expires_at > datetime('now'))
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list auto users: %w", err)
+	}
+	for rows.Next() {
+		var au autoUser
+		if err := rows.Scan(&au.id, &au.tokenLimit, &au.callLimit); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan auto user: %w", err)
+		}
+		if au.tokenLimit == 0 {
+			unlimitedCnt++
+		} else {
+			poolToken += int64(au.tokenLimit)
+		}
+		// Call dim: 0 = invalid/locked (PR #14); a locked user commits no
+		// provider call capacity, so only >0 counts toward the shared pool.
+		if au.callLimit > 0 {
+			poolCall += int64(au.callLimit)
+		}
+		users = append(users, au)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate auto users: %w", err)
+	}
+
+	res := &AutoAllocationResult{
+		ByProvider:         []AutoProviderLoad{},
+		PoolTokenTotal:     poolToken,
+		PoolCallTotal:      poolCall,
+		UnlimitedUserCount: unlimitedCnt,
+	}
+	if len(users) == 0 {
+		return res, nil
+	}
+
+	// 2. Per (auto user, provider) cycle-window billed tokens + calls.
+	type uP struct {
+		billed int64
+		calls  int64
+	}
+	usage := map[int64]map[string]*uP{} // userID -> provider -> usage
+	urows, err := db.Query(`
+		SELECT c.user_id, c.provider_id,
+		       COALESCE(SUM(CAST((c.prompt_tokens + c.completion_tokens) * c.multiplier_used + 0.999999 AS INTEGER)), 0) AS billed,
+		       COALESCE(SUM(c.effective_calls), 0) AS calls
+		FROM call_logs c
+		JOIN users u ON u.id = c.user_id
+		WHERE u.route_mode = 'auto'
+		  AND u.status = 'active'
+		  AND (u.expires_at = '' OR u.expires_at > datetime('now'))
+		  AND c.created_at >= ?
+		GROUP BY c.user_id, c.provider_id
+	`, windowStart)
+	if err != nil {
+		return nil, fmt.Errorf("auto usage: %w", err)
+	}
+	for urows.Next() {
+		var uid int64
+		var slug string
+		var up uP
+		if err := urows.Scan(&uid, &slug, &up.billed, &up.calls); err != nil {
+			urows.Close()
+			return nil, fmt.Errorf("scan auto usage: %w", err)
+		}
+		if usage[uid] == nil {
+			usage[uid] = map[string]*uP{}
+		}
+		usage[uid][slug] = &up
+	}
+	urows.Close()
+	if err := urows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate auto usage: %w", err)
+	}
+
+	// 3. Distribute each user's finite quota by usage share.
+	bySlug := map[string]*AutoProviderLoad{}
+	getLoad := func(slug string) *AutoProviderLoad {
+		if l, ok := bySlug[slug]; ok {
+			return l
+		}
+		l := &AutoProviderLoad{ProviderSlug: slug}
+		bySlug[slug] = l
+		return l
+	}
+	for _, au := range users {
+		ups := usage[au.id]
+		if ups == nil {
+			continue // zero usage → stays in shared pool
+		}
+		var totalBilled int64
+		for _, v := range ups {
+			totalBilled += v.billed
+		}
+		if totalBilled <= 0 {
+			continue // no billed usage → stays in shared pool
+		}
+		for slug, v := range ups {
+			share := float64(v.billed) / float64(totalBilled)
+			l := getLoad(slug)
+			l.AutoTokenUsage += v.billed
+			l.AutoCallUsage += v.calls
+			if au.tokenLimit > 0 {
+				l.TokenQuotaShare += int64(math.Round(float64(au.tokenLimit) * share))
+			}
+			if au.callLimit > 0 {
+				l.CallQuotaShare += int64(math.Round(float64(au.callLimit) * share))
+			}
+		}
+	}
+
+	for _, l := range bySlug {
+		res.ByProvider = append(res.ByProvider, *l)
+	}
+	sort.Slice(res.ByProvider, func(i, j int) bool {
+		return res.ByProvider[i].ProviderSlug < res.ByProvider[j].ProviderSlug
+	})
+	return res, nil
+}
+
 // ── Provider usage view (V3: dual-column allocation) ──
 
 // ProviderUsageView is the fully computed, frontend-ready view for a single
@@ -250,7 +436,14 @@ type ProviderUsageView struct {
 	AllocatedTokens    int64  `json:"allocated_tokens"`
 	AllocatedCalls     int64  `json:"allocated_calls"`
 	UnlimitedUserCount int64  `json:"unlimited_user_count"`
-	AllocationLow      bool   `json:"allocation_low"`       // allocated exceeds threshold
+	AllocationLow      bool   `json:"allocation_low"` // allocated exceeds threshold
+	// ── V3.5: Auto (route_mode='auto') shared-pool attribution ──
+	// These make "已分配" reflect the real pressure auto traffic puts on each
+	// upstream, without double-counting (see GetAutoUserAllocationByProvider).
+	AutoAllocatedTokens int64 `json:"auto_allocated_tokens"` // attributed auto token quota (by usage share)
+	AutoAllocatedCalls  int64 `json:"auto_allocated_calls"`  // attributed auto call quota
+	AutoTokenUsage      int64 `json:"auto_token_usage"`      // actual billed tokens from auto users in window
+	AutoCallUsage       int64 `json:"auto_call_usage"`       // actual calls from auto users in window
 	CycleStart         string `json:"cycle_start"`          // current cycle start DATE
 	CycleEnd           string `json:"cycle_end"`            // current cycle end DATE (exclusive)
 	CycleDaysRemaining int    `json:"cycle_days_remaining"` // days left in cycle
