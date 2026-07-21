@@ -392,6 +392,89 @@ func TestGetProviderAllocation_NoUsers(t *testing.T) {
 	}
 }
 
+// TestGetProviderAllocationDetails verifies the per-user breakdown: it returns
+// only active, non-expired, fixed-provider-matched users, and that cycle-window
+// usage is summed correctly (in-cycle rows counted, out-of-cycle rows excluded).
+func TestGetProviderAllocationDetails(t *testing.T) {
+	conn := allocationTestDB(t)
+
+	seedAllocUser(t, conn, "a", "test", "active", "", 1000, 100)
+	seedAllocUser(t, conn, "b", "test", "active", "", 0, 50)
+	seedAllocUser(t, conn, "c", "other", "active", "", 500, 50)
+	seedAllocUser(t, conn, "d", "test", "disabled", "", 500, 50)
+	yesterday := time.Now().Add(-24 * time.Hour).Format(time.RFC3339)
+	seedAllocUser(t, conn, "e", "test", "active", yesterday, 500, 50)
+
+	// Compute the cycle window exactly like the handler does.
+	cycleStart, _ := CurrentCycleWindow("2026-01-01")
+	windowStart := cycleStart + "T00:00:00+08:00"
+	// Out-of-cycle timestamp: 2 days before the window start.
+	ws, _ := time.Parse(time.RFC3339, windowStart)
+	outOfCycle := ws.Add(-48 * time.Hour).Format(time.RFC3339)
+
+	// Seed call_logs for user "a".
+	var uidA int64
+	if err := conn.QueryRow(`SELECT id FROM users WHERE username = 'a'`).Scan(&uidA); err != nil {
+		t.Fatalf("find user a: %v", err)
+	}
+	execLog := func(uid int64, when string, pt, ct, calls int) {
+		if _, err := conn.Exec(
+			`INSERT INTO call_logs (user_id, provider_id, model, prompt_tokens, completion_tokens, effective_calls, status_code, created_at)
+			 VALUES (?, 'test', 'glm', ?, ?, ?, 200, ?)`,
+			uid, pt, ct, calls, when,
+		); err != nil {
+			t.Fatalf("seed call_log: %v", err)
+		}
+	}
+	execLog(uidA, windowStart, 100, 20, 3)     // in-cycle → counted
+	execLog(uidA, outOfCycle, 999, 999, 9)    // out-of-cycle → excluded
+
+	details, err := GetProviderAllocationDetails(conn, "test", windowStart)
+	if err != nil {
+		t.Fatalf("GetProviderAllocationDetails: %v", err)
+	}
+
+	// Only a (active) and b (active) are included; c/d/e excluded.
+	if len(details) != 2 {
+		t.Fatalf("detail rows = %d, want 2 (a,b); got %+v", len(details), details)
+	}
+
+	// Sorted by token_used DESC, then username → a first.
+	a, b := details[0], details[1]
+	if a.Username != "a" {
+		t.Fatalf("details[0].username = %q, want a", a.Username)
+	}
+	if b.Username != "b" {
+		t.Fatalf("details[1].username = %q, want b", b.Username)
+	}
+	// Cycle-window usage: only the in-cycle row (100+20=120 tokens, 3 calls).
+	if a.TokenUsed != 120 {
+		t.Errorf("a.TokenUsed = %d, want 120", a.TokenUsed)
+	}
+	if a.CallUsed != 3 {
+		t.Errorf("a.CallUsed = %d, want 3", a.CallUsed)
+	}
+	if a.QuotaTokenTotalLimit != 1000 {
+		t.Errorf("a.QuotaTokenTotalLimit = %d, want 1000", a.QuotaTokenTotalLimit)
+	}
+	// b: token=0 (unlimited), no call_logs → 0 usage.
+	if b.QuotaTokenTotalLimit != 0 {
+		t.Errorf("b.QuotaTokenTotalLimit = %d, want 0 (unlimited)", b.QuotaTokenTotalLimit)
+	}
+	if b.TokenUsed != 0 || b.CallUsed != 0 {
+		t.Errorf("b usage = %d/%d, want 0/0", b.TokenUsed, b.CallUsed)
+	}
+
+	// A provider with no fixed users returns an empty (non-nil) slice.
+	none, err := GetProviderAllocationDetails(conn, "nope", windowStart)
+	if err != nil {
+		t.Fatalf("GetProviderAllocationDetails(nope): %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("details for unknown provider = %d rows, want 0", len(none))
+	}
+}
+
 // TestAllocationLow verifies that AllocationLow is computed independently of
 // consumption low flags, using the same IsLowBalance logic.
 func TestAllocationLow(t *testing.T) {

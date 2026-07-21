@@ -156,6 +156,73 @@ func GetProviderAllocation(db *sql.DB, providerSlug string) (*ProviderAllocation
 	return &a, nil
 }
 
+// ── Allocation detail (per-user breakdown) ──
+
+// ProviderAllocationUser is a single row of the per-user allocation breakdown
+// for a provider: who is pinned to it, what quota they carry, and how much
+// they have consumed within the current 30-day cycle window.
+type ProviderAllocationUser struct {
+	Username             string `json:"username"`
+	Status               string `json:"status"`
+	CreatedAt            string `json:"created_at"`
+	ExpiresAt            string `json:"expires_at"`
+	QuotaTokenTotalLimit int64  `json:"quota_token_total_limit"` // 0 = unlimited (token dim)
+	QuotaTotalLimit      int64  `json:"quota_total_limit"`       // 0 = locked/invalid (call dim)
+	TokenUsed            int64  `json:"token_used"`              // within cycle window
+	CallUsed             int64  `json:"call_used"`               // within cycle window
+}
+
+// GetProviderAllocationDetails returns the per-user allocation breakdown for a
+// provider: every active, non-expired user whose fixed_provider matches, with
+// their monthly quota limits and cycle-window usage (token = prompt+completion,
+// call = effective_calls), aligned to the same cycle window used by
+// GetProviderUsage so the per-user "已用" matches the provider "已耗" column.
+//
+// windowStart must be an RFC3339 timestamp (e.g. "2026-07-01T00:00:00+08:00")
+// for direct text comparison against call_logs.created_at.
+func GetProviderAllocationDetails(db *sql.DB, providerSlug, windowStart string) ([]ProviderAllocationUser, error) {
+	rows, err := db.Query(
+		`SELECT
+			u.username,
+			u.status,
+			u.created_at,
+			u.expires_at,
+			COALESCE(q.quota_token_total_limit, 0),
+			COALESCE(q.quota_total_limit, 0),
+			COALESCE(SUM(CASE WHEN c.created_at >= ? THEN c.prompt_tokens + c.completion_tokens END), 0) AS token_used,
+			COALESCE(SUM(CASE WHEN c.created_at >= ? THEN c.effective_calls END), 0) AS call_used
+		 FROM users u
+		 JOIN quotas q ON u.id = q.user_id
+		 LEFT JOIN call_logs c ON c.user_id = u.id
+		 WHERE u.fixed_provider = ?
+		   AND u.status = 'active'
+		   AND (u.expires_at = '' OR u.expires_at > datetime('now'))
+		 GROUP BY u.id
+		 ORDER BY token_used DESC, u.username ASC`,
+		windowStart, windowStart, providerSlug,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get provider allocation details %s: %w", providerSlug, err)
+	}
+	defer rows.Close()
+
+	out := make([]ProviderAllocationUser, 0)
+	for rows.Next() {
+		var r ProviderAllocationUser
+		if err := rows.Scan(
+			&r.Username, &r.Status, &r.CreatedAt, &r.ExpiresAt,
+			&r.QuotaTokenTotalLimit, &r.QuotaTotalLimit, &r.TokenUsed, &r.CallUsed,
+		); err != nil {
+			return nil, fmt.Errorf("scan allocation detail: %w", err)
+		}
+		out = append(out, r)
+	}
+	if out == nil {
+		out = []ProviderAllocationUser{}
+	}
+	return out, rows.Err()
+}
+
 // ── Provider usage view (V3: dual-column allocation) ──
 
 // ProviderUsageView is the fully computed, frontend-ready view for a single
