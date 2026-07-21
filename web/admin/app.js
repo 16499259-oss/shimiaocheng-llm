@@ -915,6 +915,14 @@ async function createUser(e) {
         const qWeek = parseInt(qWeekRaw);
         if (!isNaN(qWeek) && qWeek >= 0) body.quota_token_week_limit = qWeek;
     }
+    // Weekly quota start anchor (fixed 7-day phase). Interpreted as Asia/Shanghai
+    // local time per product decision; sent as RFC3339 UTC. Empty = use default
+    // (CreateUser sets week_start = now UTC; backend treats "" as fall back to now).
+    const nws = document.getElementById('new-quota-week-start').value.trim();
+    if (nws) {
+        const asShanghai = new Date(nws + ':00+08:00');
+        if (!isNaN(asShanghai.getTime())) body.quota_week_start = asShanghai.toISOString();
+    }
 
     try {
         const data = await apiFetch('api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' },

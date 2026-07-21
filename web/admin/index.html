@@ -452,6 +452,11 @@
                 <div class="form-group"><label for="new-quota-token-5h">5h Token 上限 (默认 0 = 不限制)</label><input type="number" id="new-quota-token-5h" value="0" min="0" placeholder="0 = 不限制"></div>
                 <div class="form-group"><label for="new-quota-token-week">周 Token 上限 (默认 0 = 不限制)</label><input type="number" id="new-quota-token-week" value="0" min="0" placeholder="0 = 不限制"></div>
                 <div class="form-group">
+                    <label for="new-quota-week-start">周限额开始时间</label>
+                    <input type="datetime-local" id="new-quota-week-start" step="1">
+                    <small>服务器时区 Asia/Shanghai (UTC+8)。留空则默认以当前时间起算固定 7 天循环；设定后开启固定 7 天循环并按该锚点归零本周已用 Token。</small>
+                </div>
+                <div class="form-group">
                     <label for="new-expiry-type">有效期</label>
                     <select id="new-expiry-type">
                         <option value="permanent">永久</option>
