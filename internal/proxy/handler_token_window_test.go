@@ -62,17 +62,20 @@ func TestHandler_ServeHTTP_Token5hQuotaExceededReturns429(t *testing.T) {
 }
 
 // TestHandler_ServeHTTP_TokenWeekQuotaExceededReturns429 verifies that when the
-// weekly (rolling-7d) Token cap is reached (with a fresh week_start), the proxy
-// returns 429 with type=token_week_quota_exceeded and 「本周 Token 已超限」.
+// weekly (fixed-7d-phase) Token cap is reached, the proxy returns 429 with
+// type=token_week_quota_exceeded and 「本周 Token 已超限」. The fixed anchor and
+// the current cycle start are both set to now so the cyclic reset does NOT clear
+// the exhausted usage.
 func TestHandler_ServeHTTP_TokenWeekQuotaExceededReturns429(t *testing.T) {
 	database := openProxyTestDB(t)
 	subKey, userID := newTokenTestUser(t, database, "tkwk", "tkwk")
 
-	// Weekly Token cap = 100, already used = 100; keep week_start fresh so the
-	// lazy reset in the gate does NOT clear it.
+	// Weekly Token cap = 100, already used = 100; anchor + current cycle both
+	// now so the cyclic reset in the gate does NOT clear it.
+	now := time.Now().Format(time.RFC3339)
 	if _, err := database.Conn.Exec(
-		`UPDATE quotas SET quota_token_week_limit = 100, quota_token_week_used = 100, week_start = ? WHERE user_id = ?`,
-		time.Now().Format(time.RFC3339), userID,
+		`UPDATE quotas SET quota_token_week_limit = 100, quota_token_week_used = 100, week_start = ?, week_cycle_start = ? WHERE user_id = ?`,
+		now, now, userID,
 	); err != nil {
 		t.Fatalf("seed week token window: %v", err)
 	}

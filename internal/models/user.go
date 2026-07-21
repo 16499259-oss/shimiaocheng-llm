@@ -57,6 +57,7 @@ type UserWithQuota struct {
 	QuotaToken5hUsed     int      `json:"quota_token_5h_used"`
 	QuotaTokenWeekLimit  int      `json:"quota_token_week_limit"`
 	QuotaTokenWeekUsed   int      `json:"quota_token_week_used"`
+	WeekStart            string   `json:"week_start"`
 	TotalTokens          int64    `json:"total_tokens"`
 	SubKey               string   `json:"sub_key,omitempty"`
 	FixedMultiplier      *float64 `json:"fixed_multiplier"` // nil = global
@@ -68,6 +69,7 @@ type UserWithQuota struct {
 // unlimited (no cap); a positive N caps simultaneous in-flight requests.
 func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, role, status, expiresAt, routeMode, fixedProvider string, quota5hLimit, quotaTotalLimit int, fixedMultiplier *float64, maxBodySize, maxConcurrency int) (*UserWithQuota, error) {
 	now := time.Now().Format(time.RFC3339)
+	nowUTC := time.Now().UTC().Format(time.RFC3339)
 
 	// Admin users never expire and always use auto route mode.
 	if role == "admin" {
@@ -116,9 +118,9 @@ func CreateUser(db *sql.DB, username, passwordHash, subKeyHash, subKeyPreview, r
 	// caps afterwards via UpdateQuotaTokenWindowLimits.
 	_, err = tx.Exec(
 		`INSERT INTO quotas (user_id, quota_5h_limit, quota_5h_used, quota_total_limit, quota_total_used, window_start, fixed_multiplier, updated_at,
-		                      quota_token_5h_limit, quota_token_5h_used, quota_token_week_limit, quota_token_week_used, week_start, month_start)
-		 VALUES (?, ?, 0, ?, 0, ?, ?, ?, 0, 0, 0, 0, ?, ?)`,
-		userID, quota5hLimit, quotaTotalLimit, windowStart, fixedMultiplier, now, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339),
+		                      quota_token_5h_limit, quota_token_5h_used, quota_token_week_limit, quota_token_week_used, week_start, month_start, week_cycle_start)
+		 VALUES (?, ?, 0, ?, 0, ?, ?, ?, 0, 0, 0, 0, ?, ?, ?)`,
+		userID, quota5hLimit, quotaTotalLimit, windowStart, fixedMultiplier, now, nowUTC, nowUTC, nowUTC,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert quota: %w", err)
@@ -214,6 +216,7 @@ func ListUsers(db *sql.DB) ([]UserWithQuota, error) {
 		        q.quota_5h_limit, q.quota_5h_used, q.quota_total_limit, q.quota_total_used,
 		        q.quota_token_total_limit, q.quota_token_total_used,
 		        q.quota_token_5h_limit, q.quota_token_5h_used, q.quota_token_week_limit, q.quota_token_week_used,
+		        q.week_start,
 		        q.fixed_multiplier,
 		        COALESCE(t.total_tokens, 0) AS total_tokens
 		 FROM users u
@@ -237,6 +240,7 @@ func ListUsers(db *sql.DB) ([]UserWithQuota, error) {
 			&uwq.Quota5hLimit, &uwq.Quota5hUsed, &uwq.QuotaTotalLimit, &uwq.QuotaTotalUsed,
 			&uwq.QuotaTokenTotalLimit, &uwq.QuotaTokenTotalUsed,
 			&uwq.QuotaToken5hLimit, &uwq.QuotaToken5hUsed, &uwq.QuotaTokenWeekLimit, &uwq.QuotaTokenWeekUsed,
+			&uwq.WeekStart,
 			&fixedMult, &uwq.TotalTokens,
 		)
 		if err != nil {

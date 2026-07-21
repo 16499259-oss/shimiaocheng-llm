@@ -41,6 +41,7 @@ type updateUserRequest struct {
 	QuotaTokenTotalLimit *int     `json:"quota_token_total_limit"` // nil = 不改；0 = 不限制
 	QuotaToken5hLimit    *int     `json:"quota_token_5h_limit"`    // nil = 不改；0 = 不限制
 	QuotaTokenWeekLimit  *int     `json:"quota_token_week_limit"`  // nil = 不改；0 = 不限制
+	QuotaWeekStart       *string  `json:"quota_week_start"`        // nil = 不改；"" = 清除(回退 now)；RFC3339 UTC
 	Status               *string  `json:"status"`
 	RegenerateKey        *bool    `json:"regenerate_key"`
 	RouteMode            *string  `json:"route_mode"`
@@ -370,6 +371,27 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Update weekly quota start anchor (fixed 7-day phase). Per product decision,
+	// writing a new anchor ALSO zeroes the current weekly Token usage
+	// (SetQuotaWeekStart). "" means clear → fall back to now.
+	if req.QuotaWeekStart != nil {
+		if err := models.SetQuotaWeekStart(h.DB, userID, *req.QuotaWeekStart); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid quota_week_start (must be RFC3339): " + err.Error()})
+			return
+		}
+		if q, gerr := models.GetQuota(h.DB, userID); gerr == nil {
+			response["quota_week_start"] = q.WeekStart
+			response["quota_token_week_used"] = q.QuotaTokenWeekUsed
+		}
+		detail, _ := json.Marshal(map[string]any{"user_id": userID, "week_start": *req.QuotaWeekStart})
+		_, _ = h.DB.Exec(
+			`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)
+			 VALUES (?, ?, ?, ?, ?)`,
+			"quota_week_start_set", "user", strconv.FormatInt(userID, 10), string(detail), time.Now().Format(time.RFC3339),
+		)
+		response["quota_week_start_set"] = true
+	}
+
 	// Update status
 	if req.Status != nil {
 		if *req.Status != "active" && *req.Status != "disabled" {
@@ -695,6 +717,69 @@ func (h *Handler) ResetUsage(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": "用户 " + user.Username + " 的所有用量统计已重置",
+	})
+}
+
+// batchWeekStartRequest is the JSON body for POST /admin/api/users/batch-week-start.
+type batchWeekStartRequest struct {
+	UserIDs   []int64 `json:"user_ids"`
+	WeekStart string  `json:"week_start"` // RFC3339 UTC; the client interprets local Asia/Shanghai before sending
+}
+
+// BatchSetWeekStart applies a fixed weekly quota start anchor to multiple users
+// in one call. Per product decision each user's current weekly Token usage is
+// also zeroed (models.SetQuotaWeekStart). Failures are per-user: succeeded
+// users are NOT rolled back, and the response lists every user's ok/error so
+// the admin sees exactly what happened.
+func (h *Handler) BatchSetWeekStart(w http.ResponseWriter, r *http.Request) {
+	var req batchWeekStartRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+		return
+	}
+	if len(req.UserIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user_ids is required"})
+		return
+	}
+	// Validate the week_start format up front so a malformed value rejects the
+	// whole batch instead of silently failing per-row.
+	if _, err := time.Parse(time.RFC3339, req.WeekStart); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid week_start (must be RFC3339 UTC)"})
+		return
+	}
+
+	type batchResult struct {
+		ID    int64  `json:"id"`
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	results := make([]batchResult, 0, len(req.UserIDs))
+	succeeded := 0
+	for _, id := range req.UserIDs {
+		if err := models.SetQuotaWeekStart(h.DB, id, req.WeekStart); err != nil {
+			results = append(results, batchResult{ID: id, OK: false, Error: err.Error()})
+		} else {
+			results = append(results, batchResult{ID: id, OK: true})
+			succeeded++
+		}
+	}
+
+	detail, _ := json.Marshal(map[string]any{
+		"user_ids":  req.UserIDs,
+		"week_start": req.WeekStart,
+		"succeeded": succeeded,
+		"failed":    len(req.UserIDs) - succeeded,
+	})
+	_, _ = h.DB.Exec(
+		`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"quota_week_start_batch", "user", "0", string(detail), time.Now().Format(time.RFC3339),
+	)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"results":   results,
+		"succeeded": succeeded,
+		"failed":    len(req.UserIDs) - succeeded,
 	})
 }
 

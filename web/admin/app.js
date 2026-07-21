@@ -789,14 +789,16 @@ async function loadUsers() {
                     expiryHtml = `<span class="text-warning">${expiryHtml}</span>`;
                 }
             }
+            const weekStartCell = u.week_start ? formatDateSH(u.week_start) : '—';
             return `<tr${rowClass}>
+                <td><input type="checkbox" class="row-select" value="${u.id}"></td>
                 <td>${u.id}</td><td>${escapeHtml(u.username)}</td><td><code>${escapeHtml(u.sub_key_preview)}</code></td>
-                <td>${quota5h}</td><td>${quotaTotal}</td><td class="token-cell">${tokenCell}</td><td class="token-cell">${token5hCell}</td><td class="token-cell">${tokenWeekCell}</td><td>${routeHtml}</td><td>${formatBodySize(u.max_body_size)}</td><td>${u.max_concurrency > 0 ? u.max_concurrency : '不限'}</td><td>${expiryHtml}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
+                <td>${quota5h}</td><td>${quotaTotal}</td><td class="token-cell">${tokenCell}</td><td class="token-cell">${token5hCell}</td><td class="token-cell">${tokenWeekCell}</td><td class="token-cell">${weekStartCell}</td><td>${routeHtml}</td><td>${formatBodySize(u.max_body_size)}</td><td>${u.max_concurrency > 0 ? u.max_concurrency : '不限'}</td><td>${expiryHtml}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
                 <td><div class="btn-group">
                     <button class="btn btn-outline btn-sm" onclick="extendUser(${u.id},'${escapeAttr(u.username)}','${escapeAttr(u.expires_at || '')}')">🕐 延期</button>
                     <button class="btn btn-outline btn-sm" style="color:var(--color-warning,#e6a817);" onclick="openResetModal(${u.id},'${escapeAttr(u.username)}')">🔄 重置</button>
                     <button class="btn btn-outline btn-sm" onclick="shareUser('${escapeAttr(u.username)}',${u.id})">📋 分享</button>
-                    <button class="btn btn-outline btn-sm" onclick="editUser(${u.id},'${escapeAttr(u.status)}',${u.quota_5h_limit},${u.quota_total_limit},'${escapeAttr(u.route_mode || 'auto')}','${escapeAttr(u.fixed_provider || '')}',${u.fixed_multiplier != null ? u.fixed_multiplier : 'null'},${u.max_body_size ? u.max_body_size : 1048576},${u.quota_token_total_limit || 0},${u.quota_token_total_used || 0},${u.max_concurrency != null ? u.max_concurrency : 10},${u.quota_token_5h_limit || 0},${u.quota_token_week_limit || 0})">编辑</button>
+                    <button class="btn btn-outline btn-sm" onclick="editUser(${u.id},'${escapeAttr(u.status)}',${u.quota_5h_limit},${u.quota_total_limit},'${escapeAttr(u.route_mode || 'auto')}','${escapeAttr(u.fixed_provider || '')}',${u.fixed_multiplier != null ? u.fixed_multiplier : 'null'},${u.max_body_size ? u.max_body_size : 1048576},${u.quota_token_total_limit || 0},${u.quota_token_total_used || 0},${u.max_concurrency != null ? u.max_concurrency : 10},${u.quota_token_5h_limit || 0},${u.quota_token_week_limit || 0},'${escapeAttr(u.week_start || '')}')">编辑</button>
                     <button class="btn btn-outline btn-sm" onclick="viewCalls(${u.id},'${escapeAttr(u.username)}')">记录</button>
                     <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id},'${escapeAttr(u.username)}')">删除</button>
                 </div></td>
@@ -808,6 +810,56 @@ async function loadUsers() {
 function refreshUsers() {
     loadUsers();
 }
+
+// ===== Batch week-start selection =====
+let selectedUserIds = new Set();
+function refreshBatchBtn() {
+    const btn = document.getElementById('batch-week-start-btn');
+    if (btn) btn.disabled = selectedUserIds.size === 0;
+}
+// Delegate checkbox changes (list is re-rendered on every loadUsers()).
+document.addEventListener('change', (e) => {
+    if (e.target.id === 'select-all') {
+        document.querySelectorAll('.row-select').forEach(cb => {
+            cb.checked = e.target.checked;
+            if (cb.checked) selectedUserIds.add(parseInt(cb.value, 10));
+            else selectedUserIds.delete(parseInt(cb.value, 10));
+        });
+        refreshBatchBtn();
+    } else if (e.target.classList && e.target.classList.contains('row-select')) {
+        if (e.target.checked) selectedUserIds.add(parseInt(e.target.value, 10));
+        else selectedUserIds.delete(parseInt(e.target.value, 10));
+        refreshBatchBtn();
+    }
+});
+document.getElementById('batch-week-start-btn').addEventListener('click', () => {
+    document.getElementById('batch-week-start-count').textContent = selectedUserIds.size;
+    showModal('batch-week-start-modal');
+});
+document.getElementById('batch-week-start-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const ws = document.getElementById('batch-week-start-input').value.trim();
+    if (!ws) { alert('请选择周开始时间'); return; }
+    // Interpreted as Asia/Shanghai local per product decision; send RFC3339 UTC.
+    const asShanghai = new Date(ws + ':00+08:00');
+    if (isNaN(asShanghai.getTime())) { alert('时间格式无效'); return; }
+    const body = { user_ids: Array.from(selectedUserIds), week_start: asShanghai.toISOString() };
+    try {
+        const data = await apiFetch('api/users/batch-week-start', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+        const ok = data.succeeded || 0, fail = data.failed || 0;
+        let msg = `批量设置完成：成功 ${ok} 个，失败 ${fail} 个`;
+        if (fail > 0 && data.results) {
+            const errs = data.results.filter(r => !r.ok).map(r => `#${r.id}: ${r.error}`);
+            msg += '\n' + errs.join('\n');
+        }
+        alert(msg);
+        closeModal('batch-week-start-modal');
+        selectedUserIds.clear(); refreshBatchBtn();
+        loadUsers();
+    } catch (err) { alert('批量设置失败：' + err.message); }
+});
 
 async function createUser(e) {
     e.preventDefault();
@@ -883,13 +935,24 @@ async function createUser(e) {
     } catch (err) { document.getElementById('create-user-result').textContent = '创建失败: ' + err.message; document.getElementById('create-user-result').classList.remove('hidden'); }
 }
 
-function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier, maxBodySize, tokenLimit, tokenUsed, maxConcurrency, token5hLimit, tokenWeekLimit) {
+function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier, maxBodySize, tokenLimit, tokenUsed, maxConcurrency, token5hLimit, tokenWeekLimit, weekStartUTC) {
     document.getElementById('update-user-id').value = id;
     document.getElementById('update-quota-5h').value = q5;
     document.getElementById('update-quota-total').value = qt;
     document.getElementById('update-quota-token-total').value = tokenLimit || 0;
     document.getElementById('update-quota-token-5h').value = token5hLimit || 0;
     document.getElementById('update-quota-token-week').value = tokenWeekLimit || 0;
+    // Populate the weekly quota start anchor (fixed 7-day phase). Stored UTC;
+    // display in server timezone Asia/Shanghai (UTC+8) per product decision.
+    const wsEl = document.getElementById('update-quota-week-start');
+    if (weekStartUTC) {
+        const d = new Date(weekStartUTC);
+        const parts = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(d);
+        // "2026/07/20 14:00:00" → "2026-07-20T14:00:00"
+        wsEl.value = parts.replace(/\//g, '-').replace(' ', 'T');
+    } else {
+        wsEl.value = '';
+    }
     document.getElementById('update-status').value = '';
     document.getElementById('update-regenerate-key').checked = false;
     document.getElementById('update-route-mode').value = '';
@@ -945,6 +1008,13 @@ async function updateUser(e) {
     if (uWeekRaw !== '') {
         const uWeek = parseInt(uWeekRaw);
         if (!isNaN(uWeek) && uWeek >= 0) body.quota_token_week_limit = uWeek;
+    }
+    // Weekly quota start anchor (fixed 7-day phase). Interpreted as Asia/Shanghai
+    // local time per product decision; sent as RFC3339 UTC. Empty = unchanged.
+    const ws = document.getElementById('update-quota-week-start').value.trim();
+    if (ws) {
+        const asShanghai = new Date(ws + ':00+08:00');
+        if (!isNaN(asShanghai.getTime())) body.quota_week_start = asShanghai.toISOString();
     }
     const st = document.getElementById('update-status').value;
     if (st) body.status = st;

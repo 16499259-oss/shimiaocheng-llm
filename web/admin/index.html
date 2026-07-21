@@ -90,10 +90,11 @@
                 <div class="section-header">
                     <h2 class="tab-title">用户管理</h2>
                     <button id="refresh-users-btn" class="btn btn-sm">🔄 刷新</button>
+                    <button id="batch-week-start-btn" class="btn btn-sm" disabled>🗓 批量设置周开始时间</button>
                     <button id="create-user-btn" class="btn btn-primary">+ 创建用户</button>
                 </div>
                 <table class="table" id="users-table">
-                    <thead><tr><th>ID</th><th>用户名</th><th>Key</th><th>5h 配额</th><th>总配额</th><th>Token</th><th>5h·Token</th><th>周·Token</th><th>路由/倍率</th><th>单次上限</th><th>并发</th><th>有效期</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
+                    <thead><tr><th><input type="checkbox" id="select-all"></th><th>ID</th><th>用户名</th><th>Key</th><th>5h 配额</th><th>总配额</th><th>Token</th><th>5h·Token</th><th>周·Token</th><th>周开始时间</th><th>路由/倍率</th><th>单次上限</th><th>并发</th><th>有效期</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
                     <tbody id="users-tbody"><tr><td colspan="15" class="text-center">加载中...</td></tr></tbody>
                 </table>
                 <!-- Calls sub-section -->
@@ -532,6 +533,11 @@
                 <div class="form-group"><label for="update-quota-token-total">Token 总量上限 (0 = 不限制)</label><input type="number" id="update-quota-token-total" min="0" placeholder="0 = 不限制"></div>
                 <div class="form-group"><label for="update-quota-token-5h">5h Token 上限 (0 = 不限制)</label><input type="number" id="update-quota-token-5h" min="0" placeholder="0 = 不限制"></div>
                 <div class="form-group"><label for="update-quota-token-week">周 Token 上限 (0 = 不限制)</label><input type="number" id="update-quota-token-week" min="0" placeholder="0 = 不限制"></div>
+                <div class="form-group">
+                    <label for="update-quota-week-start">周限额开始时间</label>
+                    <input type="datetime-local" id="update-quota-week-start" step="1">
+                    <small>服务器时区 Asia/Shanghai (UTC+8)。设定后清零本周已用 Token 并开启固定 7 天循环。</small>
+                </div>
                 <div class="form-group"><label for="update-status">状态</label><select id="update-status"><option value="">不修改</option><option value="active">启用</option><option value="disabled">禁用</option></select></div>
                 <div class="form-group"><label><input type="checkbox" id="update-regenerate-key"> 重新生成 Key</label></div>
                 <div class="form-group">
@@ -632,6 +638,22 @@
                     <button class="btn" style="background:var(--color-warning,#e6a817);color:#fff;flex:1;" onclick="confirmResetUsage()">确认重置</button>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- Batch Week Start Modal -->
+    <div id="batch-week-start-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header"><h3>批量设置周开始时间</h3><button class="modal-close" onclick="closeModal('batch-week-start-modal')">&times;</button></div>
+            <form id="batch-week-start-form">
+                <div class="form-group"><label>已选用户数</label><div id="batch-week-start-count" style="font-weight:600;font-size:18px;">0</div></div>
+                <div class="form-group">
+                    <label for="batch-week-start-input">周开始时间</label>
+                    <input type="datetime-local" id="batch-week-start-input" step="1">
+                    <small>服务器时区 Asia/Shanghai (UTC+8)。将统一应用到所有选中用户并清零各自本周已用 Token。</small>
+                </div>
+                <button type="submit" class="btn btn-primary btn-block">应用</button>
+            </form>
         </div>
     </div>
 
