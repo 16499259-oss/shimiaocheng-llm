@@ -83,7 +83,7 @@ func TestAdminBatchSetWeekStart(t *testing.T) {
 
 	anchor := time.Now().UTC().Add(-1 * 24 * time.Hour).Format(time.RFC3339)
 	payload, _ := json.Marshal(map[string]any{
-		"user_ids":  []int64{id1, id2},
+		"user_ids":   []int64{id1, id2},
 		"week_start": anchor,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/users/batch-week-start", bytes.NewReader(payload))
@@ -93,9 +93,9 @@ func TestAdminBatchSetWeekStart(t *testing.T) {
 		t.Fatalf("BatchSetWeekStart expected 200, got %d; body=%s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Succeeded int                  `json:"succeeded"`
-		Failed    int                  `json:"failed"`
-		Results   []map[string]any     `json:"results"`
+		Succeeded int              `json:"succeeded"`
+		Failed    int              `json:"failed"`
+		Results   []map[string]any `json:"results"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal resp: %v", err)

@@ -92,13 +92,18 @@ func TestCheckAndDeduct_Exceeded(t *testing.T) {
 		"bob", "pw-hash", "subkey-hash-bob", "sk-bob...",
 		"user", "active", "", "auto", "",
 		100, // quota_5h_limit
-		0,   // quota_total_limit -> immediately exhausted
+		5,   // quota_total_limit (positive; exhausted below by seeding used=limit)
 		nil, 0, models.DefaultMaxConcurrency,
 	)
 	if err != nil {
 		t.Fatalf("CreateUser failed: %v", err)
 	}
 	userID := created.ID
+
+	// Exhaust the total quota (used == limit) so the next check is blocked.
+	if _, err := database.Conn.Exec(`UPDATE quotas SET quota_total_used = 5 WHERE user_id = ?`, userID); err != nil {
+		t.Fatalf("seed total used: %v", err)
+	}
 
 	eng := quota.NewMultiplierEngine(database.Conn)
 	checker := quota.NewChecker(database.Conn, eng, 5)
@@ -121,8 +126,8 @@ func TestCheckAndDeduct_Exceeded(t *testing.T) {
 	if q.Quota5hUsed != 0 {
 		t.Fatalf("expected quota_5h_used to stay 0, got %d", q.Quota5hUsed)
 	}
-	if q.QuotaTotalUsed != 0 {
-		t.Fatalf("expected quota_total_used to stay 0, got %d", q.QuotaTotalUsed)
+	if q.QuotaTotalUsed != 5 {
+		t.Fatalf("expected quota_total_used to stay at the seeded 5 (blocked deduction must not deduct), got %d", q.QuotaTotalUsed)
 	}
 }
 

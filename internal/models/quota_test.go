@@ -261,3 +261,110 @@ func TestResetQuotaUsage(t *testing.T) {
 		t.Fatalf("month_start expected to be bumped, but still %q", qAfter.MonthStart)
 	}
 }
+
+// TestAtomicDeductQuota_CountLimitZeroUnlimitedHighUsed verifies that a 0 count
+// limit opens the gate unconditionally even when used is already high — proving
+// the 0 cap does NOT block (since 2026-07-21 a 0 call-count cap means "not
+// restricted", mirroring the Token cap).
+func TestAtomicDeductQuota_CountLimitZeroUnlimitedHighUsed(t *testing.T) {
+	database := newModelsTestDB(t)
+	userID := newQuotaUser(t, database, 0, 0) // both count caps = 0 (unlimited)
+
+	// Seed used to a high value to prove the 0 cap does NOT block.
+	if _, err := database.Conn.Exec(
+		`UPDATE quotas SET quota_5h_used = 999, quota_total_used = 999 WHERE user_id = ?`, userID,
+	); err != nil {
+		t.Fatalf("seed used: %v", err)
+	}
+
+	ok, err := models.AtomicDeductQuota(database.Conn, userID, 1)
+	if err != nil {
+		t.Fatalf("AtomicDeductQuota: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected deduction to succeed with count limit 0 (unlimited), got blocked")
+	}
+	q, _ := models.GetQuota(database.Conn, userID)
+	if q.Quota5hUsed != 1000 || q.QuotaTotalUsed != 1000 {
+		t.Fatalf("expected used incremented to 1000, got 5h=%d total=%d", q.Quota5hUsed, q.QuotaTotalUsed)
+	}
+}
+
+// TestAtomicDeductQuota_CountLimitNegativeRejected verifies the gate still
+// blocks when a count limit is negative (defensive: a -1 stored value must
+// never open the gate).
+func TestAtomicDeductQuota_CountLimitNegativeRejected(t *testing.T) {
+	database := newModelsTestDB(t)
+	userID := newQuotaUser(t, database, -1, 10000)
+
+	ok, err := models.AtomicDeductQuota(database.Conn, userID, 1)
+	if err != nil {
+		t.Fatalf("AtomicDeductQuota: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected deduction to be blocked with negative count limit, got allowed")
+	}
+}
+
+// TestResetCallCount verifies ONLY the call-count buckets (5h + total) and the
+// shared 5h window anchor are zeroed; Token buckets and Token anchors stay.
+func TestResetCallCount(t *testing.T) {
+	database := newModelsTestDB(t)
+	userID := newQuotaUser(t, database, 100, 10000)
+	if err := models.AddTokenUsage(database.Conn, userID, 50); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	if _, err := database.Conn.Exec(`UPDATE quotas SET quota_5h_used = 7, quota_total_used = 42, window_start = '2020-01-01T00:00:00Z', week_start = '2020-01-01T00:00:00Z', month_start = '2020-01-01T00:00:00Z' WHERE user_id = ?`, userID); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := models.ResetCallCount(database.Conn, userID, ""); err != nil {
+		t.Fatalf("ResetCallCount: %v", err)
+	}
+	q, _ := models.GetQuota(database.Conn, userID)
+	if q.Quota5hUsed != 0 || q.QuotaTotalUsed != 0 {
+		t.Fatalf("call-count not zeroed: 5h=%d total=%d", q.Quota5hUsed, q.QuotaTotalUsed)
+	}
+	if q.WindowStart == "2020-01-01T00:00:00Z" {
+		t.Fatalf("window_start should have been bumped")
+	}
+	// Token buckets must be untouched.
+	if q.QuotaToken5hUsed != 50 || q.QuotaTokenWeekUsed != 50 || q.QuotaTokenTotalUsed != 50 {
+		t.Fatalf("token buckets should be untouched: 5h=%d week=%d total=%d", q.QuotaToken5hUsed, q.QuotaTokenWeekUsed, q.QuotaTokenTotalUsed)
+	}
+	if q.WeekStart != "2020-01-01T00:00:00Z" || q.MonthStart != "2020-01-01T00:00:00Z" {
+		t.Fatalf("token anchors should be untouched, but were changed: week=%q month=%q", q.WeekStart, q.MonthStart)
+	}
+}
+
+// TestResetTokenStats verifies ONLY the Token buckets (5h / week / month) and
+// the Token anchors are zeroed; call-count buckets and the shared 5h window
+// anchor stay.
+func TestResetTokenStats(t *testing.T) {
+	database := newModelsTestDB(t)
+	userID := newQuotaUser(t, database, 100, 10000)
+	if err := models.AddTokenUsage(database.Conn, userID, 50); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	if _, err := database.Conn.Exec(`UPDATE quotas SET quota_5h_used = 7, quota_total_used = 42, window_start = '2020-01-01T00:00:00Z', week_start = '2020-01-01T00:00:00Z', month_start = '2020-01-01T00:00:00Z' WHERE user_id = ?`, userID); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := models.ResetTokenStats(database.Conn, userID, ""); err != nil {
+		t.Fatalf("ResetTokenStats: %v", err)
+	}
+	q, _ := models.GetQuota(database.Conn, userID)
+	if q.QuotaToken5hUsed != 0 || q.QuotaTokenWeekUsed != 0 || q.QuotaTokenTotalUsed != 0 {
+		t.Fatalf("token buckets not zeroed: 5h=%d week=%d total=%d", q.QuotaToken5hUsed, q.QuotaTokenWeekUsed, q.QuotaTokenTotalUsed)
+	}
+	if q.WeekStart == "2020-01-01T00:00:00Z" || q.MonthStart == "2020-01-01T00:00:00Z" {
+		t.Fatalf("token anchors should have been bumped")
+	}
+	// Call-count buckets must be untouched.
+	if q.Quota5hUsed != 7 || q.QuotaTotalUsed != 42 {
+		t.Fatalf("call-count should be untouched: 5h=%d total=%d", q.Quota5hUsed, q.QuotaTotalUsed)
+	}
+	if q.WindowStart != "2020-01-01T00:00:00Z" {
+		t.Fatalf("window_start should be untouched, but was changed to %q", q.WindowStart)
+	}
+}

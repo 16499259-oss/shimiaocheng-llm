@@ -432,7 +432,7 @@ func TestGetProviderAllocationDetails(t *testing.T) {
 	}
 	execLog(uidA, windowStart, 100, 20, 3)     // in-cycle, mult 1.0 → 120
 	execLog(uidA, windowStart, 50, 50, 2, 2.0) // in-cycle, mult 2.0 → ceil(100*2)=200
-	execLog(uidA, outOfCycle, 999, 999, 9)    // out-of-cycle → excluded
+	execLog(uidA, outOfCycle, 999, 999, 9)     // out-of-cycle → excluded
 
 	details, err := GetProviderAllocationDetails(conn, "test", windowStart)
 	if err != nil {

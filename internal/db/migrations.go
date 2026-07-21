@@ -320,9 +320,9 @@ func RunMigrations(conn *DB) error {
 
 	// ── One-time recompute of quota_token_total_used to include the billing
 	// multiplier (2026-08-18) ──
-// The cumulative-Token backfill that already ran on production (when
-// quota_token_total_limit was first created, on an earlier build) summed RAW
-// prompt+completion from call_logs (no multiplier). Going forward,
+	// The cumulative-Token backfill that already ran on production (when
+	// quota_token_total_limit was first created, on an earlier build) summed RAW
+	// prompt+completion from call_logs (no multiplier). Going forward,
 	// AddTokenUsage accrues the multiplier-scaled billed delta into
 	// quota_token_total_used — exactly like the 5h/week Token caps — so the raw
 	// backfill left existing production rows under-counted versus actual billing.

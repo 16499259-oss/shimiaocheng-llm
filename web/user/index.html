@@ -449,12 +449,21 @@ function renderDashboard(data) {
 
     const token5hRowHtml = renderTokenRow('5小时 Token', data.quota_token_5h_used || 0, data.quota_token_5h_limit || 0);
     const tokenWeekRowHtml = renderTokenRow('本周 Token', data.quota_token_week_used || 0, data.quota_token_week_limit || 0);
+    // Weekly reset time: shown only when a weekly Token cap is set AND the
+    // backend returned a concrete reset instant (empty anchor => hidden).
+    const tokenWeekResetHtml = (data.quota_token_week_limit > 0 && data.week_reset_at)
+        ? `<div class="stat-row">
+            <span class="stat-label">本周重置</span>
+            <span class="stat-value">${new Date(data.week_reset_at).toLocaleString('zh-CN')}</span>
+        </div>`
+        : '';
 
     $('quota-stats').innerHTML = `
         ${count5hHtml}
         ${countTotalHtml}
         ${token5hRowHtml}
         ${tokenWeekRowHtml}
+        ${tokenWeekResetHtml}
         ${tokenRowHtml}
         <div class="stat-row">
             <span class="stat-label">累计 Token</span>

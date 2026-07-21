@@ -224,10 +224,11 @@ func TestAdminUpdateUser_MaxConcurrencyPositive(t *testing.T) {
 	}
 }
 
-// L2: edit quota_5h_limit = 0 -> 400. A count limit of 0 is invalid: the gate
-// treats it as "exhausted" and would silently lock the user out, so the API must
-// reject it (mirrors the negative-rejection contract, audit F3).
-func TestAdminUpdateUser_Zero5hLimitRejected(t *testing.T) {
+// L2: edit quota_5h_limit = 0 -> 200 (unlimited). Since 2026-07-21 a count
+// limit of 0 means "call-count not restricted" and the gate opens
+// unconditionally, so the API ACCEPTS it (mirrors the Token cap, where 0 also
+// means unlimited). Only negative values are rejected.
+func TestAdminUpdateUser_Zero5hLimitAcceptedAsUnlimited(t *testing.T) {
 	h := newAdminTestHandler(t)
 	id, _ := adminCreateUser(t, h, "q5h-zero", nil)
 	zero := 0
@@ -236,20 +237,21 @@ func TestAdminUpdateUser_Zero5hLimitRejected(t *testing.T) {
 	req.SetPathValue("id", strconv.FormatInt(id, 10))
 	rec := httptest.NewRecorder()
 	h.UpdateUser(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for update quota_5h_limit=0, got %d; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for update quota_5h_limit=0 (unlimited), got %d; body=%s", rec.Code, rec.Body.String())
 	}
 	q, err := models.GetQuota(h.DB, id)
 	if err != nil || q == nil {
 		t.Fatalf("GetQuota: %v", err)
 	}
-	if q.Quota5hLimit <= 0 {
-		t.Fatalf("5h cap persisted as %d, want positive (rejected)", q.Quota5hLimit)
+	if q.Quota5hLimit != 0 {
+		t.Fatalf("5h cap persisted as %d, want 0 (unlimited)", q.Quota5hLimit)
 	}
 }
 
-// L2: edit quota_total_limit = 0 -> 400 (same rationale as the 5h cap above).
-func TestAdminUpdateUser_ZeroTotalLimitRejected(t *testing.T) {
+// L2: edit quota_total_limit = 0 -> 200 (unlimited). Same rationale as the 5h
+// cap: a 0 count limit means "call-count not restricted" and is accepted.
+func TestAdminUpdateUser_ZeroTotalLimitAcceptedAsUnlimited(t *testing.T) {
 	h := newAdminTestHandler(t)
 	id, _ := adminCreateUser(t, h, "qt-zero", nil)
 	zero := 0
@@ -258,15 +260,15 @@ func TestAdminUpdateUser_ZeroTotalLimitRejected(t *testing.T) {
 	req.SetPathValue("id", strconv.FormatInt(id, 10))
 	rec := httptest.NewRecorder()
 	h.UpdateUser(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for update quota_total_limit=0, got %d; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for update quota_total_limit=0 (unlimited), got %d; body=%s", rec.Code, rec.Body.String())
 	}
 	q, err := models.GetQuota(h.DB, id)
 	if err != nil || q == nil {
 		t.Fatalf("GetQuota: %v", err)
 	}
-	if q.QuotaTotalLimit <= 0 {
-		t.Fatalf("total cap persisted as %d, want positive (rejected)", q.QuotaTotalLimit)
+	if q.QuotaTotalLimit != 0 {
+		t.Fatalf("total cap persisted as %d, want 0 (unlimited)", q.QuotaTotalLimit)
 	}
 }
 

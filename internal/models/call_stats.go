@@ -14,8 +14,8 @@ import (
 // The summary is always computed over the FULL filtered set (ignoring
 // pagination), so it stays consistent with the list view's filtering.
 type CallStats struct {
-	TotalCalls     int              `json:"total_calls"`
-	Tokens         TokenBreakdown   `json:"tokens"`
+	TotalCalls int            `json:"total_calls"`
+	Tokens     TokenBreakdown `json:"tokens"`
 	// RawTokens is the UNMULTIPLIED token breakdown for the same filtered set,
 	// shown side-by-side with Tokens (multiplier-inflated) so admins can compare
 	// raw consumption vs billed consumption. Every value is the verbatim per-row

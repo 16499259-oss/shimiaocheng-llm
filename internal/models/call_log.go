@@ -10,26 +10,26 @@ import (
 
 // CallLog represents a single API call record.
 type CallLog struct {
-	ID               int64   `json:"id"`
-	UserID           int64   `json:"user_id"`
-	Username         string  `json:"username"` // display name of the calling user; populated by the global admin query
-	Model            string  `json:"model"`
-	ProviderID       string  `json:"provider_id"` // upstream provider that served the call ("zhipu"/"openai"/...)
-	PromptTokens     int     `json:"prompt_tokens"`
-	CompletionTokens int     `json:"completion_tokens"`
-	TotalTokens      int     `json:"total_tokens"`
+	ID               int64  `json:"id"`
+	UserID           int64  `json:"user_id"`
+	Username         string `json:"username"` // display name of the calling user; populated by the global admin query
+	Model            string `json:"model"`
+	ProviderID       string `json:"provider_id"` // upstream provider that served the call ("zhipu"/"openai"/...)
+	PromptTokens     int    `json:"prompt_tokens"`
+	CompletionTokens int    `json:"completion_tokens"`
+	TotalTokens      int    `json:"total_tokens"`
 	// RawTotalTokens is the UNMULTIPLIED raw token total (prompt_tokens +
 	// completion_tokens), recorded at insert time. It is the canonical "raw
 	// token" figure surfaced by the call-records summary ("未含倍率") and is
 	// intentionally independent of TotalTokens (provider-reported, may include
 	// extras) and of any multiplier. Never reverse-derived from multiplier_used.
-	RawTotalTokens   int     `json:"raw_total_tokens"`
-	EffectiveCalls   int     `json:"effective_calls"`
-	MultiplierUsed   float64 `json:"multiplier_used"`
-	StatusCode       int     `json:"status_code"`
-	LatencyMs        int     `json:"latency_ms"`
-	ErrorMsg         string  `json:"error_msg,omitempty"`
-	CreatedAt        string  `json:"created_at"`
+	RawTotalTokens int     `json:"raw_total_tokens"`
+	EffectiveCalls int     `json:"effective_calls"`
+	MultiplierUsed float64 `json:"multiplier_used"`
+	StatusCode     int     `json:"status_code"`
+	LatencyMs      int     `json:"latency_ms"`
+	ErrorMsg       string  `json:"error_msg,omitempty"`
+	CreatedAt      string  `json:"created_at"`
 }
 
 // CallLogFilter holds pagination and filter options for querying call logs.

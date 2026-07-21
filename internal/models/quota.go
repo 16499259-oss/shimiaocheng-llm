@@ -48,6 +48,7 @@ type QuotaStatus struct {
 	TotalTokensToday         int64  `json:"total_tokens_today"`
 	WindowResetAt            string `json:"window_reset_at"`
 	MonthResetAt             string `json:"month_reset_at"` // month_start + 30d (rolling-30d Token bucket next reset)
+	WeekResetAt              string `json:"week_reset_at"`  // week_start + 7d (fixed-phase 7d Token bucket next reset)
 	Status                   string `json:"status"`
 	ExpiresAt                string `json:"expires_at"` // user account expiry; "" means permanent (no expiry)
 }
@@ -79,13 +80,14 @@ func GetQuota(db *sql.DB, userID int64) (*Quota, error) {
 // quotas, and also gates on the cumulative / 5h-window / weekly Token limits.
 //
 // Zero-means semantics (audit L2):
-//   - Count quotas (quota_5h_limit / quota_total_limit): 0 is NOT a valid value.
-//     The gate treats a 0 count limit as "already exhausted" (used + calls <= 0
-//     can never hold for calls >= 1), so a 0 would silently lock the user out.
-//     The admin edit API therefore REJECTS a count quota of 0 with 400 (see
-//     internal/admin/users.go) and never stores it; any legacy row that still
-//     holds 0 is likewise blocked here. This is intentionally different from the
-//     cumulative Token cap, where 0 means "unlimited".
+//   - Count quotas (quota_5h_limit / quota_total_limit): 0 means UNLIMITED
+//     (call-count not restricted). The gate opens unconditionally for that
+//     dimension via "(limit = 0 OR used + calls <= limit)", matching the
+//     cumulative Token cap below. An admin may leave the call-count quota
+//     unset (stored as 0) so a user is metered only by Token usage — the
+//     self-service panel then hides the call-count rows. NOTE: this used to be
+//     "0 = locked/invalid" (rejected with 400); changed on 2026-07-21 so call
+//     count can be unlimited like Token. Negative values remain rejected.
 //   - Cumulative Token cap (quota_token_total_limit): 0 means unlimited, so the
 //     gate opens unconditionally for that dimension ("(limit = 0 OR used < limit)").
 //   - 5h-window / weekly Token caps (quota_token_5h_limit / quota_token_week_limit):
@@ -117,11 +119,14 @@ func GetQuota(db *sql.DB, userID int64) (*Quota, error) {
 // effectiveCalls (a CALL count) into a Token column would be a category error
 // and over-count Token usage.
 //
-// alignedCycleStartUTC returns the start of the 7-day cycle containing now,
+// AlignedCycleStartUTC returns the start of the 7-day cycle containing now,
 // given a fixed phase anchor weekStart (both interpreted as UTC instants).
 // If now is before weekStart, the cycle starts at weekStart itself. This makes
 // the weekly bucket recur every 7 days from the admin-set anchor.
-func alignedCycleStartUTC(weekStart, now time.Time) time.Time {
+//
+// Exported (was alignedCycleStartUTC) so the quota HTTP handler can reuse it to
+// compute the next weekly reset time shown on the self-service panel.
+func AlignedCycleStartUTC(weekStart, now time.Time) time.Time {
 	if now.Before(weekStart) {
 		return weekStart
 	}
@@ -149,7 +154,7 @@ func SetQuotaWeekStart(db *sql.DB, userID int64, startRFC3339 string) error {
 		}
 	}
 	t = t.UTC()
-	cycleStart := alignedCycleStartUTC(t, time.Now().UTC())
+	cycleStart := AlignedCycleStartUTC(t, time.Now().UTC())
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err = db.Exec(
 		`UPDATE quotas SET week_start = ?, week_cycle_start = ?, updated_at = ? WHERE user_id = ?`,
@@ -191,7 +196,7 @@ func AtomicDeductQuota(db *sql.DB, userID int64, effectiveCalls int) (bool, erro
 	if parsed, perr := time.Parse(time.RFC3339, weekStartStr); perr == nil && !parsed.IsZero() {
 		weekStart = parsed
 	}
-	newCycle := alignedCycleStartUTC(weekStart, nowUTC).Format(time.RFC3339)
+	newCycle := AlignedCycleStartUTC(weekStart, nowUTC).Format(time.RFC3339)
 
 	result, err := db.Exec(
 		`UPDATE quotas
@@ -203,21 +208,21 @@ func AtomicDeductQuota(db *sql.DB, userID int64, effectiveCalls int) (bool, erro
 		     month_start = CASE WHEN month_start < ? THEN ? ELSE month_start END,
 		     updated_at = ?
 		 WHERE user_id = ?
-		   AND quota_5h_used + ? <= quota_5h_limit
-		   AND quota_total_used + ? <= quota_total_limit
+		   AND (quota_5h_limit = 0 OR quota_5h_used + ? <= quota_5h_limit)
+		   AND (quota_total_limit = 0 OR quota_total_used + ? <= quota_total_limit)
 		   AND (quota_token_total_limit = 0 OR (CASE WHEN month_start < ? THEN 0 ELSE quota_token_total_used END) < quota_token_total_limit)
 		   AND (quota_token_5h_limit = 0 OR quota_token_5h_used < quota_token_5h_limit)
 		   AND (quota_token_week_limit = 0 OR (CASE WHEN week_cycle_start <> ? THEN 0 ELSE quota_token_week_used END) < quota_token_week_limit)`,
 		effectiveCalls, effectiveCalls, // SET quota_5h_used, quota_total_used
-		newCycle,            // SET quota_token_week_used CASE — reset判定
-		newCycle, newCycle,  // SET week_cycle_start CASE — reset判定 + 新周期起点
-		monthCutoff,         // SET quota_token_total_used CASE — reset判定
+		newCycle,           // SET quota_token_week_used CASE — reset判定
+		newCycle, newCycle, // SET week_cycle_start CASE — reset判定 + 新周期起点
+		monthCutoff,          // SET quota_token_total_used CASE — reset判定
 		monthCutoff, nowTime, // SET month_start CASE — reset判定 + bump 值
-		nowTime,            // SET updated_at
-		userID,             // WHERE user_id
+		nowTime,                        // SET updated_at
+		userID,                         // WHERE user_id
 		effectiveCalls, effectiveCalls, // WHERE 次数闸门 (5h / total)
-		monthCutoff,        // WHERE 月 token 闸门 CASE 判定
-		newCycle,           // WHERE 周 token 闸门 CASE 判定
+		monthCutoff, // WHERE 月 token 闸门 CASE 判定
+		newCycle,    // WHERE 周 token 闸门 CASE 判定
 	)
 	if err != nil {
 		return false, fmt.Errorf("atomic deduct quota: %w", err)
@@ -346,20 +351,15 @@ func CompensateQuotaReset(db *sql.DB, resetIntervalHours int) error {
 	return err
 }
 
-// ResetQuotaUsage zeroes ALL usage buckets — call-count (5h + total) and
-// Token (5h / week / month) — and restarts every window anchor (window_start,
-// week_start, month_start) to now. This gives the user a clean "full revive":
-// every quota gate re-opens immediately on the next request.
+// ResetCallCount zeroes ONLY the call-count usage buckets (5h + total) and
+// restarts the shared 5h window anchor (window_start) to now. Token buckets
+// and their window anchors (week_start / week_cycle_start / month_start) are
+// deliberately left untouched.
 //
-// The 5h Token bucket reuses the shared 5h window (window_start) per PR #27;
-// the gate does NOT lazy-reset the 5h Token bucket (unlike week / month), so
-// it relies on the cron Reset5hQuota / CompensateQuotaReset to clear
-// quota_token_5h_used every 5h. Bumping window_start here restarts that
-// shared window for both call-count and Token 5h buckets.
-//
-// A single atomic UPDATE — idempotent and safe to call repeatedly. now is an
-// RFC3339 local-time string; when empty, the local now is used as a fallback.
-func ResetQuotaUsage(db *sql.DB, userID int64, now string) error {
+// The 5h Token bucket reuses the shared 5h window (window_start) per PR #27,
+// so bumping window_start here also restarts that shared window for the 5h
+// Token bucket. Idempotent; safe to call repeatedly.
+func ResetCallCount(db *sql.DB, userID int64, now string) error {
 	if now == "" {
 		now = time.Now().Format(time.RFC3339)
 	}
@@ -368,7 +368,29 @@ func ResetQuotaUsage(db *sql.DB, userID int64, now string) error {
 		 SET quota_5h_used = 0,
 		     quota_total_used = 0,
 		     window_start = ?,
-		     quota_token_5h_used = 0,
+		     updated_at = ?
+		 WHERE user_id = ?`,
+		now, now, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("reset call-count usage: %w", err)
+	}
+	return nil
+}
+
+// ResetTokenStats zeroes ONLY the Token usage buckets (5h / week / month) and
+// restarts the Token window anchors (week_start, week_cycle_start,
+// month_start) to now. The call-count buckets and the shared 5h window anchor
+// (window_start) are deliberately left untouched.
+//
+// Idempotent; safe to call repeatedly.
+func ResetTokenStats(db *sql.DB, userID int64, now string) error {
+	if now == "" {
+		now = time.Now().Format(time.RFC3339)
+	}
+	_, err := db.Exec(
+		`UPDATE quotas
+		 SET quota_token_5h_used = 0,
 		     quota_token_week_used = 0,
 		     quota_token_total_used = 0,
 		     week_start = ?,
@@ -376,10 +398,33 @@ func ResetQuotaUsage(db *sql.DB, userID int64, now string) error {
 		     month_start = ?,
 		     updated_at = ?
 		 WHERE user_id = ?`,
-		now, now, now, now, now, userID,
+		now, now, now, now, userID,
 	)
 	if err != nil {
-		return fmt.Errorf("reset quota usage: %w", err)
+		return fmt.Errorf("reset token stats: %w", err)
+	}
+	return nil
+}
+
+// ResetQuotaUsage zeroes ALL usage buckets — call-count (5h + total) and
+// Token (5h / week / month) — and restarts every window anchor (window_start,
+// week_start, month_start) to now. This gives the user a clean "full revive":
+// every quota gate re-opens immediately on the next request.
+//
+// Retained for backward compatibility (used by the admin "extend" endpoint's
+// reset_token_stats option). It simply calls ResetCallCount + ResetTokenStats
+// in sequence; prefer calling those two directly for the split reset UI.
+//
+// now is an RFC3339 local-time string; when empty, the local now is used.
+func ResetQuotaUsage(db *sql.DB, userID int64, now string) error {
+	if now == "" {
+		now = time.Now().Format(time.RFC3339)
+	}
+	if err := ResetCallCount(db, userID, now); err != nil {
+		return err
+	}
+	if err := ResetTokenStats(db, userID, now); err != nil {
+		return err
 	}
 	return nil
 }
