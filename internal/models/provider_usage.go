@@ -174,9 +174,13 @@ type ProviderAllocationUser struct {
 
 // GetProviderAllocationDetails returns the per-user allocation breakdown for a
 // provider: every active, non-expired user whose fixed_provider matches, with
-// their monthly quota limits and cycle-window usage (token = prompt+completion,
-// call = effective_calls), aligned to the same cycle window used by
-// GetProviderUsage so the per-user "已用" matches the provider "已耗" column.
+// their monthly quota limits and cycle-window usage.
+//
+// Token usage is the BILLED (multiplier-scaled) sum — ceil((prompt+completion)
+// * multiplier_used) per call_log row — exactly matching the quota_token_total_used
+// "Token 月总量" the user sees in their own panel, so the per-user "已用" reflects
+// actual consumption (含倍率). Call usage is effective_calls (no multiplier). The
+// cycle window is aligned to the same one used by GetProviderUsage.
 //
 // windowStart must be an RFC3339 timestamp (e.g. "2026-07-01T00:00:00+08:00")
 // for direct text comparison against call_logs.created_at.
@@ -189,7 +193,7 @@ func GetProviderAllocationDetails(db *sql.DB, providerSlug, windowStart string) 
 			u.expires_at,
 			COALESCE(q.quota_token_total_limit, 0),
 			COALESCE(q.quota_total_limit, 0),
-			COALESCE(SUM(CASE WHEN c.created_at >= ? THEN c.prompt_tokens + c.completion_tokens END), 0) AS token_used,
+			COALESCE(SUM(CASE WHEN c.created_at >= ? THEN CAST((c.prompt_tokens + c.completion_tokens) * c.multiplier_used + 0.999999 AS INTEGER) END), 0) AS token_used,
 			COALESCE(SUM(CASE WHEN c.created_at >= ? THEN c.effective_calls END), 0) AS call_used
 		 FROM users u
 		 JOIN quotas q ON u.id = q.user_id

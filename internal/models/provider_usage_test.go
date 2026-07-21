@@ -417,16 +417,21 @@ func TestGetProviderAllocationDetails(t *testing.T) {
 	if err := conn.QueryRow(`SELECT id FROM users WHERE username = 'a'`).Scan(&uidA); err != nil {
 		t.Fatalf("find user a: %v", err)
 	}
-	execLog := func(uid int64, when string, pt, ct, calls int) {
+	execLog := func(uid int64, when string, pt, ct, calls int, mult ...float64) {
+		m := 1.0
+		if len(mult) > 0 {
+			m = mult[0]
+		}
 		if _, err := conn.Exec(
-			`INSERT INTO call_logs (user_id, provider_id, model, prompt_tokens, completion_tokens, effective_calls, status_code, created_at)
-			 VALUES (?, 'test', 'glm', ?, ?, ?, 200, ?)`,
-			uid, pt, ct, calls, when,
+			`INSERT INTO call_logs (user_id, provider_id, model, prompt_tokens, completion_tokens, effective_calls, status_code, created_at, multiplier_used)
+			 VALUES (?, 'test', 'glm', ?, ?, ?, 200, ?, ?)`,
+			uid, pt, ct, calls, when, m,
 		); err != nil {
 			t.Fatalf("seed call_log: %v", err)
 		}
 	}
-	execLog(uidA, windowStart, 100, 20, 3)     // in-cycle → counted
+	execLog(uidA, windowStart, 100, 20, 3)     // in-cycle, mult 1.0 → 120
+	execLog(uidA, windowStart, 50, 50, 2, 2.0) // in-cycle, mult 2.0 → ceil(100*2)=200
 	execLog(uidA, outOfCycle, 999, 999, 9)    // out-of-cycle → excluded
 
 	details, err := GetProviderAllocationDetails(conn, "test", windowStart)
@@ -447,12 +452,12 @@ func TestGetProviderAllocationDetails(t *testing.T) {
 	if b.Username != "b" {
 		t.Fatalf("details[1].username = %q, want b", b.Username)
 	}
-	// Cycle-window usage: only the in-cycle row (100+20=120 tokens, 3 calls).
-	if a.TokenUsed != 120 {
-		t.Errorf("a.TokenUsed = %d, want 120", a.TokenUsed)
+	// Cycle-window usage, billed (multiplier-scaled): 120@1.0 + 200@2.0 = 320 tokens, 5 calls.
+	if a.TokenUsed != 320 {
+		t.Errorf("a.TokenUsed = %d, want 320 (120@1.0 + 200@2.0)", a.TokenUsed)
 	}
-	if a.CallUsed != 3 {
-		t.Errorf("a.CallUsed = %d, want 3", a.CallUsed)
+	if a.CallUsed != 5 {
+		t.Errorf("a.CallUsed = %d, want 5 (3+2)", a.CallUsed)
 	}
 	if a.QuotaTokenTotalLimit != 1000 {
 		t.Errorf("a.QuotaTokenTotalLimit = %d, want 1000", a.QuotaTokenTotalLimit)
