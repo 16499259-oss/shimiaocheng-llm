@@ -454,7 +454,7 @@
                 <div class="form-group">
                     <label for="new-quota-week-start">周限额开始时间</label>
                     <input type="datetime-local" id="new-quota-week-start" step="1">
-                    <small>服务器时区 Asia/Shanghai (UTC+8)。留空则默认以当前时间起算固定 7 天循环；设定后开启固定 7 天循环并按该锚点归零本周已用 Token。</small>
+                    <small>服务器时区 Asia/Shanghai (UTC+8)。留空则默认以当前时间起算固定 7 天循环；设定后开启固定 7 天循环（不清零本周已用 Token，周期到了自动清零）。</small>
                 </div>
                 <div class="form-group">
                     <label for="new-expiry-type">有效期</label>
@@ -541,7 +541,7 @@
                 <div class="form-group">
                     <label for="update-quota-week-start">周限额开始时间</label>
                     <input type="datetime-local" id="update-quota-week-start" step="1">
-                    <small>服务器时区 Asia/Shanghai (UTC+8)。设定后清零本周已用 Token 并开启固定 7 天循环。</small>
+                    <small>服务器时区 Asia/Shanghai (UTC+8)。设定后开启固定 7 天循环（不清零本周已用 Token，周期到了自动清零）。</small>
                 </div>
                 <div class="form-group"><label for="update-status">状态</label><select id="update-status"><option value="">不修改</option><option value="active">启用</option><option value="disabled">禁用</option></select></div>
                 <div class="form-group"><label><input type="checkbox" id="update-regenerate-key"> 重新生成 Key</label></div>
@@ -655,7 +655,7 @@
                 <div class="form-group">
                     <label for="batch-week-start-input">周开始时间</label>
                     <input type="datetime-local" id="batch-week-start-input" step="1">
-                    <small>服务器时区 Asia/Shanghai (UTC+8)。将统一应用到所有选中用户并清零各自本周已用 Token。</small>
+                    <small>服务器时区 Asia/Shanghai (UTC+8)。将统一应用到所有选中用户（不清零本周已用 Token，由周期自然清零）。</small>
                 </div>
                 <button type="submit" class="btn btn-primary btn-block">应用</button>
             </form>

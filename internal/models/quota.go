@@ -130,9 +130,13 @@ func alignedCycleStartUTC(weekStart, now time.Time) time.Time {
 }
 
 // SetQuotaWeekStart writes the fixed phase anchor week_start (RFC3339 UTC; ""
-// means clear → use now). Per product decision it ALSO zeroes the current
-// weekly Token usage and aligns week_cycle_start to the cycle containing now,
-// giving the user a fresh 7-day cycle starting from the chosen anchor.
+// means clear → use now). It re-anchors week_cycle_start to the cycle containing
+// now so the 7-day phase shifts, but it does NOT touch quota_token_week_used:
+// the in-progress weekly usage carries over and is naturally reset to 0 only
+// when the new cycle boundary is crossed (see AtomicDeductQuota's
+// CASE WHEN week_cycle_start <> newCycle). Clearing usage on every anchor change
+// was a hidden side-effect that surprised admins; the cycle boundary is the
+// single source of truth for resets.
 func SetQuotaWeekStart(db *sql.DB, userID int64, startRFC3339 string) error {
 	var t time.Time
 	var err error
@@ -148,7 +152,7 @@ func SetQuotaWeekStart(db *sql.DB, userID int64, startRFC3339 string) error {
 	cycleStart := alignedCycleStartUTC(t, time.Now().UTC())
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err = db.Exec(
-		`UPDATE quotas SET week_start = ?, quota_token_week_used = 0, week_cycle_start = ?, updated_at = ? WHERE user_id = ?`,
+		`UPDATE quotas SET week_start = ?, week_cycle_start = ?, updated_at = ? WHERE user_id = ?`,
 		t.Format(time.RFC3339), cycleStart.Format(time.RFC3339), now, userID,
 	)
 	if err != nil {
