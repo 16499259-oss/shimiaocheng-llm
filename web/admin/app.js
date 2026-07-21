@@ -792,7 +792,7 @@ async function loadUsers() {
             const weekStartCell = u.week_start ? formatDateSH(u.week_start) : '—';
             return `<tr${rowClass}>
                 <td><input type="checkbox" class="row-select" value="${u.id}"></td>
-                <td>${u.id}</td><td>${escapeHtml(u.username)}</td><td><code>${escapeHtml(u.sub_key_preview)}</code></td>
+                <td>${u.id}</td><td>${escapeHtml(u.username)}</td>
                 <td>${quota5h}</td><td>${quotaTotal}</td><td class="token-cell">${tokenCell}</td><td class="token-cell">${token5hCell}</td><td class="token-cell">${tokenWeekCell}</td><td class="token-cell">${weekStartCell}</td><td>${routeHtml}</td><td>${formatBodySize(u.max_body_size)}</td><td>${u.max_concurrency > 0 ? u.max_concurrency : '不限'}</td><td>${expiryHtml}</td><td>${s}</td><td>${formatDate(u.created_at)}</td>
                 <td><div class="btn-group">
                     <button class="btn btn-outline btn-sm" onclick="extendUser(${u.id},'${escapeAttr(u.username)}','${escapeAttr(u.expires_at || '')}')">🕐 延期</button>
