@@ -73,6 +73,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("GET /api/calls/models", h.ListCallModels)
 	adminMux.HandleFunc("POST /api/users/{id}/extend", h.ExtendUser)
 	adminMux.HandleFunc("POST /api/users/{id}/reset-usage", h.ResetUsage)
+	adminMux.HandleFunc("POST /api/users/batch-week-start", h.BatchSetWeekStart)
 	adminMux.HandleFunc("GET /api/overview", h.GetOverview)
 	adminMux.HandleFunc("GET /api/multipliers", h.ListMultipliers)
 	adminMux.HandleFunc("POST /api/multipliers", h.CreateMultiplier)

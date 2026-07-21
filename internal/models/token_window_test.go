@@ -41,15 +41,17 @@ func TestAtomicDeductQuota_Token5hWindowBlocksWhenExhausted(t *testing.T) {
 }
 
 // TestAtomicDeductQuota_TokenWeekWindowBlocksWhenExhausted verifies the weekly
-// (rolling-7d) Token gate blocks when the weekly used has reached its cap, with
-// a FRESH week_start so the lazy reset does NOT kick in.
+// Token gate blocks when the weekly used has reached its cap, with the fixed
+// phase anchor (week_start) and the current cycle start (week_cycle_start) both
+// set to now so the cyclic reset does NOT kick in.
 func TestAtomicDeductQuota_TokenWeekWindowBlocksWhenExhausted(t *testing.T) {
 	database := newModelsTestDB(t)
 	userID := seedTokenWindowUser(t, database)
 
+	now := time.Now().Format(time.RFC3339)
 	if _, err := database.Conn.Exec(
-		`UPDATE quotas SET quota_token_week_limit = 10, quota_token_week_used = 10, week_start = ? WHERE user_id = ?`,
-		time.Now().Format(time.RFC3339), userID,
+		`UPDATE quotas SET quota_token_week_limit = 10, quota_token_week_used = 10, week_start = ?, week_cycle_start = ? WHERE user_id = ?`,
+		now, now, userID,
 	); err != nil {
 		t.Fatalf("seed week token window: %v", err)
 	}
@@ -114,19 +116,24 @@ func TestAtomicDeductQuota_ZeroTokenLimitsDoNotBlock(t *testing.T) {
 	}
 }
 
-// TestAtomicDeductQuota_WeekWindowLazyReset verifies the rolling-7d bucket reset:
-// when week_start predates now-7d, the gate's CASE zeroes quota_token_week_used
-// and bumps week_start to ~now, so the request is allowed (and the stale used
-// value is cleared rather than blocking). This is the key correction over the
-// buggy design-doc SQL that added effectiveCalls into the weekly Token column.
-func TestAtomicDeductQuota_WeekWindowLazyReset(t *testing.T) {
+// TestAtomicDeductQuota_WeekWindowCyclicReset verifies the fixed-phase weekly
+// bucket reset: when the admin-set anchor (week_start) is in the past and the
+// stored cycle start (week_cycle_start) no longer matches the cycle containing
+// now, the gate zeroes quota_token_week_used and advances week_cycle_start to
+// the current cycle. Crucially, the FIXED anchor week_start is NEVER bumped —
+// that is what makes the bucket recur every 7 days from the admin-set phase
+// instead of rolling.
+func TestAtomicDeductQuota_WeekWindowCyclicReset(t *testing.T) {
 	database := newModelsTestDB(t)
 	userID := seedTokenWindowUser(t, database)
 
-	// week_start = 8 days ago (stale), weekly used = 9, cap = 10.
+	anchor := time.Now().Add(-8 * 24 * time.Hour) // fixed phase anchor, 8 days ago
+	anchorStr := anchor.Format(time.RFC3339)
+	// Seed: anchor 8 days ago, the stored cycle start also 8 days ago (so it is
+	// stale vs the cycle containing now), weekly used = 9, cap = 10.
 	if _, err := database.Conn.Exec(
-		`UPDATE quotas SET quota_token_week_limit = 10, quota_token_week_used = 9, week_start = ? WHERE user_id = ?`,
-		time.Now().Add(-8*24*time.Hour).Format(time.RFC3339), userID,
+		`UPDATE quotas SET quota_token_week_limit = 10, quota_token_week_used = 9, week_start = ?, week_cycle_start = ? WHERE user_id = ?`,
+		anchorStr, anchorStr, userID,
 	); err != nil {
 		t.Fatalf("seed stale week window: %v", err)
 	}
@@ -136,7 +143,7 @@ func TestAtomicDeductQuota_WeekWindowLazyReset(t *testing.T) {
 		t.Fatalf("AtomicDeductQuota: %v", err)
 	}
 	if !ok {
-		t.Fatalf("expected deduction allowed after stale weekly window was lazily reset")
+		t.Fatalf("expected deduction allowed after the stale weekly cycle was reset")
 	}
 
 	q, err := models.GetQuota(database.Conn, userID)
@@ -144,15 +151,22 @@ func TestAtomicDeductQuota_WeekWindowLazyReset(t *testing.T) {
 		t.Fatalf("GetQuota: %v", err)
 	}
 	if q.QuotaTokenWeekUsed != 0 {
-		t.Fatalf("expected weekly used reset to 0 after lazy reset, got %d", q.QuotaTokenWeekUsed)
+		t.Fatalf("expected weekly used reset to 0 after cyclic reset, got %d", q.QuotaTokenWeekUsed)
 	}
-	parsed, perr := time.Parse(time.RFC3339, q.WeekStart)
-	if perr != nil {
-		t.Fatalf("week_start not RFC3339 after bump: %v (value=%q)", perr, q.WeekStart)
+	// The fixed anchor must remain exactly the seeded value (NOT bumped to now).
+	if q.WeekStart != anchorStr {
+		t.Fatalf("week_start must stay the fixed anchor, got %q want %q", q.WeekStart, anchorStr)
 	}
-	// The bumped anchor must be recent (within 60s of now) — NOT the stale 8-day-old value.
-	if time.Since(parsed) > 60*time.Second || parsed.After(time.Now().Add(5*time.Second)) {
-		t.Fatalf("expected week_start bumped to ~now, got %q (now=%s)", q.WeekStart, time.Now().Format(time.RFC3339))
+	// week_cycle_start must have advanced to the cycle containing now.
+	nowUTC := time.Now().UTC()
+	k := int64(nowUTC.Sub(anchor) / (7 * 24 * time.Hour))
+	expectedCycle := anchor.Add(time.Duration(k) * 7 * 24 * time.Hour).Format(time.RFC3339)
+	var gotCycle string
+	if err := database.Conn.QueryRow(`SELECT week_cycle_start FROM quotas WHERE user_id = ?`, userID).Scan(&gotCycle); err != nil {
+		t.Fatalf("read week_cycle_start: %v", err)
+	}
+	if gotCycle != expectedCycle {
+		t.Fatalf("week_cycle_start advanced to wrong cycle: got %q want %q", gotCycle, expectedCycle)
 	}
 	// Sanity: the 5h count counters still advanced for this request.
 	if q.Quota5hUsed != 1 || q.QuotaTotalUsed != 1 {

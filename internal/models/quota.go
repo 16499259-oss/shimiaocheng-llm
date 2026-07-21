@@ -20,7 +20,7 @@ type Quota struct {
 	QuotaToken5hUsed     int             `json:"quota_token_5h_used"`     // Token used within current 5h window
 	QuotaTokenWeekLimit  int             `json:"quota_token_week_limit"`  // 0 = unlimited (Token cap within rolling 7d)
 	QuotaTokenWeekUsed   int             `json:"quota_token_week_used"`   // Token used within rolling 7d bucket
-	WeekStart            string          `json:"week_start"`              // rolling-7d bucket anchor
+	WeekStart            string          `json:"week_start"`              // fixed phase anchor for the 7-day weekly Token bucket (admin-settable; never bumped by the gate)
 	MonthStart           string          `json:"month_start"`             // rolling-30d (month) Token bucket anchor
 	WindowStart          string          `json:"window_start"`
 	UpdatedAt            string          `json:"updated_at"`
@@ -107,29 +107,94 @@ func GetQuota(db *sql.DB, userID int64) (*Quota, error) {
 //
 // CRITICAL (主理人齐活林纠正): the Token columns (total / 5h / weekly) are
 // NEVER accumulated inside this gate's SET clause. The gate only performs the
-// atomic checks and, for the weekly bucket, a lazy "window expired → reset to 0
-// + bump week_start" (CASE WHEN week_start < now-7d). All Token accounting is
-// deferred to AddTokenUsage, which runs after a successful response. Accruing
+// atomic checks and, for the weekly bucket, a lazy "cycle changed → reset used
+// to 0 + re-anchor week_cycle_start to the new 7-day cycle (aligned to the
+// fixed admin-set anchor week_start)" — see AtomicDeductQuota's UPDATE below
+// (CASE WHEN week_cycle_start <> newCycle). The old rolling behaviour that
+// bumped week_start to now is gone: week_start is now a FIXED phase anchor and
+// is never modified by the gate. All Token accounting is deferred to
+// AddTokenUsage, which runs after a successful response. Accruing
 // effectiveCalls (a CALL count) into a Token column would be a category error
 // and over-count Token usage.
 //
+// alignedCycleStartUTC returns the start of the 7-day cycle containing now,
+// given a fixed phase anchor weekStart (both interpreted as UTC instants).
+// If now is before weekStart, the cycle starts at weekStart itself. This makes
+// the weekly bucket recur every 7 days from the admin-set anchor.
+func alignedCycleStartUTC(weekStart, now time.Time) time.Time {
+	if now.Before(weekStart) {
+		return weekStart
+	}
+	k := int64(now.Sub(weekStart) / (7 * 24 * time.Hour))
+	return weekStart.Add(time.Duration(k) * 7 * 24 * time.Hour)
+}
+
+// SetQuotaWeekStart writes the fixed phase anchor week_start (RFC3339 UTC; ""
+// means clear → use now). Per product decision it ALSO zeroes the current
+// weekly Token usage and aligns week_cycle_start to the cycle containing now,
+// giving the user a fresh 7-day cycle starting from the chosen anchor.
+func SetQuotaWeekStart(db *sql.DB, userID int64, startRFC3339 string) error {
+	var t time.Time
+	var err error
+	if startRFC3339 == "" {
+		t = time.Now().UTC()
+	} else {
+		t, err = time.Parse(time.RFC3339, startRFC3339)
+		if err != nil {
+			return fmt.Errorf("invalid week_start %q: %w", startRFC3339, err)
+		}
+	}
+	t = t.UTC()
+	cycleStart := alignedCycleStartUTC(t, time.Now().UTC())
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = db.Exec(
+		`UPDATE quotas SET week_start = ?, quota_token_week_used = 0, week_cycle_start = ?, updated_at = ? WHERE user_id = ?`,
+		t.Format(time.RFC3339), cycleStart.Format(time.RFC3339), now, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("set quota week start: %w", err)
+	}
+	return nil
+}
+
 // Returns true if the deduction succeeded, false if quota was insufficient.
 func AtomicDeductQuota(db *sql.DB, userID int64, effectiveCalls int) (bool, error) {
-	// Weekly rolling-7-day bucket boundary: rows whose week_start is older than
-	// this cutoff are lazily reset (used → 0, anchor → now) inside the atomic
-	// UPDATE below. String ordering on RFC3339 timestamps equals chronological
-	// ordering, so the comparison is well-defined for both the migration default
-	// (SQLite datetime('now')) and the local-now values written by CreateUser /
-	// the gate itself.
-	weekCutoff := time.Now().Add(-7 * 24 * time.Hour).Format(time.RFC3339)
+	// Weekly bucket (fixed phase anchor): week_start is the admin-set anchor and
+	// is NEVER bumped by the gate. We compute the start of the 7-day cycle
+	// containing now from that anchor and compare it against week_cycle_start
+	// (the cycle the accumulated quota_token_week_used belongs to). When they
+	// differ, the gate resets the weekly Token usage to 0 and re-anchors
+	// week_cycle_start to the new cycle — the bucket recurs every 7 days from the
+	// anchor instead of the old rolling "bump to now" behaviour. String ordering
+	// on RFC3339 timestamps equals chronological ordering, so week_cycle_start <>
+	// newCycle is well-defined for both the migration default and UTC values.
 	monthCutoff := time.Now().Add(-30 * 24 * time.Hour).Format(time.RFC3339)
 	nowTime := time.Now().Format(time.RFC3339)
+
+	// Read the fixed phase anchor to compute the current 7-day cycle start.
+	// week_start is changed only by the admin (SetQuotaWeekStart), so there is
+	// no race between this read and the UPDATE below; a stale read simply
+	// self-heals on the next request.
+	var weekStartStr string
+	if err := db.QueryRow(`SELECT week_start FROM quotas WHERE user_id = ?`, userID).Scan(&weekStartStr); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, fmt.Errorf("read week_start: %w", err)
+	}
+	nowUTC := time.Now().UTC()
+	weekStart := nowUTC
+	if parsed, perr := time.Parse(time.RFC3339, weekStartStr); perr == nil && !parsed.IsZero() {
+		weekStart = parsed
+	}
+	newCycle := alignedCycleStartUTC(weekStart, nowUTC).Format(time.RFC3339)
+
 	result, err := db.Exec(
 		`UPDATE quotas
 		 SET quota_5h_used = quota_5h_used + ?,
 		     quota_total_used = quota_total_used + ?,
-		     quota_token_week_used = CASE WHEN week_start < ? THEN 0 ELSE quota_token_week_used END,
-		     week_start = CASE WHEN week_start < ? THEN ? ELSE week_start END,
+		     quota_token_week_used = CASE WHEN week_cycle_start <> ? THEN 0 ELSE quota_token_week_used END,
+		     week_cycle_start = CASE WHEN week_cycle_start <> ? THEN ? ELSE week_cycle_start END,
 		     quota_token_total_used = CASE WHEN month_start < ? THEN 0 ELSE quota_token_total_used END,
 		     month_start = CASE WHEN month_start < ? THEN ? ELSE month_start END,
 		     updated_at = ?
@@ -138,17 +203,17 @@ func AtomicDeductQuota(db *sql.DB, userID int64, effectiveCalls int) (bool, erro
 		   AND quota_total_used + ? <= quota_total_limit
 		   AND (quota_token_total_limit = 0 OR (CASE WHEN month_start < ? THEN 0 ELSE quota_token_total_used END) < quota_token_total_limit)
 		   AND (quota_token_5h_limit = 0 OR quota_token_5h_used < quota_token_5h_limit)
-		   AND (quota_token_week_limit = 0 OR (CASE WHEN week_start < ? THEN 0 ELSE quota_token_week_used END) < quota_token_week_limit)`,
+		   AND (quota_token_week_limit = 0 OR (CASE WHEN week_cycle_start <> ? THEN 0 ELSE quota_token_week_used END) < quota_token_week_limit)`,
 		effectiveCalls, effectiveCalls, // SET quota_5h_used, quota_total_used
-		weekCutoff,         // SET quota_token_week_used CASE — reset判定
-		weekCutoff, nowTime, // SET week_start CASE — reset判定 + bump 值
-		monthCutoff,        // SET quota_token_total_used CASE — reset判定
+		newCycle,            // SET quota_token_week_used CASE — reset判定
+		newCycle, newCycle,  // SET week_cycle_start CASE — reset判定 + 新周期起点
+		monthCutoff,         // SET quota_token_total_used CASE — reset判定
 		monthCutoff, nowTime, // SET month_start CASE — reset判定 + bump 值
 		nowTime,            // SET updated_at
 		userID,             // WHERE user_id
 		effectiveCalls, effectiveCalls, // WHERE 次数闸门 (5h / total)
 		monthCutoff,        // WHERE 月 token 闸门 CASE 判定
-		weekCutoff,         // WHERE 周 token 闸门 CASE 判定
+		newCycle,           // WHERE 周 token 闸门 CASE 判定
 	)
 	if err != nil {
 		return false, fmt.Errorf("atomic deduct quota: %w", err)
@@ -303,10 +368,11 @@ func ResetQuotaUsage(db *sql.DB, userID int64, now string) error {
 		     quota_token_week_used = 0,
 		     quota_token_total_used = 0,
 		     week_start = ?,
+		     week_cycle_start = ?,
 		     month_start = ?,
 		     updated_at = ?
 		 WHERE user_id = ?`,
-		now, now, now, now, userID,
+		now, now, now, now, now, userID,
 	)
 	if err != nil {
 		return fmt.Errorf("reset quota usage: %w", err)

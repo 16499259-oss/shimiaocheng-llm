@@ -408,6 +408,24 @@ func RunMigrations(conn *DB) error {
 			return fmt.Errorf("migration backfill quotas.week_start failed: %w", err)
 		}
 	}
+	// ── week_cycle_start (2026-07-21) ──
+	// Current 7-day cycle start for the weekly Token bucket. The fixed phase
+	// anchor is week_start (admin-settable); this column records which cycle
+	// the accumulated quota_token_week_used belongs to, so the gate can reset
+	// it exactly once when now crosses into the next cycle (aligned to the
+	// fixed anchor) instead of the old "bump anchor to now" rolling behaviour.
+	if !columnExists(conn, "quotas", "week_cycle_start") {
+		if _, err := conn.Conn.Exec(
+			`ALTER TABLE quotas ADD COLUMN week_cycle_start TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("migration add column quotas.week_cycle_start failed: %w", err)
+		}
+		if _, err := conn.Conn.Exec(
+			`UPDATE quotas SET week_cycle_start = week_start WHERE week_cycle_start = ''`,
+		); err != nil {
+			return fmt.Errorf("migration backfill quotas.week_cycle_start failed: %w", err)
+		}
+	}
 	// ── Month-window anchor (rolling 30-day Token bucket) ──
 	// month_start: the rolling-30-day bucket anchor for the cumulative Token cap
 	// (quota_token_total_used). Added symmetrically to week_start so the gate's
