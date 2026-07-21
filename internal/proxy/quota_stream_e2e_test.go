@@ -5,8 +5,9 @@
 //     (quota_token_total_used) is multiplier-scaled while call_logs keeps raw usage.
 //   - Feature B: call-count limit — firing N requests must exhaust the 5h window so
 //     request N+1 returns 429 (type=quota_exceeded); effectiveCalls = ceil(multiplier)
-//     is what is deducted; a legacy count limit of 0 locks the user out; and when
-//     BOTH dimensions are exhausted the proxy reports type=token_quota_exceeded.
+//     is what is deducted; a count limit of 0 means UNLIMITED (since 2026-07-21,
+//     unified with the Token cap); and when BOTH dimensions are exhausted the proxy
+//     reports type=token_quota_exceeded.
 //
 // These complement handler_token_test.go (which covers sync token accounting and the
 // basic Token/count 429 classification) by exercising the STREAM path and the full
@@ -341,12 +342,11 @@ func TestHandler_ServeHTTP_BothQuotasExhaustedReportsTokenType(t *testing.T) {
 	}
 }
 
-// TestHandler_ServeHTTP_CountLimitZeroLegacyBlocks verifies Feature B's lockout at
-// the proxy edge: a legacy row with quota_5h_limit = 0 (which the admin edit API now
-// rejects, but which may already exist in the DB) must produce a 429 of type
-// quota_exceeded — the gate treats 0 as exhausted, distinct from the Token cap where
-// 0 means unlimited.
-func TestHandler_ServeHTTP_CountLimitZeroLegacyBlocks(t *testing.T) {
+// TestHandler_ServeHTTP_CountLimitZeroUnlimitedAllows verifies the post-2026-07-21
+// semantics flip at the proxy edge: a count quota limit of 0 now means UNLIMITED
+// (previously it locked the user out). The gate must let the request through; the
+// unreachable upstream then fails the forward, but it must NOT be a quota 429.
+func TestHandler_ServeHTTP_CountLimitZeroUnlimitedAllows(t *testing.T) {
 	database := openProxyTestDB(t)
 	subKey, userID := newTokenTestUser(t, database, "legzero", "legzero")
 
@@ -356,21 +356,16 @@ func TestHandler_ServeHTTP_CountLimitZeroLegacyBlocks(t *testing.T) {
 		t.Fatalf("set 5h limit=0: %v", err)
 	}
 
-	// The quota gate fails before any upstream is contacted, so the helper's
-	// unreachable endpoint is fine.
+	// The quota gate must NOT block (0 = unlimited). The request reaches the
+	// unreachable upstream and fails there, but it must not be a quota 429.
 	rec := doTokenQuotaRequest(t, database, subKey)
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("expected 429 for legacy 5h limit=0, got %d (body=%s)", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		Error struct {
-			Type string `json:"type"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode 429 body: %v", err)
-	}
-	if resp.Error.Type != "quota_exceeded" {
-		t.Fatalf("expected type=quota_exceeded for legacy count lockout, got %q (body=%s)", resp.Error.Type, rec.Body.String())
+	if rec.Code == http.StatusTooManyRequests {
+		var resp struct {
+			Error struct {
+				Type string `json:"type"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		t.Fatalf("count limit 0 must be unlimited, but got 429 (type=%q, body=%s)", resp.Error.Type, rec.Body.String())
 	}
 }

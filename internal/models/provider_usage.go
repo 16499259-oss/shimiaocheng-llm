@@ -131,11 +131,14 @@ type ProviderAllocation struct {
 // provider. It SUMs quota_token_total_limit (>0 only) and quota_total_limit
 // (>0 only) from all active, non-expired users whose fixed_provider matches.
 //
-// 0-semantics (PR #14, intentionally different between dimensions):
+// 0-semantics (unified since 2026-07-21: both dimensions treat 0 as
+// unlimited, matching the self-service panel which hides a row whose cap is 0):
 //   - Token: quota_token_total_limit = 0 → unlimited (excluded from
 //     allocated_tokens SUM, counted in unlimited_user_count).
-//   - Call:  quota_total_limit = 0 → invalid/locked (excluded from
-//     allocated_calls SUM, NOT counted in unlimited_user_count).
+//   - Call:  quota_total_limit = 0 → unlimited (excluded from
+//     allocated_calls SUM, NOT counted in unlimited_user_count). An unlimited
+//     call-count user is metered only by Token usage, so it correctly does not
+//     occupy any call-count allocation on the upstream.
 func GetProviderAllocation(db *sql.DB, providerSlug string) (*ProviderAllocation, error) {
 	var a ProviderAllocation
 	err := db.QueryRow(`
@@ -169,7 +172,7 @@ type ProviderAllocationUser struct {
 	CreatedAt            string `json:"created_at"`
 	ExpiresAt            string `json:"expires_at"`
 	QuotaTokenTotalLimit int64  `json:"quota_token_total_limit"` // 0 = unlimited (token dim)
-	QuotaTotalLimit      int64  `json:"quota_total_limit"`       // 0 = locked/invalid (call dim)
+	QuotaTotalLimit      int64  `json:"quota_total_limit"`       // 0 = unlimited (call dim, since 2026-07-21)
 	TokenUsed            int64  `json:"token_used"`              // within cycle window
 	CallUsed             int64  `json:"call_used"`               // within cycle window
 }
@@ -433,20 +436,20 @@ type ProviderUsageView struct {
 	TokenLow          bool   `json:"token_low"`    // remaining < threshold -> flag red
 	CallLow           bool   `json:"call_low"`
 	// ── V3: Allocation (dual-column) ──
-	AllocatedTokens    int64  `json:"allocated_tokens"`
-	AllocatedCalls     int64  `json:"allocated_calls"`
-	UnlimitedUserCount int64  `json:"unlimited_user_count"`
-	AllocationLow      bool   `json:"allocation_low"` // allocated exceeds threshold
+	AllocatedTokens    int64 `json:"allocated_tokens"`
+	AllocatedCalls     int64 `json:"allocated_calls"`
+	UnlimitedUserCount int64 `json:"unlimited_user_count"`
+	AllocationLow      bool  `json:"allocation_low"` // allocated exceeds threshold
 	// ── V3.5: Auto (route_mode='auto') shared-pool attribution ──
 	// These make "已分配" reflect the real pressure auto traffic puts on each
 	// upstream, without double-counting (see GetAutoUserAllocationByProvider).
-	AutoAllocatedTokens int64 `json:"auto_allocated_tokens"` // attributed auto token quota (by usage share)
-	AutoAllocatedCalls  int64 `json:"auto_allocated_calls"`  // attributed auto call quota
-	AutoTokenUsage      int64 `json:"auto_token_usage"`      // actual billed tokens from auto users in window
-	AutoCallUsage       int64 `json:"auto_call_usage"`       // actual calls from auto users in window
-	CycleStart         string `json:"cycle_start"`          // current cycle start DATE
-	CycleEnd           string `json:"cycle_end"`            // current cycle end DATE (exclusive)
-	CycleDaysRemaining int    `json:"cycle_days_remaining"` // days left in cycle
+	AutoAllocatedTokens int64  `json:"auto_allocated_tokens"` // attributed auto token quota (by usage share)
+	AutoAllocatedCalls  int64  `json:"auto_allocated_calls"`  // attributed auto call quota
+	AutoTokenUsage      int64  `json:"auto_token_usage"`      // actual billed tokens from auto users in window
+	AutoCallUsage       int64  `json:"auto_call_usage"`       // actual calls from auto users in window
+	CycleStart          string `json:"cycle_start"`           // current cycle start DATE
+	CycleEnd            string `json:"cycle_end"`             // current cycle end DATE (exclusive)
+	CycleDaysRemaining  int    `json:"cycle_days_remaining"`  // days left in cycle
 }
 
 // IsLowBalance is the single source of truth for low-balance detection.

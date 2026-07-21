@@ -213,8 +213,8 @@ func (h *Handler) HandleGetProviderAllocation(w http.ResponseWriter, r *http.Req
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"data":         details,
-		"cycle_start":  cycleStart,
+		"data":          details,
+		"cycle_start":   cycleStart,
 		"provider_name": p.Name,
 	})
 }

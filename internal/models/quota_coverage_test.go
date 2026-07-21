@@ -6,8 +6,8 @@
 // These tests target coverage gaps left by quota_test.go / quota_token_test.go:
 //   - total-window exhaustion blocks while 5h has head-room (and vice-versa is
 //     already covered by TestAtomicDeductQuota_FiveHourExhaustedBlocks)
-//   - a legacy 5h limit of 0 is treated as "exhausted" and locks the user out
-//     (deliberately different from the Token cap where 0 = unlimited)
+//   - a COUNT quota limit of 0 means UNLIMITED (since 2026-07-21, unified with
+//     the Token cap where 0 = unlimited) — no longer a lockout
 //   - audit L4: an admin can lower quota_token_total_limit BELOW the accumulated
 //     usage, which must block the next request (self-consistent)
 //   - effectiveCalls (ceil(multiplier)) is deducted from BOTH counters at once
@@ -53,18 +53,16 @@ func TestAtomicDeductQuota_TotalExhaustedBlocks(t *testing.T) {
 	}
 }
 
-// TestAtomicDeductQuota_FiveHourLimitZeroLegacyBlocks verifies Feature B's
-// deliberate asymmetry with the Token cap: a COUNT quota limit of 0 (e.g. a legacy
-// row that predates the admin 0-rejection guard) is treated by the gate as
-// "already exhausted" and silently locks the user out. The gate condition
-// `quota_5h_used + ? <= quota_5h_limit` can never hold for a positive deduction
-// when the limit is 0. (Contrast: the Token cap uses `limit = 0 OR used < limit`,
-// so 0 means unlimited there.)
-func TestAtomicDeductQuota_FiveHourLimitZeroLegacyBlocks(t *testing.T) {
+// TestAtomicDeductQuota_CountLimitZeroUnlimited verifies a COUNT quota limit of
+// 0 now means "call-count not restricted": the gate opens unconditionally via
+// `(quota_5h_limit = 0 OR used + calls <= limit)`. (Since 2026-07-21 the count
+// cap is unified with the Token cap, where 0 also means unlimited; the old
+// "0 = legacy lockout" behaviour was intentionally removed.)
+func TestAtomicDeductQuota_CountLimitZeroUnlimited(t *testing.T) {
 	database := newModelsTestDB(t)
 	userID := newQuotaUser(t, database, 1000, 1000) // generous count limits
 
-	// Force a degenerate 5h limit of 0 (legacy / pre-guard data).
+	// Force a degenerate 5h limit of 0.
 	if _, err := database.Conn.Exec(
 		`UPDATE quotas SET quota_5h_limit = 0 WHERE user_id = ?`, userID,
 	); err != nil {
@@ -75,8 +73,8 @@ func TestAtomicDeductQuota_FiveHourLimitZeroLegacyBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AtomicDeductQuota returned error: %v", err)
 	}
-	if ok {
-		t.Fatalf("expected deduction blocked when 5h limit=0 (legacy lockout)")
+	if !ok {
+		t.Fatalf("expected deduction ALLOWED when 5h limit=0 (unlimited)")
 	}
 }
 

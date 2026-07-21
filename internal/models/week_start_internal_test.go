@@ -17,7 +17,7 @@ func TestAlignedCycleStartUTC(t *testing.T) {
 		want time.Time
 	}{
 		{"now equals anchor", base, base},
-		{"same-day (k=0)", base.Add(3 * 24 * time.Hour), base},          // +3d → still cycle [anchor, anchor+7d)
+		{"same-day (k=0)", base.Add(3 * 24 * time.Hour), base}, // +3d → still cycle [anchor, anchor+7d)
 		{"one cycle later (k=1)", base.Add(8 * 24 * time.Hour), base.Add(7 * 24 * time.Hour)},
 		{"cycle boundary (exactly +7d)", base.Add(7 * 24 * time.Hour), base.Add(7 * 24 * time.Hour)},
 		{"two cycles later (k=2)", base.Add(15 * 24 * time.Hour), base.Add(14 * 24 * time.Hour)},
@@ -27,9 +27,9 @@ func TestAlignedCycleStartUTC(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := alignedCycleStartUTC(base, c.now)
+			got := AlignedCycleStartUTC(base, c.now)
 			if !got.Equal(c.want) {
-				t.Fatalf("alignedCycleStartUTC(%v, %v) = %v, want %v", base, c.now, got, c.want)
+				t.Fatalf("AlignedCycleStartUTC(%v, %v) = %v, want %v", base, c.now, got, c.want)
 			}
 		})
 	}

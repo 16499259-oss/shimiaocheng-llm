@@ -44,7 +44,7 @@ type gatewayOpts struct {
 	extra            map[string]string
 	endpointOverride string
 	totalLimit       int  // quota total limit; <=0 means default 100000
-	quotaExhausted   bool // when true, insert quota_total_limit=0 (immediately exhausted)
+	quotaExhausted   bool // when true, seed quota_total_limit=N with quota_total_used=N (genuinely exhausted)
 	upstreamH        http.HandlerFunc
 }
 
@@ -120,16 +120,18 @@ func newTestGateway(t *testing.T, opts gatewayOpts) (*httptest.Server, string) {
 	if totalLimit <= 0 {
 		totalLimit = 100000
 	}
-	// An explicit exhausted state (quota_total_limit = 0) cannot be expressed
-	// via totalLimit alone, because 0 is also the zero-value that means
-	// "use the default". quotaExhausted makes the intent unambiguous.
+	totalUsed := 0
+	// Genuinely exhaust the call-count quota so the gate blocks: a small
+	// positive limit with used == limit. Count limit 0 means UNLIMITED since
+	// 2026-07-21, so we can no longer use 0 to simulate exhaustion.
 	if opts.quotaExhausted {
-		totalLimit = 0
+		totalLimit = 5
+		totalUsed = 5
 	}
 	if _, err := database.Conn.Exec(
 		`INSERT INTO quotas (user_id, quota_5h_limit, quota_5h_used, quota_total_limit, quota_total_used, quota_token_total_limit, quota_token_total_used, window_start, updated_at)
-		 VALUES (1, 1000, 0, ?, 0, 0, 0, ?, ?)`,
-		totalLimit, now, now,
+		 VALUES (1, 1000, 0, ?, ?, 0, 0, ?, ?)`,
+		totalLimit, totalUsed, now, now,
 	); err != nil {
 		t.Fatalf("insert quota: %v", err)
 	}
@@ -284,7 +286,7 @@ func TestPassthrough_QuotaExceeded(t *testing.T) {
 	gw, subKey := newTestGateway(t, gatewayOpts{
 		passthroughOn:    true,
 		allowPassthrough: true,
-		quotaExhausted:   true, // immediately exhausted (quota_total_limit = 0)
+		quotaExhausted:   true, // genuinely exhausted: quota_total_limit=5, used=5
 	})
 	resp := doPassthrough(t, gw, subKey, "POST", "/mcp", "", `{}`)
 	defer resp.Body.Close()

@@ -743,8 +743,14 @@ async function loadUsers() {
         if (!data.data || data.data.length === 0) { tbody.innerHTML = '<tr><td colspan="15" class="text-center">暂无用户</td></tr>'; return; }
         const now = new Date();
         tbody.innerHTML = data.data.map(u => {
-            const quota5h = `${u.quota_5h_used} / ${u.quota_5h_limit}`;
-            const quotaTotal = `${u.quota_total_used.toLocaleString()} / ${u.quota_total_limit.toLocaleString()}`;
+            const quota5hLimit = u.quota_5h_limit || 0;
+            const quotaTotalLimit = u.quota_total_limit || 0;
+            const quota5h = quota5hLimit === 0
+                ? '<span class="infinite">无限</span>'
+                : `${u.quota_5h_used} / ${quota5hLimit}`;
+            const quotaTotal = quotaTotalLimit === 0
+                ? '<span class="infinite">无限</span>'
+                : `${u.quota_total_used.toLocaleString()} / ${quotaTotalLimit.toLocaleString()}`;
             // Cumulative Token usage cell (quota 口径). 0 cap => unlimited.
             const tokenLimit = u.quota_token_total_limit || 0;
             const tokenUsed = u.quota_token_total_used || 0;
@@ -881,8 +887,14 @@ document.getElementById('batch-week-start-form').addEventListener('submit', asyn
 async function createUser(e) {
     e.preventDefault();
     const username = document.getElementById('new-username').value.trim();
-    const q5 = parseInt(document.getElementById('new-quota-5h').value) || 100;
-    const qt = parseInt(document.getElementById('new-quota-total').value) || 10000;
+    // Call-count caps: empty or 0 means "unlimited" (stored as 0). Unlike the
+    // old default of 100/10000, leaving them blank now intentionally creates an
+    // unlimited call-count user metered only by Token usage (the self-service
+    // panel hides the call-count rows when the cap is 0).
+    const q5Raw = document.getElementById('new-quota-5h').value.trim();
+    const q5 = q5Raw === '' ? 0 : (parseInt(q5Raw) || 0);
+    const qtRaw = document.getElementById('new-quota-total').value.trim();
+    const qt = qtRaw === '' ? 0 : (parseInt(qtRaw) || 0);
     // Calculate expires_at
     const expiryType = document.getElementById('new-expiry-type').value;
     let expiresAt = '';
@@ -1013,10 +1025,13 @@ async function updateUser(e) {
     e.preventDefault();
     const id = document.getElementById('update-user-id').value;
     const body = {};
+    // Call-count caps: '' keeps the existing value; any number (including 0 =
+    // unlimited) is sent. Note: '0' is truthy as a string, so `if (q5 !== '')`
+    // correctly sends 0; '0' must NOT be skipped.
     const q5 = document.getElementById('update-quota-5h').value;
-    if (q5) body.quota_5h_limit = parseInt(q5);
+    if (q5 !== '') body.quota_5h_limit = parseInt(q5) || 0;
     const qt = document.getElementById('update-quota-total').value;
-    if (qt) body.quota_total_limit = parseInt(qt);
+    if (qt !== '') body.quota_total_limit = parseInt(qt) || 0;
     const uttRaw = document.getElementById('update-quota-token-total').value.trim();
     if (uttRaw !== '') {
         const utt = parseInt(uttRaw);
@@ -1155,11 +1170,11 @@ function openResetModal(id, username) {
     showModal('reset-usage-modal');
 }
 
-async function confirmResetUsage() {
+async function confirmResetUsage(scope) {
     const id = _resetUserId;
     closeModal('reset-usage-modal');
     try {
-        const data = await apiFetch('api/users/' + id + '/reset-usage', { method: 'POST' });
+        const data = await apiFetch('api/users/' + id + '/reset-usage?scope=' + encodeURIComponent(scope || 'all'), { method: 'POST' });
         showToast(data.message || '重置成功', 'success');
         loadUsers(); loadOverview();
     } catch (err) { showToast('重置失败: ' + err.message, 'error'); }

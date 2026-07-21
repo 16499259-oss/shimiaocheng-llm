@@ -155,9 +155,17 @@ func TestHandler_ServeHTTP_QuotaExceededReturns429(t *testing.T) {
 	subKey := auth.GenerateSubKey("qa2", 2)
 	subHash := auth.HashSubKey(subKey)
 	subPreview := auth.SubKeyPreview(subKey)
-	if _, err := models.CreateUser(database.Conn, "qa2", "pw", subHash, subPreview,
-		"user", "active", "", "auto", "", 1_000_000, 0, nil, 0, models.DefaultMaxConcurrency); err != nil { // total quota 0 -> always exceeded
+	u, err := models.CreateUser(database.Conn, "qa2", "pw", subHash, subPreview,
+		"user", "active", "", "auto", "", 1_000_000, 5, nil, 0, models.DefaultMaxConcurrency)
+	if err != nil {
 		t.Fatalf("create user: %v", err)
+	}
+	// Genuinely exhaust the total call-count quota. Count limit 0 now means
+	// UNLIMITED (since 2026-07-21), so we seed used == limit instead of using 0.
+	if _, err := database.Conn.Exec(
+		`UPDATE quotas SET quota_total_used = 5 WHERE user_id = ?`, u.ID,
+	); err != nil {
+		t.Fatalf("seed total used: %v", err)
 	}
 
 	os.Setenv("ZHIPU_API_KEY", "sk-zhipu")

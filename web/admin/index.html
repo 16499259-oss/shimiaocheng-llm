@@ -472,8 +472,8 @@
             </div>
             <form id="create-user-form">
                 <div class="form-group"><label for="new-username">用户名 *</label><input type="text" id="new-username" required placeholder="用户名"></div>
-                <div class="form-group"><label for="new-quota-5h">5h 配额上限 (默认 100)</label><input type="number" id="new-quota-5h" value="100" min="1"></div>
-                <div class="form-group"><label for="new-quota-total">总配额上限 (默认 10000)</label><input type="number" id="new-quota-total" value="10000" min="1"></div>
+                <div class="form-group"><label for="new-quota-5h">5h 调用次数上限 <small>(留空或 0 = 不限制)</small></label><input type="number" id="new-quota-5h" value="" min="0" placeholder="不限制"></div>
+                <div class="form-group"><label for="new-quota-total">总调用次数上限 <small>(留空或 0 = 不限制)</small></label><input type="number" id="new-quota-total" value="" min="0" placeholder="不限制"></div>
                 <div class="form-group"><label for="new-quota-token-total">Token 总量上限 (默认 0 = 不限制)</label><input type="number" id="new-quota-token-total" value="0" min="0" placeholder="0 = 不限制"></div>
                 <div class="form-group"><label for="new-quota-token-5h">5h Token 上限 (默认 0 = 不限制)</label><input type="number" id="new-quota-token-5h" value="0" min="0" placeholder="0 = 不限制"></div>
                 <div class="form-group"><label for="new-quota-token-week">周 Token 上限 (默认 0 = 不限制)</label><input type="number" id="new-quota-token-week" value="0" min="0" placeholder="0 = 不限制"></div>
@@ -559,8 +559,8 @@
             <div class="modal-header"><h3>编辑用户</h3><button class="modal-close" onclick="closeModal('update-user-modal')">&times;</button></div>
             <form id="update-user-form">
                 <input type="hidden" id="update-user-id">
-                <div class="form-group"><label for="update-quota-5h">5h 配额上限</label><input type="number" id="update-quota-5h" min="1"></div>
-                <div class="form-group"><label for="update-quota-total">总配额上限</label><input type="number" id="update-quota-total" min="1"></div>
+                <div class="form-group"><label for="update-quota-5h">5h 调用次数上限 <small>(留空=保留原值，0=不限制)</small></label><input type="number" id="update-quota-5h" min="0"></div>
+                <div class="form-group"><label for="update-quota-total">总调用次数上限 <small>(留空=保留原值，0=不限制)</small></label><input type="number" id="update-quota-total" min="0"></div>
                 <div class="form-group"><label for="update-quota-token-total">Token 总量上限 (0 = 不限制)</label><input type="number" id="update-quota-token-total" min="0" placeholder="0 = 不限制"></div>
                 <div class="form-group"><label for="update-quota-token-5h">5h Token 上限 (0 = 不限制)</label><input type="number" id="update-quota-token-5h" min="0" placeholder="0 = 不限制"></div>
                 <div class="form-group"><label for="update-quota-token-week">周 Token 上限 (0 = 不限制)</label><input type="number" id="update-quota-token-week" min="0" placeholder="0 = 不限制"></div>
@@ -654,19 +654,16 @@
     <div id="reset-usage-modal" class="modal hidden">
         <div class="modal-content">
             <div class="modal-header">
-                <h3>确认重置 — <span id="reset-username"></span></h3>
+                <h3>重置用量 — <span id="reset-username"></span></h3>
                 <button class="modal-close" onclick="closeModal('reset-usage-modal')">&times;</button>
             </div>
             <div style="padding:16px;">
-                <p style="color:var(--color-warning, #e6a817);font-weight:600;">⚠️ 将归零该用户的所有用量统计：</p>
-                <ul style="margin:12px 0;padding-left:20px;line-height:2;">
-                    <li>调用次数（5小时 / 累计）</li>
-                    <li>Token 用量（5小时 / 本周 / 本月）</li>
-                </ul>
-                <p style="color:var(--color-secondary);font-size:13px;">配额窗口将重启，此操作不可撤销。调用记录与审计日志不受影响。</p>
-                <div style="margin-top:20px;display:flex;gap:12px;">
+                <p style="color:var(--color-secondary);font-size:13px;margin-bottom:14px;">选择要重置的范围。配额窗口将重启，此操作不可撤销，调用记录与审计日志不受影响。</p>
+                <div style="display:flex;flex-direction:column;gap:12px;">
+                    <button class="btn btn-block" style="background:var(--color-primary,#3b82f6);color:#fff;" onclick="confirmResetUsage('calls')">🔢 仅重置调用次数（5小时 / 累计）</button>
+                    <button class="btn btn-block" style="background:var(--color-info,#0ea5e9);color:#fff;" onclick="confirmResetUsage('tokens')">🪙 仅重置 Token 用量（5小时 / 本周 / 本月）</button>
+                    <button class="btn btn-outline btn-block" onclick="confirmResetUsage('all')">重置全部用量</button>
                     <button class="btn btn-outline btn-block" onclick="closeModal('reset-usage-modal')">取消</button>
-                    <button class="btn" style="background:var(--color-warning,#e6a817);color:#fff;flex:1;" onclick="confirmResetUsage()">确认重置</button>
                 </div>
             </div>
         </div>

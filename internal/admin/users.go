@@ -286,23 +286,21 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	routeChanged := false
 
 	// Reject invalid count-quota values (audit L2 / F3):
-	//   * negative -> would permanently block the user via the atomic gate (F3)
-	//   * zero     -> the gate treats a 0 count limit as "already exhausted"
-	//                 (used + calls <= 0 can never hold for calls >= 1) and
-	//                 silently locks the user out (audit L2). Unlike the
-	//                 cumulative Token cap, where 0 means unlimited, a 0 count
-	//                 limit is NOT a valid "unlimited" value, so we reject it
-	//                 here and force the admin to send a positive integer (or
-	//                 omit the field to keep the existing value). Legacy rows
-	//                 that already hold 0 are still blocked by the gate.
+	//   * negative -> meaningless; reject.
+	//   * zero     -> UNLIMITED. Since 2026-07-21 a 0 count limit means
+	//                 "call-count not restricted" and the gate opens
+	//                 unconditionally (see internal/models/quota.go). This lets
+	//                 an admin meter a user only by Token usage. We therefore
+	//                 ACCEPT 0 here (mirroring the cumulative Token cap, where 0
+	//                 also means unlimited). Only negative values are rejected.
 	// The cumulative Token cap (quota_token_total_limit) is handled separately
 	// below: there 0 means unlimited and is allowed.
-	if req.Quota5hLimit != nil && *req.Quota5hLimit <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_5h_limit must be a positive integer (>= 1)"})
+	if req.Quota5hLimit != nil && *req.Quota5hLimit < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_5h_limit must be >= 0 (0 = 不限制)"})
 		return
 	}
-	if req.QuotaTotalLimit != nil && *req.QuotaTotalLimit <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_total_limit must be a positive integer (>= 1)"})
+	if req.QuotaTotalLimit != nil && *req.QuotaTotalLimit < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_total_limit must be >= 0 (0 = 不限制)"})
 		return
 	}
 	if req.QuotaTokenTotalLimit != nil && *req.QuotaTokenTotalLimit < 0 {
@@ -686,6 +684,11 @@ func (h *Handler) ExtendUser(w http.ResponseWriter, r *http.Request) {
 // ResetUsage handles POST /admin/api/users/{id}/reset-usage.
 // Zeroes all usage buckets (call-count + Token) and restarts every window
 // anchor. Does not touch the user's expiry date or any other field.
+//
+// An optional `?scope=` query parameter selects WHICH buckets to reset:
+//   - "calls"  → only call-count usage (5h + total) and the 5h window anchor
+//   - "tokens" → only Token usage (5h / week / month) and the Token window anchors
+//   - "all" (default, also when absent) → everything (ResetQuotaUsage)
 func (h *Handler) ResetUsage(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	userID, err := strconv.ParseInt(idStr, 10, 64)
@@ -700,23 +703,47 @@ func (h *Handler) ResetUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now()
-	if err := models.ResetQuotaUsage(h.DB, userID, now.Format(time.RFC3339)); err != nil {
-		log.Printf("ERROR: reset quota usage for user %d: %v", userID, err)
+	scope := r.URL.Query().Get("scope")
+	if scope == "" {
+		scope = "all"
+	}
+	if scope != "all" && scope != "calls" && scope != "tokens" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "scope must be one of: all, calls, tokens"})
+		return
+	}
+
+	now := time.Now().Format(time.RFC3339)
+	var resetErr error
+	var dimensions []string
+	switch scope {
+	case "calls":
+		resetErr = models.ResetCallCount(h.DB, userID, now)
+		dimensions = []string{"calls", "tokens-5h-window"}
+	case "tokens":
+		resetErr = models.ResetTokenStats(h.DB, userID, now)
+		dimensions = []string{"tokens-5h", "tokens-week", "tokens-month"}
+	default: // all
+		resetErr = models.ResetQuotaUsage(h.DB, userID, now)
+		dimensions = []string{"calls", "tokens-5h", "tokens-week", "tokens-month"}
+	}
+	if resetErr != nil {
+		log.Printf("ERROR: reset quota usage for user %d: %v", userID, resetErr)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to reset usage"})
 		return
 	}
 
 	// Audit trail.
-	auditDetail := `{"dimensions":["calls","tokens-5h","tokens-week","tokens-month"],"trigger":"manual_reset","operator":"admin"}`
+	dimJSON, _ := json.Marshal(dimensions)
+	auditDetail := fmt.Sprintf(`{"dimensions":%s,"trigger":"manual_reset","operator":"admin"}`, string(dimJSON))
 	_, _ = h.DB.Exec(
 		`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)
 		 VALUES (?, ?, ?, ?, ?)`,
-		"quota_reset", "user", strconv.FormatInt(userID, 10), auditDetail, now.Format(time.RFC3339),
+		"quota_reset", "user", strconv.FormatInt(userID, 10), auditDetail, now,
 	)
 
+	scopeLabel := map[string]string{"calls": "调用次数", "tokens": "Token 用量", "all": "全部用量"}[scope]
 	writeJSON(w, http.StatusOK, map[string]string{
-		"message": "用户 " + user.Username + " 的所有用量统计已重置",
+		"message": "用户 " + user.Username + " 的「" + scopeLabel + "」已重置",
 	})
 }
 
@@ -765,10 +792,10 @@ func (h *Handler) BatchSetWeekStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	detail, _ := json.Marshal(map[string]any{
-		"user_ids":  req.UserIDs,
+		"user_ids":   req.UserIDs,
 		"week_start": req.WeekStart,
-		"succeeded": succeeded,
-		"failed":    len(req.UserIDs) - succeeded,
+		"succeeded":  succeeded,
+		"failed":     len(req.UserIDs) - succeeded,
 	})
 	_, _ = h.DB.Exec(
 		`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)

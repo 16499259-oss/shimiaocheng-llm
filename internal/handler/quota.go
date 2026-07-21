@@ -91,6 +91,7 @@ func (h *QuotaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		QuotaTokenWeekRemaining: 0,
 		WindowResetAt:           windowStart.Format(time.RFC3339),
 		MonthResetAt:            computeMonthResetAt(quotaRecord.MonthStart),
+		WeekResetAt:             computeWeekResetAt(quotaRecord.WeekStart),
 		Status:                  user.Status,
 		// Propagate the user's account expiry to the self-service panel so the
 		// /user/ dashboard can show it (fix: user-expiry-display). An empty
@@ -147,6 +148,26 @@ func computeMonthResetAt(monthStart string) string {
 		return ""
 	}
 	return t.AddDate(0, 0, 30).Format(time.RFC3339)
+}
+
+// computeWeekResetAt derives the next reset time of the fixed-phase 7-day Token
+// bucket from the stored week_start anchor (RFC3339). It mirrors
+// computeMonthResetAt: an empty anchor yields "" so the frontend can hide the
+// field. The week_start anchor only moves when the admin changes it, so the
+// next reset is the start of the 7-day cycle containing now plus 7 days — the
+// same boundary the gate uses to lazily zero quota_token_week_used. Reusing
+// models.AlignedCycleStartUTC keeps the displayed "next reset" perfectly in
+// sync with the actual cycle boundary.
+func computeWeekResetAt(weekStart string) string {
+	if weekStart == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, weekStart)
+	if err != nil {
+		return ""
+	}
+	cycleStart := models.AlignedCycleStartUTC(t, time.Now().UTC())
+	return cycleStart.Add(7 * 24 * time.Hour).Format(time.RFC3339)
 }
 
 // sumMultipliedTokens recomputes the multiplier-inflated Token consumption for a

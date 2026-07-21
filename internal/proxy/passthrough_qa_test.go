@@ -49,7 +49,7 @@ type qaOpts struct {
 	extra            map[string]string
 	endpointOverride string
 	totalLimit       int  // quota total limit; <=0 means default 100000
-	quotaExhausted   bool // when true, force quota_total_limit = 0 (immediately exhausted)
+	quotaExhausted   bool // when true, seed quota_total_limit=N with quota_total_used=N (genuinely exhausted)
 	upstreamH        http.HandlerFunc
 	routeMode        string // default "auto"
 	fixedProvider    string // used when routeMode == "fixed"
@@ -136,13 +136,17 @@ func qaNewGateway(t *testing.T, opts qaOpts) (*httptest.Server, string, *sql.DB)
 	if totalLimit <= 0 {
 		totalLimit = 100000
 	}
+	totalUsed := 0
+	// Count limit 0 means UNLIMITED since 2026-07-21, so we genuinely exhaust
+	// via a small positive limit with used == limit instead of using 0.
 	if opts.quotaExhausted {
-		totalLimit = 0
+		totalLimit = 5
+		totalUsed = 5
 	}
 	if _, err := database.Conn.Exec(
 		`INSERT INTO quotas (user_id, quota_5h_limit, quota_5h_used, quota_total_limit, quota_total_used, quota_token_total_limit, quota_token_total_used, window_start, updated_at)
-		 VALUES (1, 1000, 0, ?, 0, 0, 0, ?, ?)`,
-		totalLimit, now, now,
+		 VALUES (1, 1000, 0, ?, ?, 0, 0, ?, ?)`,
+		totalLimit, totalUsed, now, now,
 	); err != nil {
 		t.Fatalf("insert quota: %v", err)
 	}

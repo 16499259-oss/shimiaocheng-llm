@@ -61,6 +61,11 @@ func (c *Checker) CheckAvailability(userID int64, effectiveCalls int) (bool, int
 	remaining5h := quota.Quota5hLimit - quota.Quota5hUsed
 	remainingTotal := quota.QuotaTotalLimit - quota.QuotaTotalUsed
 
-	canUse := remaining5h >= effectiveCalls && remainingTotal >= effectiveCalls
-	return canUse, remaining5h, remainingTotal, nil
+	// A count limit of 0 means "unlimited" (call-count not restricted), unified
+	// with the Token cap since 2026-07-21. Skip the per-dimension check when the
+	// cap is 0 so a 0 cap opens the gate unconditionally (matching
+	// AtomicDeductQuota's "(limit = 0 OR used + calls <= limit)" condition).
+	countOk := (quota.Quota5hLimit == 0 || remaining5h >= effectiveCalls) &&
+		(quota.QuotaTotalLimit == 0 || remainingTotal >= effectiveCalls)
+	return countOk, remaining5h, remainingTotal, nil
 }
