@@ -344,19 +344,15 @@ async function refreshQuota() {
     }
 }
 
-// renderCountRow renders a count-quota stat row (5h / total). A limit of 0 is an
-// invalid value for a COUNT quota: the admin API rejects it with 400 (audit L2)
-// because the backend gate would otherwise treat 0 as "exhausted" and lock the
-// user out. If one is still encountered (e.g. legacy data), we must NOT divide by
-// zero (which would yield Infinity/NaN and break the progress bar) — instead we
-// render it as an invalid/locked state. This is deliberately different from the
-// cumulative Token row, where 0 legitimately means "unlimited".
+// renderCountRow renders a count-quota stat row (5h / total). Since 2026-07-21 a
+// limit of 0 means "unlimited" for the COUNT quota — exactly like the Token cap —
+// so a 0 limit is no longer an error. We render it as a hidden row (empty string)
+// so the user panel simply omits the count section, matching renderTokenRow.
+// This lets an admin set only a Token cap (count left at 0) and have the user's
+// panel show nothing about call-count. Count and Token dimensions are symmetric.
 function renderCountRow(label, used, limit) {
     if (!limit || limit === 0) {
-        return `<div class="stat-row">
-            <span class="stat-label">${label}</span>
-            <span class="stat-value bad">${used.toLocaleString()} / 0 次（配额无效）</span>
-        </div>`;
+        return '';
     }
     const pct = Math.round((used / limit) * 100);
     const cls = pct > 80 ? 'bad' : (pct > 50 ? 'warn' : 'good');
