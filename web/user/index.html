@@ -355,7 +355,10 @@ function renderCountRow(label, used, limit) {
     if (!limit || limit === 0) {
         return '';
     }
-    const pct = Math.round((used / limit) * 100);
+    // Clamp the displayed percentage at 100: a soft Token/count gate may let used
+    // transiently exceed the cap by one billed increment, so the number must never
+    // show >100% (audit LOW: 百分比可超 100%).
+    const pct = Math.min(100, Math.round((used / limit) * 100));
     const cls = pct > 80 ? 'bad' : (pct > 50 ? 'warn' : 'good');
     return `<div class="stat-row">
         <span class="stat-label">${label}</span>
@@ -383,7 +386,10 @@ function renderExpiryRow(expiresAt) {
         </div>`;
     }
     const now = new Date();
-    const label = expDate.toLocaleDateString('zh-CN');
+    // Display in Asia/Shanghai so the shown date matches the rest of the panel
+    // (token reset times, admin week_start) instead of the viewer's local TZ
+    // (audit LOW: 到期时间用浏览器本地时区).
+    const label = expDate.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
     if (expDate < now) {
         return `<div class="stat-row">
             <span class="stat-label">到期时间</span>
@@ -419,7 +425,9 @@ function renderTokenRow(label, used, limit, resetAt, resetLabel) {
     if (!limit || limit === 0) {
         return '';
     }
-    const pct = Math.round((used / limit) * 100);
+    // Clamp the displayed percentage at 100 (see renderCountRow). The progress
+    // bar width reuses pct, so it can never overflow either (audit LOW).
+    const pct = Math.min(100, Math.round((used / limit) * 100));
     const cls = pct > 80 ? 'bad' : (pct > 50 ? 'warn' : 'good');
     let labelHtml = label;
     if (resetAt && resetLabel) {
@@ -436,22 +444,11 @@ function renderTokenRow(label, used, limit, resetAt, resetLabel) {
 }
 
 function renderDashboard(data) {
-    // Monthly Token quota row. A limit of 0 means unlimited: render nothing
-    // (the whole row is hidden); otherwise show used/limit with a colored bar.
-    let tokenRowHtml;
-    const tokenLimit = data.quota_token_total_limit || 0;
-    const tokenUsed = data.quota_token_total_used || 0;
-    if (tokenLimit === 0) {
-        tokenRowHtml = '';
-    } else {
-        const pctToken = Math.round((tokenUsed / tokenLimit) * 100);
-        const clsToken = pctToken > 80 ? 'bad' : (pctToken > 50 ? 'warn' : 'good');
-        tokenRowHtml = `<div class="stat-row">
-            <span class="stat-label">Token 月总量</span>
-            <span class="stat-value ${clsToken}">${tokenUsed.toLocaleString()} / ${tokenLimit.toLocaleString()} (${pctToken}%)</span>
-        </div>
-        <div class="progress-bar"><div class="progress-fill ${clsToken}" style="width:${pctToken}%"></div></div>`;
-    }
+    // Monthly (rolling-30d) Token quota row. Reuse renderTokenRow so it shares
+    // the 0 = unlimited hide behaviour, the colored bar, the >100% clamp, AND the
+    // inline reset time (data.month_reset_at) — previously this row had no reset
+    // hint while the 5h/week Token rows did (audit LOW: Token 月总量行缺内联重置时间).
+    const tokenRowHtml = renderTokenRow('Token 月总量', data.quota_token_total_used || 0, data.quota_token_total_limit || 0, data.month_reset_at, '重置时间');
 
     // Count quota rows (5h and total). Use the shared helper, which guards
     // against a limit of 0 so we never divide by zero (audit L2).
@@ -465,6 +462,21 @@ function renderDashboard(data) {
     // panel (web/admin/app.js formatDateSH).
     const token5hRowHtml = renderTokenRow('5小时token', data.quota_token_5h_used || 0, data.quota_token_5h_limit || 0, data.window_reset_at, '重置时间');
     const tokenWeekRowHtml = renderTokenRow('本周token', data.quota_token_week_used || 0, data.quota_token_week_limit || 0, data.week_start, '周开始时间');
+
+    // Account status must reflect reality, not always be green. A non-active
+    // status or a past expiry flips it to red (audit LOW: 账户状态恒绿).
+    let statusCls = 'good';
+    let statusText = '✅ 正常';
+    if (data.status && data.status !== 'active') {
+        statusCls = 'bad';
+        statusText = '🚫 ' + escapeHtml(data.status);
+    } else if (data.expires_at) {
+        const exp = new Date(data.expires_at);
+        if (!isNaN(exp.getTime()) && exp < new Date()) {
+            statusCls = 'bad';
+            statusText = '⏰ 已过期';
+        }
+    }
 
     $('quota-stats').innerHTML = `
         ${count5hHtml}
@@ -483,7 +495,7 @@ function renderDashboard(data) {
         ${renderExpiryRow(data.expires_at)}
         <div class="stat-row">
             <span class="stat-label">账户状态</span>
-            <span class="stat-value good">${data.status === 'active' ? '✅ 正常' : '🚫 ' + escapeHtml(data.status)}</span>
+            <span class="stat-value ${statusCls}">${statusText}</span>
         </div>
     `;
 

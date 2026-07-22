@@ -56,6 +56,13 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, bodyBytes
 
 	// Check upstream status
 	if resp.StatusCode != http.StatusOK {
+		// The upstream rejected the request before streaming began, so the call
+		// failed — refund the quota we already deducted (audit MEDIUM: 上游非200
+		// 仍扣次数不退款). Mid-stream failures after we sent 200 are handled by
+		// the deferred accounting below (the user did consume upstream Tokens).
+		if rerr := models.RefundQuotaUsage(h.QuotaChecker.DB(), userID, effectiveCalls); rerr != nil {
+			log.Printf("ERROR: refund quota on upstream %d (stream) for user %d: %v", resp.StatusCode, userID, rerr)
+		}
 		latencyMs := int(time.Since(startTime).Milliseconds())
 		callLog := &models.CallLog{
 			UserID:         userID,

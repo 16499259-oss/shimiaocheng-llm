@@ -127,6 +127,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.Handle("/admin/", http.StripPrefix("/admin", authHandler))
+	// /admin without a trailing slash redirects to /admin/ for symmetry with
+	// the /user panel (audit MEDIUM: /admin 无尾斜杠 404).
+	mux.HandleFunc("GET /admin", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
+	})
 	log.Println("Admin routes registered")
 }
 
@@ -141,10 +146,15 @@ func (h *Handler) ServeLoginPage(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// ServeDashboardPage serves the admin dashboard HTML page.
+// ServeDashboardPage serves the admin dashboard HTML page. It acts as the SPA
+// fallback: any non-API, non-static page path (e.g. a deep link like /admin/users
+// reached after a browser refresh) is served index.html so the client-side router
+// can render the right view, instead of 404-ing. API and static routes are matched
+// by their own more-specific patterns before this handler runs, so they are
+// unaffected (audit MEDIUM: admin SPA 深链刷新 404). Unregistered /api/* paths
+// still get a proper 404.
 func (h *Handler) ServeDashboardPage(w http.ResponseWriter, r *http.Request) {
-	// Only serve for root path (sub-mux with StripPrefix, so path is "/" or "")
-	if r.URL.Path != "/" && r.URL.Path != "" {
+	if strings.HasPrefix(r.URL.Path, "/api/") {
 		http.NotFound(w, r)
 		return
 	}
