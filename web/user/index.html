@@ -351,7 +351,10 @@ async function refreshQuota() {
 // so the user panel simply omits the count section, matching renderTokenRow.
 // This lets an admin set only a Token cap (count left at 0) and have the user's
 // panel show nothing about call-count. Count and Token dimensions are symmetric.
-function renderCountRow(label, used, limit) {
+// Like renderTokenRow, it accepts an optional inline reset time (resetAt +
+// resetLabel) appended to the label in gray parentheses so e.g. the 5h call-count
+// row shows its next reset just like the 5h Token row does.
+function renderCountRow(label, used, limit, resetAt, resetLabel) {
     if (!limit || limit === 0) {
         return '';
     }
@@ -360,8 +363,14 @@ function renderCountRow(label, used, limit) {
     // show >100% (audit LOW: 百分比可超 100%).
     const pct = Math.min(100, Math.round((used / limit) * 100));
     const cls = pct > 80 ? 'bad' : (pct > 50 ? 'warn' : 'good');
+    let labelHtml = label;
+    if (resetAt && resetLabel) {
+        // Same Shanghai-local formatting as renderTokenRow / admin panel.
+        const t = new Date(resetAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+        labelHtml = `${label} <span class="reset-hint">(${resetLabel}：${t})</span>`;
+    }
     return `<div class="stat-row">
-        <span class="stat-label">${label}</span>
+        <span class="stat-label">${labelHtml}</span>
         <span class="stat-value ${cls}">${used.toLocaleString()} / ${limit.toLocaleString()} 次 (${pct}%)</span>
     </div>
     <div class="progress-bar"><div class="progress-fill ${cls}" style="width:${pct}%"></div></div>`;
@@ -452,7 +461,7 @@ function renderDashboard(data) {
 
     // Count quota rows (5h and total). Use the shared helper, which guards
     // against a limit of 0 so we never divide by zero (audit L2).
-    const count5hHtml = renderCountRow('5小时配额', data.quota_5h_used || 0, data.quota_5h_limit || 0);
+    const count5hHtml = renderCountRow('5小时配额', data.quota_5h_used || 0, data.quota_5h_limit || 0, data.window_reset_at, '重置时间');
     const countTotalHtml = renderCountRow('总配额', data.quota_total_used || 0, data.quota_total_limit || 0);
 
     // 5h-window Token row carries its NEXT reset time inline (gray parentheses).
