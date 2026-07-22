@@ -301,3 +301,70 @@ func TestAdminUpdateUser_ZeroTokenTotalLimitAllowed(t *testing.T) {
 		t.Fatalf("token total cap expected 0 (unlimited), got %d", q.QuotaTokenTotalLimit)
 	}
 }
+
+// Regression (audit 2026-07-22): CreateUser must accept a count limit of 0 as
+// "unlimited" — matching UpdateUser. Previously the create path normalized
+// <=0 to the finite default, so a blank call-count field silently became a
+// capped user instead of an unlimited one.
+func TestAdminCreateUser_ZeroCountLimitAcceptedAsUnlimited(t *testing.T) {
+	h := newAdminTestHandler(t)
+	body, _ := json.Marshal(map[string]any{
+		"username":          "create-zero",
+		"quota_5h_limit":    0,
+		"quota_total_limit": 0,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/users", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.CreateUser(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for create with count limit 0 (unlimited), got %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	q, err := models.GetQuota(h.DB, resp.ID)
+	if err != nil || q == nil {
+		t.Fatalf("GetQuota: %v", err)
+	}
+	if q.Quota5hLimit != 0 || q.QuotaTotalLimit != 0 {
+		t.Fatalf("count caps should be 0 (unlimited), got 5h=%d total=%d", q.Quota5hLimit, q.QuotaTotalLimit)
+	}
+}
+
+// Regression (audit 2026-07-22): CreateUser must honor quota_week_start sent
+// from the create form. Previously the field was absent from createUserRequest,
+// so the configured weekly anchor was silently dropped and the user fell back
+// to week_start = now.
+func TestAdminCreateUser_WeekStartHonored(t *testing.T) {
+	h := newAdminTestHandler(t)
+	ws := "2026-07-20T08:00:00.000Z"
+	body, _ := json.Marshal(map[string]any{
+		"username":         "create-ws",
+		"quota_week_start": ws,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/users", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.CreateUser(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for create with quota_week_start, got %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	q, err := models.GetQuota(h.DB, resp.ID)
+	if err != nil || q == nil {
+		t.Fatalf("GetQuota: %v", err)
+	}
+	// SetQuotaWeekStart normalizes the value to RFC3339 (dropping the
+	// fractional seconds the frontend sends via toISOString), so compare the
+	// normalized form — this also proves the ".000Z" input is accepted.
+	if q.WeekStart != "2026-07-20T08:00:00Z" {
+		t.Fatalf("week_start should be %q (normalized from %q), got %q", "2026-07-20T08:00:00Z", ws, q.WeekStart)
+	}
+}

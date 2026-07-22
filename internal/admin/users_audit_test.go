@@ -89,6 +89,13 @@ func TestAdminUpdateUser_NegativeTokenLimitRejected(t *testing.T) {
 func TestAdminUpdateUser_Negative5hLimitRejected(t *testing.T) {
 	h := newAdminTestHandler(t)
 	id, _ := adminCreateUser(t, h, "q5h-neg", nil)
+	// Capture the pre-update cap. Since 2026-07-21 a blank create-count field
+	// yields 0 (unlimited), so we assert the REJECTED update leaves the cap
+	// unchanged rather than assuming a specific positive value.
+	before, err := models.GetQuota(h.DB, id)
+	if err != nil || before == nil {
+		t.Fatalf("GetQuota before update: %v", err)
+	}
 	neg := -5
 	body, _ := json.Marshal(map[string]any{"quota_5h_limit": neg})
 	req := httptest.NewRequest(http.MethodPut, "/admin/api/users/"+strconv.FormatInt(id, 10), bytes.NewReader(body))
@@ -102,8 +109,8 @@ func TestAdminUpdateUser_Negative5hLimitRejected(t *testing.T) {
 	if err != nil || q == nil {
 		t.Fatalf("GetQuota: %v", err)
 	}
-	if q.Quota5hLimit <= 0 {
-		t.Fatalf("5h cap persisted as %d, want positive (rejected)", q.Quota5hLimit)
+	if q.Quota5hLimit != before.Quota5hLimit {
+		t.Fatalf("negative 5h update was not rejected: cap changed from %d to %d", before.Quota5hLimit, q.Quota5hLimit)
 	}
 }
 
