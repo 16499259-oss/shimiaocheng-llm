@@ -100,14 +100,48 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, bodyBytes
 		return
 	}
 
+	// Token counters accumulated from the SSE stream; declared before the
+	// deferred accounting closure below so it can reference them on every exit.
+	var totalTokens int
+	var promptTokens int
+	var completionTokens int
+
+	// Ensure Token accounting + call log run on EVERY exit path, including the
+	// early return when the client disconnects mid-stream (see the
+	// r.Context().Done() check in the loop below). A disconnected client has
+	// still consumed upstream Tokens, so we must bill them; otherwise streaming
+	// usage is systematically under-counted. fire-and-forget: failures are logged
+	// only and must not break the (already flushed) SSE response.
+	defer func() {
+		latencyMs := int(time.Since(startTime).Milliseconds())
+		// Headers were already sent (200) before streaming began, so any exit
+		// from this point is reported with 200; the call log still records the
+		// partial token usage we managed to collect.
+		callLog := &models.CallLog{
+			UserID:           userID,
+			Model:            model,
+			ProviderID:       providerID,
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      totalTokens,
+			EffectiveCalls:   effectiveCalls,
+			MultiplierUsed:   multiplier,
+			StatusCode:       200,
+			LatencyMs:        latencyMs,
+		}
+		if _, err := models.InsertCallLog(h.QuotaChecker.DB(), callLog); err != nil {
+			log.Printf("ERROR: logging stream call: %v", err)
+		}
+		billedTokens := int(math.Ceil(float64(promptTokens+completionTokens) * multiplier))
+		if err := models.AddTokenUsage(h.QuotaChecker.DB(), userID, billedTokens); err != nil {
+			log.Printf("ERROR: add token usage (stream) for user %d: %v", userID, err)
+		}
+	}()
+
 	// Scan upstream SSE response line by line
 	scanner := bufio.NewScanner(resp.Body)
 	// Increase buffer size for large SSE chunks
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-
-	var totalTokens int
-	var promptTokens int
-	var completionTokens int
 
 	for scanner.Scan() {
 		// Check if client disconnected
@@ -168,38 +202,5 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, bodyBytes
 
 	if err := scanner.Err(); err != nil {
 		log.Printf("ERROR: scanning SSE stream: %v", err)
-	}
-
-	latencyMs := int(time.Since(startTime).Milliseconds())
-
-	// Log the call with token statistics
-	statusCode := resp.StatusCode
-	callLog := &models.CallLog{
-		UserID:           userID,
-		Model:            model,
-		ProviderID:       providerID,
-		PromptTokens:     promptTokens,
-		CompletionTokens: completionTokens,
-		TotalTokens:      totalTokens,
-		EffectiveCalls:   effectiveCalls,
-		MultiplierUsed:   multiplier,
-		StatusCode:       statusCode,
-		LatencyMs:        latencyMs,
-	}
-	if _, err := models.InsertCallLog(h.QuotaChecker.DB(), callLog); err != nil {
-		log.Printf("ERROR: logging stream call: %v", err)
-	}
-
-	// Account the Token usage toward the user's cumulative Token quota
-	// (fire-and-forget: a failure is logged only and must not break the
-	// already-flushed SSE response).
-	//
-	// Apply the active multiplier to the BILLED Token counter (mirrors the sync
-	// path in handler.go): a request under a 2x window costs 2x Tokens toward
-	// the cap, exactly like the call-count quota does. The real upstream usage
-	// is still recorded verbatim in call_logs for honest auditing.
-	billedTokens := int(math.Ceil(float64(promptTokens+completionTokens) * multiplier))
-	if err := models.AddTokenUsage(h.QuotaChecker.DB(), userID, billedTokens); err != nil {
-		log.Printf("ERROR: add token usage (stream) for user %d: %v", userID, err)
 	}
 }

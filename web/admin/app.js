@@ -1611,7 +1611,23 @@ async function openAllocationModal(slug) {
 
 // ===== Utilities =====
 function escapeHtml(str) { const div = document.createElement('div'); div.textContent = str; return div.innerHTML; }
-function escapeAttr(str) { return str.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+// Escape a value for safe embedding inside a double-quoted HTML attribute whose
+// value is itself a single-quoted JS string, e.g. onclick="f('VALUE')".
+// CRITICAL: '&' MUST be escaped first — otherwise an attacker can inject an HTML
+// entity (e.g. &apos;) that the HTML parser decodes back into a quote and breaks
+// out of the JS string ("&apos;);alert(1);//"). After '&', escape the structural
+// chars: backslash, single quote (as \' for the JS string), double quote (as
+// &quot; for the HTML attribute), and < >.
+function escapeAttr(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
 function formatDate(s) { return formatDateSH(s); }
 
 // formatBodySize renders a per-user body cap (bytes) as a human label,

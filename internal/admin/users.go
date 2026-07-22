@@ -26,6 +26,7 @@ type createUserRequest struct {
 	QuotaTokenTotalLimit int      `json:"quota_token_total_limit"` // 0 = 不限制（默认）
 	QuotaToken5hLimit    int      `json:"quota_token_5h_limit"`    // 0 = 不限制（默认）
 	QuotaTokenWeekLimit  int      `json:"quota_token_week_limit"`  // 0 = 不限制（默认）
+	QuotaWeekStart       *string  `json:"quota_week_start"`        // nil = 不改(回退 now)；"" = 清除；RFC3339 UTC（与 update/create 表单一致）
 	ExpiresAt            string   `json:"expires_at"`
 	RouteMode            string   `json:"route_mode"`
 	FixedProvider        string   `json:"fixed_provider"`
@@ -72,17 +73,17 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Apply defaults for the count quotas. NOTE (audit L2): a 0 here means "not
-	// specified" and is normalized to the configured default — it must NOT be
-	// stored as 0, because a 0 count limit would lock the user out via the gate.
-	// This is different from the cumulative Token cap, where 0 = unlimited (handled
-	// separately below). The edit endpoint additionally rejects an explicit 0 with
-	// 400 so an admin can never set a count limit of 0.
-	if req.Quota5hLimit <= 0 {
-		req.Quota5hLimit = h.Default5hLimit
+	// Count quotas: since 2026-07-21 a limit of 0 means "unlimited" (unified
+	// with the Token cap). So 0 is preserved and stored as-is; only negative
+	// values are rejected. A blank form field arrives as 0 and yields an
+	// unlimited call-count user, matching UpdateUser's contract.
+	if req.Quota5hLimit < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_5h_limit must be >= 0 (0 = 不限制)"})
+		return
 	}
-	if req.QuotaTotalLimit <= 0 {
-		req.QuotaTotalLimit = h.DefaultTotalLimit
+	if req.QuotaTotalLimit < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "quota_total_limit must be >= 0 (0 = 不限制)"})
+		return
 	}
 	if req.RouteMode == "" {
 		req.RouteMode = "auto"
@@ -180,6 +181,16 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		if err := models.UpdateQuotaTokenWindowLimits(h.DB, user.ID, req.QuotaToken5hLimit, req.QuotaTokenWeekLimit); err != nil {
 			log.Printf("ERROR: set token window limits: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to set token window limits: " + err.Error()})
+			return
+		}
+	}
+
+	// Honor a configured weekly start anchor (fixed 7-day phase). The create
+	// form sends RFC3339 UTC (via toISOString); "" or omitted falls back to now
+	// inside SetQuotaWeekStart. This mirrors the edit path, which already sets it.
+	if req.QuotaWeekStart != nil {
+		if err := models.SetQuotaWeekStart(h.DB, user.ID, *req.QuotaWeekStart); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid quota_week_start (must be RFC3339): " + err.Error()})
 			return
 		}
 	}
