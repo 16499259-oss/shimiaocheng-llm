@@ -49,6 +49,7 @@ type QuotaStatus struct {
 	WindowResetAt            string `json:"window_reset_at"`
 	MonthResetAt             string `json:"month_reset_at"` // month_start + 30d (rolling-30d Token bucket next reset)
 	WeekResetAt              string `json:"week_reset_at"`  // week_start + 7d (fixed-phase 7d Token bucket next reset)
+	WeekStart                string `json:"week_start"`     // raw admin-configured weekly anchor (RFC3339 UTC); the user panel displays this directly
 	Status                   string `json:"status"`
 	ExpiresAt                string `json:"expires_at"` // user account expiry; "" means permanent (no expiry)
 }
