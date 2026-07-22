@@ -101,6 +101,7 @@ func (h *Handler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   -1,
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
+		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
 	})
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Logged out"})

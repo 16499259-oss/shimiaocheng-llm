@@ -265,6 +265,31 @@ func UpdateQuotaLimits(db *sql.DB, userID int64, quota5hLimit, quotaTotalLimit *
 	return nil
 }
 
+// RefundQuotaUsage returns the call-count quota consumed by a FAILED request
+// (upstream transport error or a non-2xx upstream response) so a user is never
+// billed for calls that never succeeded. Only the COUNT dimensions
+// (quota_5h_used / quota_total_used) are touched: Token accounting happens after
+// a successful response (AddTokenUsage), so there is nothing to refund on a
+// failure. The counters are clamped at >= 0 to avoid going negative if a partial
+// refund races a concurrent reset. A delta <= 0 is a safe no-op.
+func RefundQuotaUsage(db *sql.DB, userID int64, effectiveCalls int) error {
+	if effectiveCalls <= 0 {
+		return nil
+	}
+	_, err := db.Exec(
+		`UPDATE quotas
+		 SET quota_5h_used = MAX(0, quota_5h_used - ?),
+		     quota_total_used = MAX(0, quota_total_used - ?),
+		     updated_at = ?
+		 WHERE user_id = ?`,
+		effectiveCalls, effectiveCalls, time.Now().Format(time.RFC3339), userID,
+	)
+	if err != nil {
+		return fmt.Errorf("refund quota usage: %w", err)
+	}
+	return nil
+}
+
 // AddTokenUsage accumulates Token usage (prompt_tokens + completion_tokens) for
 // a user AFTER a successful response is sent. It is a fire-and-forget accounting
 // step: a delta <= 0 is a no-op, and a non-nil error is the caller's

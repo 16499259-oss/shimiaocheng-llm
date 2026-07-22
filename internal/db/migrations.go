@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"time"
 )
 
 // RunMigrations creates all tables if they do not exist.
@@ -454,16 +453,13 @@ func RunMigrations(conn *DB) error {
 		}
 	}
 
-	// ── One-time data fix (2026-08-16) ──
-	// User "大仙撸车" (id=39) was mistakenly set to permanent (expires_at='').
-	// Correct to 2026-08-15 (Beijing time, end of day). Guarded so it only
-	// applies while still permanent; idempotent and safe across restarts.
-	if _, err := conn.Conn.Exec(
-		`UPDATE users SET expires_at = ?, updated_at = ? WHERE username = ? AND (expires_at IS NULL OR expires_at = '')`,
-		"2026-08-15T23:59:59+08:00", time.Now().Format(time.RFC3339), "大仙撸车",
-	); err != nil {
-		return fmt.Errorf("data fix daxian expiry: %w", err)
-	}
+	// ── Account expiry is now fully admin-managed ──
+	// A previous migration hard-coded a one-time data fix that forced a specific
+	// internal username's expires_at to a fixed date on EVERY startup. That
+	// (a) leaked an internal username into the binary, (b) ran on every restart,
+	// and (c) re-overwrote an admin's deliberate "permanent" (empty) setting.
+	// Expiry correction is now the admin's responsibility via the panel/API, so
+	// the recurring overwrite has been removed. (audit MEDIUM)
 
 	// ── Passthrough / MCP support (idempotent) ──
 	// Per-provider flags enabling wildcard passthrough (e.g. MCP / arbitrary path):
@@ -584,13 +580,21 @@ func columnExists(conn *DB, table, column string) bool {
 	return false
 }
 
-// backfillRawTotalTokensSQL recomputes call_logs.raw_total_tokens for every row
-// as the UNMULTIPLIED prompt_tokens + completion_tokens sum — the exact invariant
-// InsertCallLog writes for new rows (log.PromptTokens+log.CompletionTokens). It
-// makes historical rows consistent with newly-inserted ones. It is a full in-place
-// SET, hence idempotent and safe to re-run. COALESCE guards against any NULL. The
-// QA engineer references this const from a regression test.
-const backfillRawTotalTokensSQL = `UPDATE call_logs SET raw_total_tokens = COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)`
+// backfillRawTotalTokensSQL recomputes call_logs.raw_total_tokens as the
+// UNMULTIPLIED prompt_tokens + completion_tokens sum — the exact invariant
+// InsertCallLog writes for new rows. It makes historical rows (created before
+// the column existed, where raw_total_tokens defaulted to 0) consistent with
+// newly-inserted ones.
+//
+// CRITICAL (audit MEDIUM): this used to be a FULL-TABLE UPDATE run on EVERY
+// startup, causing write amplification + lock contention on large call_logs
+// tables. It is now INCREMENTAL: it only touches rows whose raw_total_tokens is
+// still the un-backfilled sentinel 0 while the underlying (prompt+completion)
+// sum is > 0. After the first run those rows hold the correct positive value,
+// so every subsequent startup updates ZERO rows (no write amplification).
+// Legitimate zero-token calls (sum == 0) correctly keep raw_total_tokens = 0 and
+// are skipped. COALESCE guards against any NULL. It remains idempotent.
+const backfillRawTotalTokensSQL = `UPDATE call_logs SET raw_total_tokens = COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0) WHERE raw_total_tokens = 0 AND (COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)) > 0`
 
 // backfillQuotaTokenTotalUsed recomputes quotas.quota_token_total_used for every
 // user as the multiplier-scaled sum of historical call_logs, mirroring the

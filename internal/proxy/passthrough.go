@@ -227,6 +227,11 @@ func (h *PassthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{Timeout: timeout}
 	resp, derr := client.Do(upstreamReq)
 	if derr != nil {
+		// Upstream unreachable / transport error: the call never happened, so
+		// refund the quota we already deducted (audit MEDIUM: 上游非200 仍扣次数不退款).
+		if rerr := models.RefundQuotaUsage(h.QuotaChecker.DB(), userID, effectiveCalls); rerr != nil {
+			log.Printf("ERROR: refund quota on passthrough transport error for user %d: %v", userID, rerr)
+		}
 		latencyMs := int(time.Since(startTime).Milliseconds())
 		callLog := &models.CallLog{
 			UserID:         userID,
@@ -248,7 +253,13 @@ func (h *PassthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// ── Forward headers + body (generic streaming copy) ──
 	// 4xx/5xx are forwarded verbatim (no wrapping) so MCP clients see the
-	// upstream's own error shape.
+	// upstream's own error shape. A non-2xx response means the request failed on
+	// the upstream side, so refund the already-deducted quota (audit MEDIUM).
+	if resp.StatusCode >= 400 {
+		if rerr := models.RefundQuotaUsage(h.QuotaChecker.DB(), userID, effectiveCalls); rerr != nil {
+			log.Printf("ERROR: refund quota on passthrough upstream %d for user %d: %v", resp.StatusCode, userID, rerr)
+		}
+	}
 	isStream := isStreamingResponse(resp)
 	copyResponseHeaders(w, resp.Header, isStream)
 	w.WriteHeader(resp.StatusCode)

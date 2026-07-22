@@ -450,8 +450,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if q, gerr := models.GetQuota(h.QuotaChecker.DB(), userID); gerr == nil {
 			if q.QuotaToken5hLimit != 0 && q.QuotaToken5hUsed >= q.QuotaToken5hLimit && freshWindow(q.WindowStart, 5*time.Hour) {
 				errType, errMsg = "token_5h_quota_exceeded", "5 小时内 Token 已超限"
-			} else if q.QuotaTokenWeekLimit != 0 && q.QuotaTokenWeekUsed >= q.QuotaTokenWeekLimit && freshWindow(q.WeekStart, 7*24*time.Hour) {
-				errType, errMsg = "token_week_quota_exceeded", "本周 Token 已超限"
+			} else if q.QuotaTokenWeekLimit != 0 && q.QuotaTokenWeekUsed >= q.QuotaTokenWeekLimit && q.WeekStart != "" {
+				// Weekly-bucket freshness must be measured against the CURRENT 7-day
+				// cycle start (aligned to the admin-set anchor), NOT the fixed anchor
+				// itself. Otherwise a freshly-rolled cycle (weekly usage already lazily
+				// reset to 0 by the gate) could still be mislabeled "本周 Token 已超限"
+				// simply because now is within 7 days of the fixed anchor (audit LOW:
+				// 429 周桶标签用错锚点).
+				if ws, perr := time.Parse(time.RFC3339, q.WeekStart); perr == nil {
+					cycleStart := models.AlignedCycleStartUTC(ws, time.Now())
+					if freshWindow(cycleStart.Format(time.RFC3339), 7*24*time.Hour) {
+						errType, errMsg = "token_week_quota_exceeded", "本周 Token 已超限"
+					}
+				}
 			} else if q.QuotaTokenTotalLimit != 0 && q.QuotaTokenTotalUsed >= q.QuotaTokenTotalLimit {
 				errType, errMsg = "token_quota_exceeded", "Token 额度已用尽"
 			}
@@ -499,6 +510,11 @@ func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int
 	client := &http.Client{Timeout: 300 * time.Second}
 	resp, err := client.Do(upstreamReq)
 	if err != nil {
+		// Upstream unreachable / transport error: the call never happened, so
+		// refund the quota we already deducted (audit MEDIUM: 上游非200 仍扣次数不退款).
+		if rerr := models.RefundQuotaUsage(h.QuotaChecker.DB(), userID, effectiveCalls); rerr != nil {
+			log.Printf("ERROR: refund quota on upstream transport error for user %d: %v", userID, rerr)
+		}
 		latencyMs := int(time.Since(startTime).Milliseconds())
 		callLog := &models.CallLog{
 			UserID:         userID,
@@ -522,6 +538,11 @@ func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int
 	// Read upstream response
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		// Could not read the (already-open) upstream response: treat as a failed
+		// call and refund the quota (audit MEDIUM).
+		if rerr := models.RefundQuotaUsage(h.QuotaChecker.DB(), userID, effectiveCalls); rerr != nil {
+			log.Printf("ERROR: refund quota on upstream read error for user %d: %v", userID, rerr)
+		}
 		latencyMs := int(time.Since(startTime).Milliseconds())
 		callLog := &models.CallLog{
 			UserID:         userID,
@@ -546,6 +567,16 @@ func (h *Handler) handleSync(w http.ResponseWriter, bodyBytes []byte, userID int
 	respBody = rewriteResponseModel(respBody, requestModel)
 
 	latencyMs := int(time.Since(startTime).Milliseconds())
+
+	// A non-2xx upstream response means the request failed on the upstream side.
+	// Refund the call-count quota we already deducted so the user is not billed
+	// for a failed call (audit MEDIUM: 上游非200 仍扣次数不退款). Token accounting
+	// only runs after a successful response, so there is nothing to refund there.
+	if resp.StatusCode >= 400 {
+		if rerr := models.RefundQuotaUsage(h.QuotaChecker.DB(), userID, effectiveCalls); rerr != nil {
+			log.Printf("ERROR: refund quota on upstream %d for user %d: %v", resp.StatusCode, userID, rerr)
+		}
+	}
 
 	// Parse usage from response for logging
 	promptTokens, completionTokens, totalTokens := ExtractTokenUsage(respBody)

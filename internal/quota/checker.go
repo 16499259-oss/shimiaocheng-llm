@@ -67,5 +67,16 @@ func (c *Checker) CheckAvailability(userID int64, effectiveCalls int) (bool, int
 	// AtomicDeductQuota's "(limit = 0 OR used + calls <= limit)" condition).
 	countOk := (quota.Quota5hLimit == 0 || remaining5h >= effectiveCalls) &&
 		(quota.QuotaTotalLimit == 0 || remainingTotal >= effectiveCalls)
-	return countOk, remaining5h, remainingTotal, nil
+
+	// Token dimensions: a limit of 0 means "unlimited". Previously this helper
+	// only checked the COUNT quota, diverging from the gate (AtomicDeductQuota)
+	// which also gates on the cumulative / 5h-window / weekly Token limits. That
+	// divergence could report "available" while the real request would be blocked
+	// by a Token cap (audit LOW: CheckAvailability 仅校验 count 维). We now check
+	// all three Token dimensions with the same 0 = unlimited idiom.
+	tokenOk := (quota.QuotaTokenTotalLimit == 0 || quota.QuotaTokenTotalUsed < quota.QuotaTokenTotalLimit) &&
+		(quota.QuotaToken5hLimit == 0 || quota.QuotaToken5hUsed < quota.QuotaToken5hLimit) &&
+		(quota.QuotaTokenWeekLimit == 0 || quota.QuotaTokenWeekUsed < quota.QuotaTokenWeekLimit)
+
+	return countOk && tokenOk, remaining5h, remainingTotal, nil
 }

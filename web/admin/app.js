@@ -740,7 +740,7 @@ async function loadUsers() {
     try {
         const data = await apiFetch('api/users');
         const tbody = document.getElementById('users-tbody');
-        if (!data.data || data.data.length === 0) { tbody.innerHTML = '<tr><td colspan="15" class="text-center">暂无用户</td></tr>'; return; }
+        if (!data.data || data.data.length === 0) { tbody.innerHTML = '<tr><td colspan="16" class="text-center">暂无用户</td></tr>'; return; }
         const now = new Date();
         tbody.innerHTML = data.data.map(u => {
             const quota5hLimit = u.quota_5h_limit || 0;
@@ -911,7 +911,11 @@ async function createUser(e) {
     const routeMode = document.getElementById('new-route-mode').value;
     const fixedProvider = routeMode === 'fixed' ? document.getElementById('new-fixed-provider').value : '';
     const fmRaw = document.getElementById('new-fixed-multiplier').value;
-    const fixedMultiplier = fmRaw ? parseFloat(fmRaw) : null;
+    // 0 is not a valid multiplier (it would zero the user's effective call count);
+    // treat 0 / empty as "no fixed multiplier" so it is not persisted as 0
+    // (audit LOW: 固定倍率 0=清除 实际无效).
+    const fmVal = fmRaw ? parseFloat(fmRaw) : NaN;
+    const fixedMultiplier = (!isNaN(fmVal) && fmVal > 0) ? fmVal : null;
     const mbs = parseFloat(document.getElementById('new-max-body-size').value) || 1;
 
     const body = { username, quota_5h_limit: q5, quota_total_limit: qt, expires_at: expiresAt, route_mode: routeMode, fixed_provider: fixedProvider };
@@ -1066,11 +1070,14 @@ async function updateUser(e) {
         body.fixed_provider = rm === 'fixed' ? document.getElementById('update-fixed-provider').value : '';
     }
     const fmRaw = document.getElementById('update-fixed-multiplier').value;
-    if (fmRaw !== '') {
-        body.fixed_multiplier = parseFloat(fmRaw) || null;
-    } else if (window._editFixedMultiplier != null) {
-        // Input cleared but user previously had a value → send explicit clear signal
+    const fmVal = parseFloat(fmRaw);
+    if (fmRaw === '' || isNaN(fmVal) || fmVal === 0) {
+        // Empty or 0 means "clear the fixed multiplier" (0 is not a valid
+        // multiplier). Send the explicit clear flag so the backend actually
+        // removes it instead of silently no-op'ing (audit LOW: 固定倍率 0=清除 实际无效).
         body.fixed_multiplier_clear = true;
+    } else {
+        body.fixed_multiplier = fmVal;
     }
     const umbs = document.getElementById('update-max-body-size').value;
     if (umbs) body.max_body_size = parseFloat(umbs) * 1048576;

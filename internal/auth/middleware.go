@@ -129,6 +129,7 @@ func (m *Middleware) AdminSessionAuth(next http.Handler) http.Handler {
 				MaxAge:   -1,
 				HttpOnly: true,
 				SameSite: http.SameSiteStrictMode,
+				Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
 			})
 			http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 			return

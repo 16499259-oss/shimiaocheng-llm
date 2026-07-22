@@ -37,10 +37,28 @@ func supportedModels() []ModelEntry {
 	}
 }
 
+// allowedModelCORSOrigins restricts the OpenAI-compatible /v1/models endpoint's
+// CORS to the gateway's own web origins. A wildcard "*" would let any website
+// probe the model list on behalf of a victim's browser; we only echo origins we
+// actually serve the admin/user panels from. Server-side API clients (Cursor,
+// etc.) send no Origin header, so this does not affect them (audit LOW: CORS
+// 通配 /v1/models).
+var allowedModelCORSOrigins = map[string]bool{
+	"https://ai.shimiaocheng.top": true,
+}
+
 // ServeHTTP serves the /v1/models response.
 func (h *ModelsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if origin := r.Header.Get("Origin"); origin != "" && allowedModelCORSOrigins[origin] {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	}
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	resp := ModelsResponse{
 		Object: "list",
 		Data:   supportedModels(),

@@ -131,6 +131,14 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	// Insert the user row first with empty sub-key placeholders, then generate
 	// the real sub-key bound to the actual user.ID and UPDATE it below. This
 	// avoids generating a throwaway key that is discarded right after the INSERT.
+	// A non-positive fixed multiplier is meaningless (storing 0 would make the
+	// user's effective call count 0 on every request). Normalize to "no fixed
+	// multiplier" (nil) so it is never persisted as 0 — the panel's "set to 0 =
+	// clear" intent is honoured on create too (audit LOW: 固定倍率 0=清除 实际无效).
+	if req.FixedMultiplier != nil && *req.FixedMultiplier <= 0 {
+		req.FixedMultiplier = nil
+	}
+
 	user, err := models.CreateUser(
 		h.DB, req.Username, emptyPassHash, "", "",
 		"user", "active", req.ExpiresAt, req.RouteMode, req.FixedProvider,
@@ -495,18 +503,31 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		response["fixed_multiplier"] = nil
 		routeChanged = true
 	} else if req.FixedMultiplier != nil {
-		// Validate range 0.1–100.0 to match global multiplier semantics.
-		if *req.FixedMultiplier < 0.1 || *req.FixedMultiplier > 100.0 {
+		if *req.FixedMultiplier <= 0 {
+			// A 0 (or negative) fixed multiplier is meaningless — treat it as a
+			// request to CLEAR the multiplier back to the global default. This
+			// makes the panel's "set to 0 = clear" behaviour actually take effect
+			// instead of silently no-op'ing when the field is sent without the
+			// dedicated clear flag (audit LOW: 固定倍率 0=清除 实际无效).
+			if err := models.UpdateFixedMultiplier(h.DB, userID, nil); err != nil {
+				log.Printf("ERROR: clear fixed multiplier (0): %v", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to clear fixed multiplier"})
+				return
+			}
+			response["fixed_multiplier"] = nil
+			routeChanged = true
+		} else if *req.FixedMultiplier < 0.1 || *req.FixedMultiplier > 100.0 {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "fixed_multiplier must be between 0.1 and 100.0"})
 			return
+		} else {
+			if err := models.UpdateFixedMultiplier(h.DB, userID, req.FixedMultiplier); err != nil {
+				log.Printf("ERROR: update fixed multiplier: %v", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to update fixed multiplier"})
+				return
+			}
+			response["fixed_multiplier"] = req.FixedMultiplier
+			routeChanged = true
 		}
-		if err := models.UpdateFixedMultiplier(h.DB, userID, req.FixedMultiplier); err != nil {
-			log.Printf("ERROR: update fixed multiplier: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to update fixed multiplier"})
-			return
-		}
-		response["fixed_multiplier"] = req.FixedMultiplier
-		routeChanged = true
 	}
 
 	// Write audit log for route/multiplier changes.
