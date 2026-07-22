@@ -92,6 +92,7 @@ func (h *QuotaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		WindowResetAt:           windowStart.Format(time.RFC3339),
 		MonthResetAt:            computeMonthResetAt(quotaRecord.MonthStart),
 		WeekResetAt:             computeWeekResetAt(quotaRecord.WeekStart),
+		WeekStart:               quotaRecord.WeekStart,
 		Status:                  user.Status,
 		// Propagate the user's account expiry to the self-service panel so the
 		// /user/ dashboard can show it (fix: user-expiry-display). An empty
