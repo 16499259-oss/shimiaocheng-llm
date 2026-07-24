@@ -7,16 +7,17 @@ import (
 	"llm_api_gateway/internal/models"
 )
 
-// TestSetQuotaWeekStart verifies the admin setter writes the fixed phase anchor
-// and aligns week_cycle_start to the cycle containing now, WITHOUT zeroing the
-// in-progress weekly Token usage (which only resets at the natural cycle
-// boundary). The previously-accumulated usage must be preserved.
+// TestSetQuotaWeekStart verifies the admin setter writes the fixed phase anchor,
+// aligns week_cycle_start to the cycle containing now, AND resets the in-progress
+// weekly Token usage to 0 — re-anchoring the week opens a fresh 7-day window that
+// starts at zero (see the 2026-07-23 苏卓雄 carry-over bug). The previously
+// accumulated usage must NOT survive an explicit anchor change.
 func TestSetQuotaWeekStart(t *testing.T) {
 	database := newModelsTestDB(t)
 	userID := seedTokenWindowUser(t, database)
 
 	// Seed a known, non-zero in-progress weekly usage so we can prove it is
-	// preserved (not silently zeroed) by the anchor change.
+	// zeroed (not silently preserved) by the anchor change.
 	if _, err := database.Conn.Exec(
 		`UPDATE quotas SET quota_token_week_used = 7 WHERE user_id = ?`, userID); err != nil {
 		t.Fatalf("seed weekly used: %v", err)
@@ -37,8 +38,8 @@ func TestSetQuotaWeekStart(t *testing.T) {
 	if q.WeekStart != anchorStr {
 		t.Fatalf("WeekStart = %q, want %q", q.WeekStart, anchorStr)
 	}
-	if q.QuotaTokenWeekUsed != 7 {
-		t.Fatalf("expected weekly used PRESERVED (7), got %d (anchor change must not zero usage)", q.QuotaTokenWeekUsed)
+	if q.QuotaTokenWeekUsed != 0 {
+		t.Fatalf("expected weekly used RESET to 0 on anchor change, got %d (anchor change must zero usage)", q.QuotaTokenWeekUsed)
 	}
 	var cycle string
 	if err := database.Conn.QueryRow(`SELECT week_cycle_start FROM quotas WHERE user_id = ?`, userID).Scan(&cycle); err != nil {

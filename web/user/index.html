@@ -464,13 +464,13 @@ function renderDashboard(data) {
     const count5hHtml = renderCountRow('5小时配额', data.quota_5h_used || 0, data.quota_5h_limit || 0, data.window_reset_at, '重置时间');
     const countTotalHtml = renderCountRow('总配额', data.quota_total_used || 0, data.quota_total_limit || 0);
 
-    // 5h-window Token row carries its NEXT reset time inline (gray parentheses).
-    // Weekly Token row shows the ADMIN-CONFIGURED weekly start anchor (week_start)
-    // directly — NOT the computed next-reset — so the user sees the exact point in
-    // time the admin set. Both formatted in Shanghai local time to match the admin
-    // panel (web/admin/app.js formatDateSH).
+    // 5h-window Token row and Weekly Token row both carry their NEXT reset time
+    // inline (gray parentheses), computed server-side from the fixed phase anchor
+    // (data.week_reset_at = aligned cycle start + 7d). Showing the raw fixed
+    // anchor (week_start) here would go stale once the 7-day cycle rolls over, so
+    // we use the aligned next-reset like the 5h / month rows for consistency.
     const token5hRowHtml = renderTokenRow('5小时token', data.quota_token_5h_used || 0, data.quota_token_5h_limit || 0, data.window_reset_at, '重置时间');
-    const tokenWeekRowHtml = renderTokenRow('本周token', data.quota_token_week_used || 0, data.quota_token_week_limit || 0, data.week_start, '周开始时间');
+    const tokenWeekRowHtml = renderTokenRow('本周token', data.quota_token_week_used || 0, data.quota_token_week_limit || 0, data.week_reset_at, '重置时间');
 
     // Account status must reflect reality, not always be green. A non-active
     // status or a past expiry flips it to red (audit LOW: 账户状态恒绿).
