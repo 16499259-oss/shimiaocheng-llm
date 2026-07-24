@@ -478,11 +478,6 @@
                 <div class="form-group"><label for="new-quota-token-5h">5h Token 上限 (默认 0 = 不限制)</label><input type="number" id="new-quota-token-5h" value="0" min="0" placeholder="0 = 不限制"></div>
                 <div class="form-group"><label for="new-quota-token-week">周 Token 上限 (默认 0 = 不限制)</label><input type="number" id="new-quota-token-week" value="0" min="0" placeholder="0 = 不限制"></div>
                 <div class="form-group">
-                    <label for="new-quota-week-start">周限额开始时间</label>
-                    <input type="datetime-local" id="new-quota-week-start" step="1">
-                    <small>服务器时区 Asia/Shanghai (UTC+8)。留空则默认以当前时间起算固定 7 天循环；设定后开启固定 7 天循环（不清零本周已用 Token，周期到了自动清零）。</small>
-                </div>
-                <div class="form-group">
                     <label for="new-expiry-type">有效期</label>
                     <select id="new-expiry-type">
                         <option value="permanent">永久</option>
@@ -565,9 +560,12 @@
                 <div class="form-group"><label for="update-quota-token-5h">5h Token 上限 (0 = 不限制)</label><input type="number" id="update-quota-token-5h" min="0" placeholder="0 = 不限制"></div>
                 <div class="form-group"><label for="update-quota-token-week">周 Token 上限 (0 = 不限制)</label><input type="number" id="update-quota-token-week" min="0" placeholder="0 = 不限制"></div>
                 <div class="form-group">
-                    <label for="update-quota-week-start">周限额开始时间</label>
-                    <input type="datetime-local" id="update-quota-week-start" step="1">
-                    <small>服务器时区 Asia/Shanghai (UTC+8)。设定后开启固定 7 天循环（不清零本周已用 Token，周期到了自动清零）。</small>
+                    <label>周限额开始时间</label>
+                    <div class="readonly-row">
+                        <span id="update-week-start-display" class="readonly-value">—</span>
+                        <button type="button" class="btn btn-sm" onclick="openWeekStartModal()">重设周起始…</button>
+                    </div>
+                    <small>周起始为独立设置，修改其他参数（并发/状态/上限等）不会影响它。重设会开启新的 7 天循环；若锚点进入与当前不同的周期，本周已用 Token 会清零。</small>
                 </div>
                 <div class="form-group"><label for="update-status">状态</label><select id="update-status"><option value="">不修改</option><option value="active">启用</option><option value="disabled">禁用</option></select></div>
                 <div class="form-group"><label><input type="checkbox" id="update-regenerate-key"> 重新生成 Key</label></div>
@@ -678,7 +676,23 @@
                 <div class="form-group">
                     <label for="batch-week-start-input">周开始时间</label>
                     <input type="datetime-local" id="batch-week-start-input" step="1">
-                    <small>服务器时区 Asia/Shanghai (UTC+8)。将统一应用到所有选中用户（不清零本周已用 Token，由周期自然清零）。</small>
+                    <small>服务器时区 Asia/Shanghai (UTC+8)。将统一应用到所有选中用户（若锚点进入与当前不同的周期，本周已用 Token 会清零）。</small>
+                </div>
+                <button type="submit" class="btn btn-primary btn-block">应用</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Single-user Week Start Modal -->
+    <div id="week-start-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header"><h3>重设周开始时间</h3><button class="modal-close" onclick="closeModal('week-start-modal')">&times;</button></div>
+            <form id="week-start-form">
+                <div class="form-group"><label>用户</label><div id="week-start-username" style="font-weight:600;"></div></div>
+                <div class="form-group">
+                    <label for="week-start-input">周开始时间</label>
+                    <input type="datetime-local" id="week-start-input" step="1">
+                    <small>服务器时区 Asia/Shanghai (UTC+8)。留空则以当前时间起算。重设会开启新的 7 天循环；若锚点进入与当前不同的周期，本周已用 Token 会清零（同周期则不变）。</small>
                 </div>
                 <button type="submit" class="btn btn-primary btn-block">应用</button>
             </form>
