@@ -16,15 +16,15 @@ import (
 )
 
 // TestAdminUpdateUser_WeekStartSetsAnchor verifies the single-user edit endpoint
-// writes the fixed phase anchor and returns the new anchor in the response,
-// WITHOUT zeroing the in-progress weekly Token usage (which only resets at the
-// natural cycle boundary).
+// writes the fixed phase anchor and returns the new anchor in the response, AND
+// resets the in-progress weekly Token usage to 0 (re-anchoring opens a fresh
+// 7-day window; see the 2026-07-23 苏卓雄 carry-over bug).
 func TestAdminUpdateUser_WeekStartSetsAnchor(t *testing.T) {
 	h := newAdminTestHandler(t)
 	id, _ := adminCreateUser(t, h, "weekuser", nil)
 
 	// Seed a known, non-zero in-progress weekly usage so we can prove it is
-	// preserved (not silently zeroed) by the anchor change.
+	// zeroed (not silently preserved) by the anchor change.
 	if _, err := h.DB.Exec(`UPDATE quotas SET quota_token_week_used = 7 WHERE user_id = ?`, id); err != nil {
 		t.Fatalf("seed weekly used: %v", err)
 	}
@@ -53,8 +53,8 @@ func TestAdminUpdateUser_WeekStartSetsAnchor(t *testing.T) {
 	if q.WeekStart != anchor {
 		t.Fatalf("stored WeekStart = %q, want %q", q.WeekStart, anchor)
 	}
-	if q.QuotaTokenWeekUsed != 7 {
-		t.Fatalf("expected weekly used PRESERVED (7), got %d (anchor change must not zero usage)", q.QuotaTokenWeekUsed)
+	if q.QuotaTokenWeekUsed != 0 {
+		t.Fatalf("expected weekly used RESET to 0 on anchor change, got %d (anchor change must zero usage)", q.QuotaTokenWeekUsed)
 	}
 }
 

@@ -137,12 +137,14 @@ func AlignedCycleStartUTC(weekStart, now time.Time) time.Time {
 
 // SetQuotaWeekStart writes the fixed phase anchor week_start (RFC3339 UTC; ""
 // means clear → use now). It re-anchors week_cycle_start to the cycle containing
-// now so the 7-day phase shifts, but it does NOT touch quota_token_week_used:
-// the in-progress weekly usage carries over and is naturally reset to 0 only
-// when the new cycle boundary is crossed (see AtomicDeductQuota's
-// CASE WHEN week_cycle_start <> newCycle). Clearing usage on every anchor change
-// was a hidden side-effect that surprised admins; the cycle boundary is the
-// single source of truth for resets.
+// now AND resets quota_token_week_used to 0: re-anchoring the weekly bucket opens
+// a fresh 7-day window that must start at zero usage. Without this reset, the
+// previous cycle's accumulated Token usage bleeds into the new anchor's first
+// cycle and the self-service panel shows a non-zero percentage ("new week
+// already 20% used") the moment the anchor is moved — which is exactly the bug
+// reported on 2026-07-23 for user 苏卓雄. The natural 7-day rollover is still
+// handled independently by AtomicDeductQuota's lazy CASE WHEN week_cycle_start
+// <> newCycle reset, so this only affects explicit admin anchor changes.
 func SetQuotaWeekStart(db *sql.DB, userID int64, startRFC3339 string) error {
 	var t time.Time
 	var err error
@@ -158,7 +160,7 @@ func SetQuotaWeekStart(db *sql.DB, userID int64, startRFC3339 string) error {
 	cycleStart := AlignedCycleStartUTC(t, time.Now().UTC())
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err = db.Exec(
-		`UPDATE quotas SET week_start = ?, week_cycle_start = ?, updated_at = ? WHERE user_id = ?`,
+		`UPDATE quotas SET week_start = ?, week_cycle_start = ?, quota_token_week_used = 0, updated_at = ? WHERE user_id = ?`,
 		t.Format(time.RFC3339), cycleStart.Format(time.RFC3339), now, userID,
 	)
 	if err != nil {
