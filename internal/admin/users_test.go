@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"testing"
+	"time"
 
 	"llm_api_gateway/internal/db"
 	"llm_api_gateway/internal/models"
@@ -334,22 +335,24 @@ func TestAdminCreateUser_ZeroCountLimitAcceptedAsUnlimited(t *testing.T) {
 	}
 }
 
-// Regression (audit 2026-07-22): CreateUser must honor quota_week_start sent
-// from the create form. Previously the field was absent from createUserRequest,
-// so the configured weekly anchor was silently dropped and the user fell back
-// to week_start = now.
-func TestAdminCreateUser_WeekStartHonored(t *testing.T) {
+// Physical-separation regression (2026-07-24): CreateUser must NOT process a
+// quota_week_start sent from the create form. The weekly start anchor is now a
+// dedicated action (POST /api/users/{id}/week-start) so that base settings
+// (limits, status, …) and the quota-resetting week anchor can never be
+// conflated in one save. If CreateUser honored the field, saving unrelated base
+// settings at creation would silently open a new 7-day window / zero week usage.
+func TestAdminCreateUser_IgnoresWeekStart(t *testing.T) {
 	h := newAdminTestHandler(t)
 	ws := "2026-07-20T08:00:00.000Z"
 	body, _ := json.Marshal(map[string]any{
 		"username":         "create-ws",
-		"quota_week_start": ws,
+		"quota_week_start": ws, // unknown field — must be ignored by CreateUser
 	})
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/users", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.CreateUser(rec, req)
 	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected 201 for create with quota_week_start, got %d; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("expected 201 for create, got %d; body=%s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
 		ID int64 `json:"id"`
@@ -361,10 +364,13 @@ func TestAdminCreateUser_WeekStartHonored(t *testing.T) {
 	if err != nil || q == nil {
 		t.Fatalf("GetQuota: %v", err)
 	}
-	// SetQuotaWeekStart normalizes the value to RFC3339 (dropping the
-	// fractional seconds the frontend sends via toISOString), so compare the
-	// normalized form — this also proves the ".000Z" input is accepted.
-	if q.WeekStart != "2026-07-20T08:00:00Z" {
-		t.Fatalf("week_start should be %q (normalized from %q), got %q", "2026-07-20T08:00:00Z", ws, q.WeekStart)
+	// The sent anchor must be dropped — the create flow ignores it and the
+	// quota row keeps its default week_start (= now), NOT the requested value.
+	if q.WeekStart == "2026-07-20T08:00:00Z" {
+		t.Fatalf("CreateUser must ignore quota_week_start, but week_start became %q", q.WeekStart)
+	}
+	// Sanity: the stored anchor is a valid RFC3339 UTC value (the creation default).
+	if _, perr := time.Parse(time.RFC3339, q.WeekStart); perr != nil {
+		t.Fatalf("week_start should be RFC3339, got %q (%v)", q.WeekStart, perr)
 	}
 }

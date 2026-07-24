@@ -26,7 +26,6 @@ type createUserRequest struct {
 	QuotaTokenTotalLimit int      `json:"quota_token_total_limit"` // 0 = 不限制（默认）
 	QuotaToken5hLimit    int      `json:"quota_token_5h_limit"`    // 0 = 不限制（默认）
 	QuotaTokenWeekLimit  int      `json:"quota_token_week_limit"`  // 0 = 不限制（默认）
-	QuotaWeekStart       *string  `json:"quota_week_start"`        // nil = 不改(回退 now)；"" = 清除；RFC3339 UTC（与 update/create 表单一致）
 	ExpiresAt            string   `json:"expires_at"`
 	RouteMode            string   `json:"route_mode"`
 	FixedProvider        string   `json:"fixed_provider"`
@@ -42,7 +41,6 @@ type updateUserRequest struct {
 	QuotaTokenTotalLimit *int     `json:"quota_token_total_limit"` // nil = 不改；0 = 不限制
 	QuotaToken5hLimit    *int     `json:"quota_token_5h_limit"`    // nil = 不改；0 = 不限制
 	QuotaTokenWeekLimit  *int     `json:"quota_token_week_limit"`  // nil = 不改；0 = 不限制
-	QuotaWeekStart       *string  `json:"quota_week_start"`        // nil = 不改；"" = 清除(回退 now)；RFC3339 UTC
 	Status               *string  `json:"status"`
 	RegenerateKey        *bool    `json:"regenerate_key"`
 	RouteMode            *string  `json:"route_mode"`
@@ -193,15 +191,10 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Honor a configured weekly start anchor (fixed 7-day phase). The create
-	// form sends RFC3339 UTC (via toISOString); "" or omitted falls back to now
-	// inside SetQuotaWeekStart. This mirrors the edit path, which already sets it.
-	if req.QuotaWeekStart != nil {
-		if err := models.SetQuotaWeekStart(h.DB, user.ID, *req.QuotaWeekStart); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid quota_week_start (must be RFC3339): " + err.Error()})
-			return
-		}
-	}
+	// NOTE: the weekly start anchor is intentionally NOT settable at creation.
+	// It is configured via the dedicated POST /api/users/{id}/week-start action
+	// so that base settings (limits, status, …) and the quota-resetting week
+	// anchor can never be conflated in one save.
 
 	// Now regenerate the sub-key with the actual user ID as input
 	actualSubKey := auth.GenerateSubKey(h.SubKeySalt, user.ID)
@@ -388,51 +381,10 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Update weekly quota start anchor (fixed 7-day phase). Per product decision,
-	// writing a NEW anchor ALSO zeroes the current weekly Token usage
-	// (SetQuotaWeekStart). Re-submitting the SAME anchor (the edit form pre-fills
-	// it and would otherwise POST it on every save) is a no-op — SetQuotaWeekStart
-	// is idempotent, and here we also skip the audit entry so "edit concurrency"
-	// doesn't leave a spurious quota_week_start_set record or reset usage.
-	if req.QuotaWeekStart != nil {
-		sameAnchor := false
-		if cur, gerr := models.GetQuota(h.DB, userID); gerr == nil {
-			newAnchor := *req.QuotaWeekStart
-			if newAnchor == "" {
-				newAnchor = time.Now().UTC().Format(time.RFC3339)
-			}
-			if nt, perr := time.Parse(time.RFC3339, newAnchor); perr == nil {
-				if ct, cerr := time.Parse(time.RFC3339, cur.WeekStart); cerr == nil {
-					if nt.UTC().Format(time.RFC3339) == ct.UTC().Format(time.RFC3339) {
-						sameAnchor = true
-					}
-				}
-			}
-		}
-		if !sameAnchor {
-			if err := models.SetQuotaWeekStart(h.DB, userID, *req.QuotaWeekStart); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid quota_week_start (must be RFC3339): " + err.Error()})
-				return
-			}
-			if q, gerr := models.GetQuota(h.DB, userID); gerr == nil {
-				response["quota_week_start"] = q.WeekStart
-				response["quota_token_week_used"] = q.QuotaTokenWeekUsed
-			}
-			detail, _ := json.Marshal(map[string]any{"user_id": userID, "week_start": *req.QuotaWeekStart})
-			_, _ = h.DB.Exec(
-				`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)
-				 VALUES (?, ?, ?, ?, ?)`,
-				"quota_week_start_set", "user", strconv.FormatInt(userID, 10), string(detail), time.Now().Format(time.RFC3339),
-			)
-			response["quota_week_start_set"] = true
-		} else {
-			// identical anchor: reflect current state without touching usage
-			if q, gerr := models.GetQuota(h.DB, userID); gerr == nil {
-				response["quota_week_start"] = q.WeekStart
-				response["quota_token_week_used"] = q.QuotaTokenWeekUsed
-			}
-		}
-	}
+	// NOTE: the weekly start anchor is intentionally NOT handled by the general
+	// edit endpoint. It has its own dedicated action POST /api/users/{id}/week-start
+	// so that editing base settings (concurrency, status, limits, …) can never
+	// touch the anchor or reset the user's weekly Token usage.
 
 	// Update status
 	if req.Status != nil {
@@ -802,6 +754,69 @@ func (h *Handler) ResetUsage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": "用户 " + user.Username + " 的「" + scopeLabel + "」已重置",
 	})
+}
+
+// setUserWeekStartRequest is the JSON body for POST /api/users/{id}/week-start.
+type setUserWeekStartRequest struct {
+	WeekStart string `json:"week_start"` // RFC3339 UTC; "" = clear → fall back to now
+}
+
+// SetUserWeekStart handles POST /api/users/{id}/week-start — the ONLY edit-time
+// path that changes a user's fixed weekly quota start anchor. It is deliberately
+// separate from the general UpdateUser endpoint so that editing base settings
+// (concurrency, status, limits, …) can never touch the weekly anchor or reset
+// weekly usage. Changing the anchor to a new 7-day cycle zeroes the current
+// weekly Token usage (per SetQuotaWeekStart's semantics); re-submitting the same
+// anchor is a no-op (idempotent, no audit, no reset).
+func (h *Handler) SetUserWeekStart(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	userID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid user id"})
+		return
+	}
+	var req setUserWeekStartRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+		return
+	}
+	ws := req.WeekStart
+	if ws == "" {
+		ws = time.Now().UTC().Format(time.RFC3339)
+	} else if _, err := time.Parse(time.RFC3339, ws); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid week_start (must be RFC3339 UTC)"})
+		return
+	}
+	// Capture the anchor BEFORE the setter so we can tell whether the request
+	// actually moved it. Re-submitting the same anchor is a no-op (per
+	// SetQuotaWeekStart) and must NOT write an audit row or zero usage.
+	var beforeWS string
+	if b, berr := models.GetQuota(h.DB, userID); berr == nil && b != nil {
+		beforeWS = b.WeekStart
+	}
+	if err := models.SetQuotaWeekStart(h.DB, userID, ws); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "set week start: " + err.Error()})
+		return
+	}
+	q, gerr := models.GetQuota(h.DB, userID)
+	changed := true
+	if gerr == nil && q != nil {
+		changed = q.WeekStart != beforeWS
+	}
+	if changed {
+		detail, _ := json.Marshal(map[string]any{"user_id": userID, "week_start": ws})
+		_, _ = h.DB.Exec(
+			`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)
+			 VALUES (?, ?, ?, ?, ?)`,
+			"quota_week_start_set", "user", strconv.FormatInt(userID, 10), string(detail), time.Now().Format(time.RFC3339),
+		)
+	}
+	resp := map[string]any{"quota_week_start_set": true, "changed": changed}
+	if gerr == nil {
+		resp["quota_week_start"] = q.WeekStart
+		resp["quota_token_week_used"] = q.QuotaTokenWeekUsed
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // batchWeekStartRequest is the JSON body for POST /admin/api/users/batch-week-start.

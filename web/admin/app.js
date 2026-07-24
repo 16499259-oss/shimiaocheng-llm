@@ -820,6 +820,7 @@ async function loadUsers() {
                 <td><div class="btn-group">
                     <button class="btn btn-outline btn-sm" onclick="extendUser(${u.id},'${escapeAttr(u.username)}','${escapeAttr(u.expires_at || '')}')">🕐 延期</button>
                     <button class="btn btn-outline btn-sm" style="color:var(--color-warning,#e6a817);" onclick="openResetModal(${u.id},'${escapeAttr(u.username)}')">🔄 重置</button>
+                    <button class="btn btn-outline btn-sm" onclick="openWeekStartModalFromRow(${u.id}, '${escapeAttr(u.week_start || '')}')">🗓 周起始</button>
                     <button class="btn btn-outline btn-sm" onclick="shareUser('${escapeAttr(u.username)}',${u.id})">📋 分享</button>
                     <button class="btn btn-outline btn-sm" onclick="editUser(${u.id},'${escapeAttr(u.status)}',${u.quota_5h_limit},${u.quota_total_limit},'${escapeAttr(u.route_mode || 'auto')}','${escapeAttr(u.fixed_provider || '')}',${u.fixed_multiplier != null ? u.fixed_multiplier : 'null'},${u.max_body_size ? u.max_body_size : 1048576},${u.quota_token_total_limit || 0},${u.quota_token_total_used || 0},${u.max_concurrency != null ? u.max_concurrency : 10},${u.quota_token_5h_limit || 0},${u.quota_token_week_limit || 0},'${escapeAttr(u.week_start || '')}')">编辑</button>
                     <button class="btn btn-outline btn-sm" onclick="viewCalls(${u.id},'${escapeAttr(u.username)}')">记录</button>
@@ -883,6 +884,64 @@ document.getElementById('batch-week-start-form').addEventListener('submit', asyn
         loadUsers();
     } catch (err) { alert('批量设置失败：' + err.message); }
 });
+
+// ---- Single-user week start (physically separated from base settings) ----
+function openWeekStartModal() {
+    const id = document.getElementById('update-user-id').value;
+    if (!id) { alert('请先打开用户编辑'); return; }
+    window._weekStartUserId = parseInt(id, 10);
+    document.getElementById('week-start-username').textContent = '#' + id;
+    // Pre-fill with the current anchor (if any) so the admin can tweak it.
+    const cur = window._currentWeekStart || '';
+    const input = document.getElementById('week-start-input');
+    if (cur) {
+        const d = new Date(cur);
+        const parts = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(d);
+        input.value = parts.replace(/\//g, '-').replace(' ', 'T');
+    } else {
+        input.value = '';
+    }
+    showModal('week-start-modal');
+}
+
+// Row-action entry point: open the week-start dialog straight from the user
+// list without opening the base-settings edit modal first.
+function openWeekStartModalFromRow(id, weekStart) {
+    window._weekStartUserId = parseInt(id, 10);
+    window._currentWeekStart = weekStart || '';
+    document.getElementById('week-start-username').textContent = '#' + id;
+    const cur = weekStart || '';
+    const input = document.getElementById('week-start-input');
+    if (cur) {
+        const d = new Date(cur);
+        const parts = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(d);
+        input.value = parts.replace(/\//g, '-').replace(' ', 'T');
+    } else {
+        input.value = '';
+    }
+    showModal('week-start-modal');
+}
+
+document.getElementById('week-start-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const id = window._weekStartUserId;
+    if (!id) { alert('缺少用户 ID'); return; }
+    const ws = document.getElementById('week-start-input').value.trim();
+    // Interpreted as Asia/Shanghai local per product decision; sent as RFC3339 UTC.
+    const asShanghai = ws ? new Date(ws + ':00+08:00') : null;
+    if (ws && isNaN(asShanghai.getTime())) { alert('时间格式无效'); return; }
+    const body = { week_start: ws ? asShanghai.toISOString() : '' };
+    try {
+        const data = await apiFetch('api/users/' + id + '/week-start', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+        const used = (data.quota_token_week_used != null) ? data.quota_token_week_used : 0;
+        alert('周起始已更新（本周已用 Token：' + used + '）');
+        closeModal('week-start-modal');
+        loadUsers();
+    } catch (err) { alert('设置失败：' + err.message); }
+});
+
 
 async function createUser(e) {
     e.preventDefault();
@@ -948,14 +1007,9 @@ async function createUser(e) {
         const qWeek = parseInt(qWeekRaw);
         if (!isNaN(qWeek) && qWeek >= 0) body.quota_token_week_limit = qWeek;
     }
-    // Weekly quota start anchor (fixed 7-day phase). Interpreted as Asia/Shanghai
-    // local time per product decision; sent as RFC3339 UTC. Empty = use default
-    // (CreateUser sets week_start = now UTC; backend treats "" as fall back to now).
-    const nws = document.getElementById('new-quota-week-start').value.trim();
-    if (nws) {
-        const asShanghai = new Date(nws + ':00+08:00');
-        if (!isNaN(asShanghai.getTime())) body.quota_week_start = asShanghai.toISOString();
-    }
+    // NOTE: the weekly start anchor is NOT set at creation (the create form no
+    // longer has that field). It is configured later via the dedicated
+    // openWeekStartModal() action (POST /api/users/{id}/week-start).
 
     try {
         const data = await apiFetch('api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -983,22 +1037,13 @@ function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier,
     document.getElementById('update-quota-token-total').value = tokenLimit || 0;
     document.getElementById('update-quota-token-5h').value = token5hLimit || 0;
     document.getElementById('update-quota-token-week').value = tokenWeekLimit || 0;
-    // Populate the weekly quota start anchor (fixed 7-day phase). Stored UTC;
-    // display in server timezone Asia/Shanghai (UTC+8) per product decision.
-    const wsEl = document.getElementById('update-quota-week-start');
-    if (weekStartUTC) {
-        const d = new Date(weekStartUTC);
-        const parts = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(d);
-        // "2026/07/20 14:00:00" → "2026-07-20T14:00:00"
-        wsEl.value = parts.replace(/\//g, '-').replace(' ', 'T');
-    } else {
-        wsEl.value = '';
-    }
-    // Remember the pre-filled weekly-anchor value so we only POST it when the
-    // admin actually changes it. Without this, saving an UNRELATED field (e.g.
-    // concurrency) would re-POST the same anchor and (pre-fix) reset the weekly
-    // usage. See backend SetQuotaWeekStart idempotency guard (2026-07-24).
-    window._initialWeekStart = wsEl.value.trim();
+    // Display the current weekly quota start anchor (read-only). Changing it is a
+    // separate, dedicated action — see openWeekStartModal() — so editing base
+    // settings (concurrency, status, limits, …) can never touch the anchor or
+    // reset the user's weekly Token usage.
+    window._currentWeekStart = weekStartUTC || '';
+    document.getElementById('update-week-start-display').textContent =
+        weekStartUTC ? formatDateSH(weekStartUTC) : '—（未设置，按当前时间滚动）';
     document.getElementById('update-status').value = '';
     document.getElementById('update-regenerate-key').checked = false;
     document.getElementById('update-route-mode').value = '';
@@ -1058,21 +1103,10 @@ async function updateUser(e) {
         const uWeek = parseInt(uWeekRaw);
         if (!isNaN(uWeek) && uWeek >= 0) body.quota_token_week_limit = uWeek;
     }
-    // Weekly quota start anchor (fixed 7-day phase). Interpreted as Asia/Shanghai
-    // local time per product decision; sent as RFC3339 UTC. Empty = unchanged.
-    // Only POST it when the admin actually changed the field (dirty check): the
-    // value is pre-filled, so an unchanged field must NOT be re-submitted (that
-    // would re-trigger the backend anchor setter). A changed value — including
-    // clearing it to empty — is intentional and is sent through.
-    const ws = document.getElementById('update-quota-week-start').value.trim();
-    if (ws !== (window._initialWeekStart || '')) {
-        if (ws) {
-            const asShanghai = new Date(ws + ':00+08:00');
-            if (!isNaN(asShanghai.getTime())) body.quota_week_start = asShanghai.toISOString();
-        } else {
-            body.quota_week_start = ''; // explicit clear of the anchor
-        }
-    }
+    // NOTE: the weekly start anchor is intentionally NOT part of this general
+    // edit payload. It is changed only via the dedicated openWeekStartModal()
+    // action (POST /api/users/{id}/week-start), so saving base settings here can
+    // never reset the user's weekly Token usage.
     const st = document.getElementById('update-status').value;
     if (st) body.status = st;
     body.regenerate_key = document.getElementById('update-regenerate-key').checked;
