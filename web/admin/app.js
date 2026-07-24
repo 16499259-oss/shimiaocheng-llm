@@ -994,6 +994,11 @@ function editUser(id, status, q5, qt, routeMode, fixedProvider, fixedMultiplier,
     } else {
         wsEl.value = '';
     }
+    // Remember the pre-filled weekly-anchor value so we only POST it when the
+    // admin actually changes it. Without this, saving an UNRELATED field (e.g.
+    // concurrency) would re-POST the same anchor and (pre-fix) reset the weekly
+    // usage. See backend SetQuotaWeekStart idempotency guard (2026-07-24).
+    window._initialWeekStart = wsEl.value.trim();
     document.getElementById('update-status').value = '';
     document.getElementById('update-regenerate-key').checked = false;
     document.getElementById('update-route-mode').value = '';
@@ -1055,10 +1060,18 @@ async function updateUser(e) {
     }
     // Weekly quota start anchor (fixed 7-day phase). Interpreted as Asia/Shanghai
     // local time per product decision; sent as RFC3339 UTC. Empty = unchanged.
+    // Only POST it when the admin actually changed the field (dirty check): the
+    // value is pre-filled, so an unchanged field must NOT be re-submitted (that
+    // would re-trigger the backend anchor setter). A changed value — including
+    // clearing it to empty — is intentional and is sent through.
     const ws = document.getElementById('update-quota-week-start').value.trim();
-    if (ws) {
-        const asShanghai = new Date(ws + ':00+08:00');
-        if (!isNaN(asShanghai.getTime())) body.quota_week_start = asShanghai.toISOString();
+    if (ws !== (window._initialWeekStart || '')) {
+        if (ws) {
+            const asShanghai = new Date(ws + ':00+08:00');
+            if (!isNaN(asShanghai.getTime())) body.quota_week_start = asShanghai.toISOString();
+        } else {
+            body.quota_week_start = ''; // explicit clear of the anchor
+        }
     }
     const st = document.getElementById('update-status').value;
     if (st) body.status = st;

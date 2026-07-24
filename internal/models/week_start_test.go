@@ -50,6 +50,44 @@ func TestSetQuotaWeekStart(t *testing.T) {
 	}
 }
 
+// TestSetQuotaWeekStart_IdempotentSameAnchor verifies re-submitting the SAME
+// weekly anchor does NOT wipe the in-progress weekly usage. The generic admin
+// edit form pre-fills quota_week_start and re-POSTs it on every unrelated save
+// (e.g. changing concurrency); without idempotency that would zero
+// quota_token_week_used and drop the panel to 0% (2026-07-24 bug). Only moving
+// the anchor to a NEW cycle may reset usage.
+func TestSetQuotaWeekStart_IdempotentSameAnchor(t *testing.T) {
+	database := newModelsTestDB(t)
+	userID := seedTokenWindowUser(t, database)
+
+	anchor := time.Now().UTC().Add(-3 * 24 * time.Hour)
+	anchorStr := anchor.Format(time.RFC3339)
+
+	// First call sets the anchor and (new cycle) resets usage to 0.
+	if err := models.SetQuotaWeekStart(database.Conn, userID, anchorStr); err != nil {
+		t.Fatalf("SetQuotaWeekStart (1st): %v", err)
+	}
+	// Accumulate real usage in this cycle.
+	if err := models.AddTokenUsage(database.Conn, userID, 10); err != nil {
+		t.Fatalf("AddTokenUsage: %v", err)
+	}
+	if q, _ := models.GetQuota(database.Conn, userID); q.QuotaTokenWeekUsed != 10 {
+		t.Fatalf("week used after accumulate = %d, want 10", q.QuotaTokenWeekUsed)
+	}
+
+	// Re-submit the SAME anchor — must be a no-op on usage.
+	if err := models.SetQuotaWeekStart(database.Conn, userID, anchorStr); err != nil {
+		t.Fatalf("SetQuotaWeekStart (2nd, same anchor): %v", err)
+	}
+	q2, _ := models.GetQuota(database.Conn, userID)
+	if q2.QuotaTokenWeekUsed != 10 {
+		t.Fatalf("re-submitting same anchor reset usage to %d, want 10 (idempotency broken)", q2.QuotaTokenWeekUsed)
+	}
+	if q2.WeekStart != anchorStr {
+		t.Fatalf("WeekStart = %q, want %q", q2.WeekStart, anchorStr)
+	}
+}
+
 // TestSetQuotaWeekStart_InvalidRejected ensures a malformed RFC3339 string is
 // rejected rather than written.
 func TestSetQuotaWeekStart_InvalidRejected(t *testing.T) {
