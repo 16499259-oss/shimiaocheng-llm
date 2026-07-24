@@ -389,24 +389,49 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Update weekly quota start anchor (fixed 7-day phase). Per product decision,
-	// writing a new anchor ALSO zeroes the current weekly Token usage
-	// (SetQuotaWeekStart). "" means clear → fall back to now.
+	// writing a NEW anchor ALSO zeroes the current weekly Token usage
+	// (SetQuotaWeekStart). Re-submitting the SAME anchor (the edit form pre-fills
+	// it and would otherwise POST it on every save) is a no-op — SetQuotaWeekStart
+	// is idempotent, and here we also skip the audit entry so "edit concurrency"
+	// doesn't leave a spurious quota_week_start_set record or reset usage.
 	if req.QuotaWeekStart != nil {
-		if err := models.SetQuotaWeekStart(h.DB, userID, *req.QuotaWeekStart); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid quota_week_start (must be RFC3339): " + err.Error()})
-			return
+		sameAnchor := false
+		if cur, gerr := models.GetQuota(h.DB, userID); gerr == nil {
+			newAnchor := *req.QuotaWeekStart
+			if newAnchor == "" {
+				newAnchor = time.Now().UTC().Format(time.RFC3339)
+			}
+			if nt, perr := time.Parse(time.RFC3339, newAnchor); perr == nil {
+				if ct, cerr := time.Parse(time.RFC3339, cur.WeekStart); cerr == nil {
+					if nt.UTC().Format(time.RFC3339) == ct.UTC().Format(time.RFC3339) {
+						sameAnchor = true
+					}
+				}
+			}
 		}
-		if q, gerr := models.GetQuota(h.DB, userID); gerr == nil {
-			response["quota_week_start"] = q.WeekStart
-			response["quota_token_week_used"] = q.QuotaTokenWeekUsed
+		if !sameAnchor {
+			if err := models.SetQuotaWeekStart(h.DB, userID, *req.QuotaWeekStart); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid quota_week_start (must be RFC3339): " + err.Error()})
+				return
+			}
+			if q, gerr := models.GetQuota(h.DB, userID); gerr == nil {
+				response["quota_week_start"] = q.WeekStart
+				response["quota_token_week_used"] = q.QuotaTokenWeekUsed
+			}
+			detail, _ := json.Marshal(map[string]any{"user_id": userID, "week_start": *req.QuotaWeekStart})
+			_, _ = h.DB.Exec(
+				`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)
+				 VALUES (?, ?, ?, ?, ?)`,
+				"quota_week_start_set", "user", strconv.FormatInt(userID, 10), string(detail), time.Now().Format(time.RFC3339),
+			)
+			response["quota_week_start_set"] = true
+		} else {
+			// identical anchor: reflect current state without touching usage
+			if q, gerr := models.GetQuota(h.DB, userID); gerr == nil {
+				response["quota_week_start"] = q.WeekStart
+				response["quota_token_week_used"] = q.QuotaTokenWeekUsed
+			}
 		}
-		detail, _ := json.Marshal(map[string]any{"user_id": userID, "week_start": *req.QuotaWeekStart})
-		_, _ = h.DB.Exec(
-			`INSERT INTO audit_logs (action, target_type, target_id, detail, created_at)
-			 VALUES (?, ?, ?, ?, ?)`,
-			"quota_week_start_set", "user", strconv.FormatInt(userID, 10), string(detail), time.Now().Format(time.RFC3339),
-		)
-		response["quota_week_start_set"] = true
 	}
 
 	// Update status

@@ -159,6 +159,39 @@ func SetQuotaWeekStart(db *sql.DB, userID int64, startRFC3339 string) error {
 	t = t.UTC()
 	cycleStart := AlignedCycleStartUTC(t, time.Now().UTC())
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Idempotency guard (2026-07-24): re-submitting the SAME weekly anchor must
+	// NOT wipe the in-progress weekly Token usage. The generic admin "edit user"
+	// form pre-fills quota_week_start and re-POSTs it on every save, so editing
+	// an unrelated field (concurrency, status, route, …) would otherwise call
+	// this setter again and zero quota_token_week_used — dropping the self-service
+	// panel to 0% on any unrelated change. We only reset usage when the anchor
+	// actually moves the current 7-day cycle to a NEW one:
+	//   * new cycle == current week_cycle_start → never reset usage. Re-anchor
+	//     week_start only when it differs (harmless for the live cycle); if the
+	//     anchor is identical we do nothing at all.
+	//   * new cycle != current week_cycle_start → open a fresh window at 0.
+	var curWeekStart, curCycleStart string
+	if err := db.QueryRow(
+		`SELECT COALESCE(week_start,''), COALESCE(week_cycle_start,'') FROM quotas WHERE user_id = ?`,
+		userID,
+	).Scan(&curWeekStart, &curCycleStart); err == nil {
+		newCycle := cycleStart.Format(time.RFC3339)
+		if newCycle == curCycleStart {
+			// Same 7-day cycle → preserve the accumulated usage.
+			if t.Format(time.RFC3339) == curWeekStart {
+				return nil // truly identical anchor: pure no-op
+			}
+			if _, e := db.Exec(
+				`UPDATE quotas SET week_start = ?, updated_at = ? WHERE user_id = ?`,
+				t.Format(time.RFC3339), now, userID,
+			); e != nil {
+				return fmt.Errorf("set quota week start: %w", e)
+			}
+			return nil
+		}
+	}
+
 	_, err = db.Exec(
 		`UPDATE quotas SET week_start = ?, week_cycle_start = ?, quota_token_week_used = 0, updated_at = ? WHERE user_id = ?`,
 		t.Format(time.RFC3339), cycleStart.Format(time.RFC3339), now, userID,
